@@ -1,0 +1,1105 @@
+//@version=6
+indicator("MMM PRO PLUS @MaxMaserati", "MMM PRO PLUS", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=500)
+
+// Standalone (Nov 2 2026): all test tables, statistics and the points test removed.
+// New: color NBC candles (white by default) · HTF SuperTrend bias (15m by default) with line, badge, arrow filter and alerts.
+
+// ─── 0. On / Off ───
+grp_on       = "0. On / Off"
+show_st      = input.bool(true,  "SuperTrend Line", group=grp_on)
+show_vwap    = input.bool(true,  "VWAP", group=grp_on)
+show_struct  = input.bool(true,  "Structure Lines (T# / P# / R#)", group=grp_on, tooltip="BuPO4 / BePO4 T# = trend origin.\nBuP# / BeP# = pullback level (bull trend pullback = BeP#, bear trend pullback = BuP#).\nBuR# / BeR# = resumption level.\nLevels at the same price merge into one line, labels joined with &.")
+show_boxes   = input.bool(true,  "Best Entry Zones", group=grp_on, tooltip="The zone between the SuperTrend flip line and the wick of each level. A close inside the zone is only a test. A close beyond the wick side is a real break.")
+show_stems   = input.bool(true,  "Connect Levels To Candle Body", group=grp_on, tooltip="A small dotted stem from the candle body to the level, so levels never float when the SuperTrend line is off.")
+show_gate    = input.bool(true,  "Pullback Gate (BuPG# / BePG#) and TRAP", group=grp_on, tooltip="Pullback Gate = the OPEN of the first pullback candle. Bull trend = BePG#, bear trend = BuPG#.\nLive gate: extends while the pullback is on. Deleted when the pullback ends (LD / SD or CDS / CDL).\nClose back across the gate = the pullback push failed: it becomes a RECLAIMED line (TRAP when the pullback flip was STRONG 3/4+). That line stops at the reclaim candle.\nRECLAIMED / TRAP is deleted when price closes back through it (BePG: close below, BuPG: close above).")
+show_gmc_ln  = input.bool(true,  "Bu GMC / Be GMC Lines", group=grp_on, tooltip="The last bull GMC and the last bear GMC, at the open of the GMC candle. Each line is deleted when price closes through it.")
+show_stall   = input.bool(true,  "Stall Zones", group=grp_on, tooltip="EXIT POINT: every candle that makes a new SuperTrend stair moves it. Bear = TOP of the Stair Candle body, bull = BOTTOM of the body.\nClose beyond it against the trend = EXIT: a box is drawn from the body line to the Stair Candle low (bear) / high (bull). The box extends until the flip.\nClose beyond the Stair Candle low (bear) / high (bull), or a new stair = the trend is continuing.\nA broken box followed by a FLIP is kept (one bear, one bull). Its low (bear) / high (bull) line extends to the current candle.\nKept box: replaced by a newer flip box of the same side, deleted on a close below its low (bear) / above its high (bull).\nA broken box with no flip is deleted on a close above its high (bull) / below its low (bear).\nA box and its labels are deleted together.")
+show_ztxt    = input.bool(true,  "Stall Zone Info Text", group=grp_on, tooltip="Gray text: STALL bars | time | REJ.\nBear box (broke UP): text below the box low.\nBull box (broke DOWN): text above the box high.")
+show_rej     = input.bool(true,  "Rejection Marks (REJ#)", group=grp_on, tooltip="A candle touches the EXIT POINT and closes back on the trend side. The defense held. Deleted with its zone.")
+show_exits   = input.bool(true,  "EXIT Labels", group=grp_on, tooltip="EXIT SHORT: close above the bear EXIT POINT.\nEXIT LONG: close below the bull EXIT POINT.\nAfter the result is known the label shows a check mark (reversed, exit was right) or a cross (trend continued).\nDeleted with its box.")
+show_reent   = input.bool(true,  "Re-Entry 50% Line", group=grp_on, tooltip="After an EXIT, a dotted line at 50% between the stall box far edge (bull box high / bear box low) and the SuperTrend line.\nBull box: below the line = discount long zone. Bear box: above the line = premium short zone.\nDeleted when the box breaks or the SuperTrend flips.")
+show_marks   = input.bool(true,  "CDL / CDS / LD / SD Markers", group=grp_on, tooltip="Each marker belongs to the T# it created and is deleted together with that T#.")
+show_hist    = input.bool(false, "History: Broken T# Levels", group=grp_on, tooltip="OFF: a broken T# is deleted together with its marker.\nON: every broken T# stays as a thin faded line (no label) from where it was born to the candle that ended it.")
+show_hist_pr = input.bool(false, "History: Replaced P# / R# Levels", group=grp_on)
+hist_boxes   = input.bool(false, "History Zones", group=grp_on)
+color_bars   = input.bool(true,  "Candle Coloring", group=grp_on, tooltip="Bull trend = bull color. Bear trend = bear color. Pullback = yellow (lighter once price is back across the Pullback Gate). Trend candles lighter on the wrong side of VWAP. Closed candles only.")
+gmc_bars     = input.bool(true,  "Bright GMC Candles", group=grp_on, tooltip="GMC candle 2 and candle 3 turn bright when the GMC made a break (CDL, CDS, LD, SD, SuperTrend flip, gate cross, or an opposite GMC line).")
+show_sigs    = input.bool(false, "BULL / BEAR Arrows", group=grp_on, tooltip="First body close after structure, SuperTrend and VWAP all line up. Never during a Stall.\nWith the HTF bias filter ON (group 5): only in the direction of the higher-timeframe SuperTrend.")
+
+// ─── 1. Colors ───
+grp_col      = "1. Colors"
+col_bull     = input.color(#00c853, "Bull", inline="c1", group=grp_col)
+col_bear     = input.color(#c2185b, "Bear", inline="c1", group=grp_col)
+col_pb       = input.color(#ffd600, "Pullback", inline="c1", group=grp_col)
+col_gmc_bull = input.color(#00ff55, "Bull GMC", inline="c2", group=grp_col)
+col_gmc_bear = input.color(#ff1744, "Bear GMC", inline="c2", group=grp_col)
+col_stall    = input.color(#9e9e9e, "Stall", inline="c2", group=grp_col)
+vw_color_on  = input.bool(true, "Color VWAP By Urgency", group=grp_col, tooltip="Balance color = price is in balance around VWAP. Green / Red = price left VWAP WITH urgency (volume + delta + CVD all agree).")
+vw_bull_col  = input.color(#00c853, "VWAP Above", inline="c3", group=grp_col)
+vw_bear_col  = input.color(#c2185b, "VWAP Below", inline="c3", group=grp_col)
+vw_neut_col  = input.color(color.black, "VWAP Balance", inline="c3", group=grp_col)
+nbc_on       = input.bool(false, "Color NBC Candles", inline="c4", group=grp_col, tooltip="NBC = no body close: the candle did not close above the prior candle high or below its low (not a BuX / BeX).\nON: every NBC candle is painted this color (white by default). Bright GMC candles keep their GMC color.\nOn a white chart background, pick another color.")
+col_nbc      = input.color(color.white, "", inline="c4", group=grp_col)
+
+// ─── 2. Display ───
+grp_dsp      = "2. Display"
+lbl_prefix   = input.string("", "Label Prefix", group=grp_dsp, tooltip="Text put in front of every label, to tell this indicator apart from others on the same chart.")
+lbl_size_s   = input.string("Small", "Label Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_dsp)
+stall_txt_s  = input.string("Tiny", "Stall Info Text", options=["Tiny", "Small", "Normal", "Large"], inline="sz", group=grp_dsp)
+exit_lbl_s   = input.string("Tiny", "EXIT / REJ", options=["Tiny", "Small", "Normal", "Large"], inline="sz", group=grp_dsp)
+line_ext     = input.int(10, "Line Extension (Bars)", minval=0, maxval=200, group=grp_dsp)
+box_transp   = input.int(85, "Zone Transparency", minval=0, maxval=100, group=grp_dsp)
+max_hist     = input.int(50, "History Levels Kept", minval=10, maxval=150, group=grp_dsp, tooltip="TradingView allows 500 lines in total.")
+st_width     = input.int(1, "SuperTrend Width", minval=1, maxval=5, inline="w", group=grp_dsp)
+vw_width     = input.int(1, "VWAP Width", minval=1, maxval=5, inline="w", group=grp_dsp)
+
+// ─── 3. SuperTrend Flip ───
+grp_flip     = "3. SuperTrend Flip"
+flip_mode    = input.string("Any Flip", "Flip Mode", options=["Any Flip", "Body Close Only"], group=grp_flip, tooltip="Any Flip: the SuperTrend changes color on any close across the line (normal SuperTrend).\nBody Close Only: it changes color only when the flip candle is a body close. Bull flip needs a BuX (close above the prior candle high, or open above it without closing below the prior low). Bear flip needs a BeX.\nA close across the line without a body close is ignored: the line keeps its color and does not jump.")
+
+// ─── 4. Stall Exit Rule ───
+grp_exit     = "4. Stall Exit Rule"
+exit_rule    = input.string("Any Close", "EXIT Candle Must Be", options=["Any Close", "Body Close Only"], group=grp_exit, tooltip="Any Close: any candle that closes beyond the EXIT POINT prints the EXIT.\nBody Close Only: EXIT SHORT needs a bullish body close (BuX: close above the prior candle high, or open above it without closing below the prior low). EXIT LONG needs a bearish body close (BeX). Any other close beyond the EXIT POINT is ignored and the zone stays live.\n\nEXIT label result: after an EXIT, the first close outside the EXIT candle adds a check mark or a cross.\nEXIT SHORT: close above its high = REVERSED (exit right), close below its low = CONTINUED (trend came back).\nEXIT LONG: close below its low = REVERSED, close above its high = CONTINUED.")
+
+// ─── 5. HTF SuperTrend Bias ───
+grp_htf      = "5. HTF SuperTrend Bias"
+htf_on       = input.bool(true, "HTF SuperTrend Bias", group=grp_htf, tooltip="The standard SuperTrend (2 x 14) of a HIGHER timeframe, shown on this chart.\nIt uses the last CLOSED higher-timeframe candle, so it never repaints: it updates when that candle closes.\nBias BULL = the HTF SuperTrend is green. BEAR = red.")
+htf_tf       = input.timeframe("15", "Timeframe", group=grp_htf, tooltip="Pick a timeframe HIGHER than the chart. Default 15 minutes.\nExample: 1m / 2m / 5m chart + 15m bias. 15m chart + 1h bias.\nIf it is not higher than the chart, the bias is switched off and the badge says so.")
+htf_line     = input.bool(true, "HTF SuperTrend Line", inline="hl", group=grp_htf)
+htf_width    = input.int(2, "Width", minval=1, maxval=5, inline="hl", group=grp_htf)
+htf_badge    = input.bool(true, "Bias Badge", inline="hb", group=grp_htf)
+htf_pos_s    = input.string("Top Right", "", options=["Top Right", "Top Center", "Top Left", "Middle Right", "Middle Left", "Bottom Right", "Bottom Center", "Bottom Left"], inline="hb", group=grp_htf)
+htf_size_s   = input.string("Small", "Badge Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_htf)
+htf_arrows   = input.bool(true, "BULL / BEAR Arrows Only With The HTF Bias", group=grp_htf, tooltip="ON: a BULL arrow needs the HTF SuperTrend green, a BEAR arrow needs it red. Turn the arrows on in group 0.")
+htf_fade     = input.bool(false, "Fade Trend Candles Against The HTF Bias", group=grp_htf, tooltip="ON: bull trend candles while the HTF bias is BEAR (and bear trend candles while it is BULL) are drawn lighter.")
+
+// ─── Locked Engine ───
+int    ST_LEN     = 14
+float  ST_MULT    = 2.0
+float  DISP_ATR   = 0.5
+int    VOL_LEN    = 20
+float  VOL_MULT   = 1.5
+string DELTA_LTF  = "1"
+float  VW_BAND    = 0.25
+int    CVD_LOOK   = 5
+float  GMC_MIN    = 0.1
+int    MAX_T      = 5
+int    MAX_TRAP   = 10
+int    MAX_TEST   = 50
+int    STALL_BARS = 3
+float  REJ_ATR    = 0.1
+int    EXIT_EXT   = 3
+color  PANEL_BG   = #000000
+color  PANEL_TXT  = color.white
+
+bool exitBcOnly = exit_rule == "Body Close Only"
+bool stBcOnly   = flip_mode == "Body Close Only"
+
+// ─── Types ───
+// All positions are candle TIMES. cTxt / cT / cPrice / cBrkT hold the
+// CDS / CDL / LD# / SD# marker that created a T# level; it is deleted with it.
+type Lvl
+    float  outer
+    float  inner
+    int    t
+    float  anchor
+    int    side
+    int    tier
+    int    score
+    int    endT   = na
+    string kind   = "T"
+    string cTxt   = ""
+    int    cT     = na
+    float  cPrice = na
+    int    cBrkT  = na
+
+// Reclaimed Pullback Gate. side = the trend it belongs to (1 bull, -1 bear).
+type Gate
+    float price
+    int   t
+    int   side
+    int   tier
+    int   score
+    int   hitT
+
+// Stall zone. op = EXIT POINT (Stair Candle body line), ext = its low (bear) / high (bull).
+// state 0 = live, 1 = broke. tFlip = flip time once kept. lbls = its EXIT / REJ labels.
+type Stall
+    int          t1
+    int          t2
+    float        op
+    float        ext
+    int          side
+    int          bars
+    int          rej
+    int          state
+    array<label> lbls
+    int          tFlip
+
+// EXIT label. side -1 = EXIT SHORT (bear stall broke), 1 = EXIT LONG. hi / lo = the EXIT candle range.
+// The first close outside that range adds ✓ (reversed: the exit was right) or ✕ (the trend came back).
+type ExitTest
+    int    side
+    float  hi
+    float  lo
+    label  lbl
+    string txt
+
+// After EXIT. side 1 = bull stall (EXIT LONG), -1 = bear stall (EXIT SHORT).
+// ext = box far edge (bull high / bear low). mid = RE-ENTRY 50% between ext and the SuperTrend line.
+// Live until the box breaks (close beyond ext) or the SuperTrend flips. stRej = the ST rejection alert already fired.
+type PxTest
+    int   side
+    float ext
+    float mid
+    int   t0
+    bool  stRej = false
+// Right-edge group: levels at one price share one line, labels joined with " & ".
+type EdgeLvl
+    float         price
+    array<string> labels
+    color         col
+    int           width
+    string        style
+    int           bT
+    int           eT
+    int           prio
+    string        sz
+
+// ─── Helpers ───
+f_size(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : size.large
+
+f_pos(string p) =>
+    p == "Top Right" ? position.top_right : p == "Top Center" ? position.top_center : p == "Top Left" ? position.top_left : p == "Middle Right" ? position.middle_right : p == "Middle Center" ? position.middle_center : p == "Middle Left" ? position.middle_left : p == "Bottom Right" ? position.bottom_right : p == "Bottom Center" ? position.bottom_center : position.bottom_left
+
+f_eps() => math.max(syminfo.mintick * 0.51, 1e-5)
+
+f_dur(int ms) =>
+    int secs = int(ms / 1000)
+    int mins = int(secs / 60)
+    string out = ""
+    if secs < 60
+        out := str.tostring(secs) + "s"
+    else if mins < 60
+        out := str.tostring(mins) + "m" + (secs % 60 > 0 ? " " + str.tostring(secs % 60) + "s" : "")
+    else if mins < 1440
+        out := str.tostring(int(mins / 60)) + "h " + str.tostring(mins % 60) + "m"
+    else
+        out := str.tostring(int(mins / 1440)) + "d " + str.tostring(int((mins % 1440) / 60)) + "h"
+    out
+
+f_kill(Stall z) =>
+    if not na(z)
+        while z.lbls.size() > 0
+            label.delete(z.lbls.pop())
+
+string lbl_sz   = f_size(lbl_size_s)
+string stall_sz = f_size(stall_txt_s)
+string exit_sz  = f_size(exit_lbl_s)
+int    barMs    = timeframe.in_seconds() * 1000
+
+// ─── Core Series ───
+float atr = ta.atr(ST_LEN)
+
+bool isBuX = close > high[1] or (open > high[1] and not (close < low[1]))
+bool isBeX = close < low[1]  or (open < low[1]  and not (close > high[1]))
+
+// SuperTrend: same math as ta.supertrend. Body Close Only: a flip needs a BuX / BeX.
+// stDir 1 = bear (upper band), -1 = bull (lower band).
+var float stUb  = na
+var float stLb  = na
+var int   stDir = 1
+float pUb   = stUb
+float pLb   = stLb
+int   pDir  = stDir
+float rawUb = hl2 + ST_MULT * atr
+float rawLb = hl2 - ST_MULT * atr
+float nUb   = na(pUb) or rawUb < pUb or (close[1] > pUb and pDir == -1) ? rawUb : pUb
+float nLb   = na(pLb) or rawLb > pLb or (close[1] < pLb and pDir == 1) ? rawLb : pLb
+int   nDir  = pDir
+if na(atr[1])
+    nDir := 1
+else if pDir == 1
+    nDir := close > nUb and (not stBcOnly or isBuX) ? -1 : 1
+else
+    nDir := close < nLb and (not stBcOnly or isBeX) ? 1 : -1
+stUb  := nUb
+stLb  := nLb
+stDir := nDir
+float st_raw  = stDir == -1 ? stLb : stUb
+int   dir_raw = stDir
+float stPrev  = st_raw[1]
+
+bool  stUp     = dir_raw < 0
+float stShow   = barstate.isconfirmed ? st_raw : st_raw[1]
+bool  stUpShow = barstate.isconfirmed ? stUp : stUp[1]
+bool  fUp      = barstate.isconfirmed and dir_raw < 0 and dir_raw[1] > 0
+bool  fDown    = barstate.isconfirmed and dir_raw > 0 and dir_raw[1] < 0
+
+float gmcMin    = nz(atr, 0.0) * GMC_MIN
+bool  buGmcConf = barstate.isconfirmed and (low - high[2]) >= gmcMin and low > high[2]
+bool  beGmcConf = barstate.isconfirmed and (low[2] - high) >= gmcMin and high < low[2]
+
+// ─── Volume, Delta, VWAP Urgency ───
+float volAvg = ta.sma(volume, VOL_LEN)
+float relVol = volAvg > 0 ? volume / volAvg : 0.0
+
+string       ltf_use   = timeframe.in_seconds(DELTA_LTF) < timeframe.in_seconds() ? DELTA_LTF : timeframe.period
+array<float> ltfDeltas = request.security_lower_tf(syminfo.tickerid, ltf_use, close > open ? volume : close < open ? -volume : 0.0)
+float barDelta = ltfDeltas.size() > 0 ? ltfDeltas.sum() : 0.0
+
+bool newDay = timeframe.change("D")
+var float cvd = 0.0
+if newDay
+    cvd := barDelta
+else
+    cvd += barDelta
+bool cvdUp = cvd > cvd[CVD_LOOK]
+bool cvdDn = cvd < cvd[CVD_LOOK]
+
+float vwap_val = ta.vwap
+bool  urgBull  = relVol >= VOL_MULT and barDelta > 0 and cvdUp
+bool  urgBear  = relVol >= VOL_MULT and barDelta < 0 and cvdDn
+float vwBand   = nz(atr, 0.0) * VW_BAND
+bool  vwInBand = math.abs(close - vwap_val) <= vwBand
+var int vwState = 0
+if barstate.isconfirmed
+    if vwInBand
+        vwState := 0
+    else if close > vwap_val
+        vwState := urgBull ? 1 : vwState == 1 ? 1 : 0
+    else
+        vwState := urgBear ? -1 : vwState == -1 ? -1 : 0
+color vwCol = not vw_color_on ? color.blue : vwState == 1 ? vw_bull_col : vwState == -1 ? vw_bear_col : vw_neut_col
+
+// ─── Structure Helpers ───
+f_trig(Lvl l) =>
+    float r = na
+    if not na(l)
+        r := l.outer
+    r
+
+// Flip strength 0-4: body close, ATR displacement, relative volume, delta.
+f_score(int dir, float lvl) =>
+    bool bc   = dir == 1 ? isBuX : isBeX
+    bool disp = not na(lvl) and (dir == 1 ? close - lvl : lvl - close) >= DISP_ATR * atr
+    bool vol  = relVol >= VOL_MULT
+    bool dlt  = dir == 1 ? barDelta > 0 : barDelta < 0
+    (bc ? 1 : 0) + (disp ? 1 : 0) + (vol ? 1 : 0) + (dlt ? 1 : 0)
+
+f_tag(int s) =>
+    s >= 3 ? "STRONG" : s == 2 ? "MID" : s >= 0 ? "WEAK" : ""
+
+f_fallback(float p, int t, int side) =>
+    Lvl.new(p, p, t, na, side, 0, -1)
+
+// Bu / Be prefix of a level by its own direction.
+f_bp(int side) =>
+    side == 1 ? "Bu" : "Be"
+
+int flipScoreDn = f_score(-1, st_raw[1])
+int flipScoreUp = f_score(1, st_raw[1])
+
+// ─── Structure State ───
+// Bull trend: T# = bottom origin. Red flip = BeP# (pullback top) and BePG# = its
+// open. Green flip after BeP# = BuR#. A close below T# or R# = CDS: the last top
+// becomes BePO4 T1. A close above BeP# = LD: the last bottom becomes the next T#.
+// Bear trend is the mirror.
+var array<Lvl>    tLvls     = array.new<Lvl>()
+var array<Lvl>    hLvls     = array.new<Lvl>()
+var array<Gate>   trapGates = array.new<Gate>()
+var int   fsTrend = 0
+var int   fsTier  = 0
+var Lvl   fsT     = na
+var Lvl   fsP     = na
+var Lvl   fsR     = na
+var float segHi   = na
+var int   segHiT  = na
+var float segHiB  = na
+var float segLo   = na
+var int   segLoT  = na
+var float segLoB  = na
+var float pbExt   = na
+var int   pbExtT  = na
+var float trExt   = na
+var int   trExtT  = na
+var float gatePx    = na
+var int   gateT     = na
+var int   gateScore = -1
+var int   gateTier  = 0
+var bool  gateHit   = false
+var int   lastFlipDir   = 0
+var int   lastFlipScore = -1
+
+f_retire(Lvl l, string kind) =>
+    if not na(l) and not na(l.outer)
+        Lvl h = l.copy()
+        h.endT := time
+        h.kind := kind
+        h.cTxt := ""
+        hLvls.push(h)
+        while hLvls.size() > max_hist
+            hLvls.shift()
+
+bool evCdl    = false
+bool evCds    = false
+bool evLd     = false
+bool evSd     = false
+bool evGateUp = false
+bool evGateDn = false
+bool evTrap   = false
+
+if barstate.isconfirmed
+    float bodyHi = math.max(open, close)
+    float bodyLo = math.min(open, close)
+
+    float endHi  = na
+    int   endHiT = na
+    float endHiB = na
+    float endLo  = na
+    int   endLoT = na
+    float endLoB = na
+    if fDown
+        bool newHi = na(segHi) or high > segHi
+        endHi  := newHi ? high : segHi
+        endHiT := newHi ? time : segHiT
+        endHiB := newHi ? bodyHi : segHiB
+    if fUp
+        bool newLo = na(segLo) or low < segLo
+        endLo  := newLo ? low : segLo
+        endLoT := newLo ? time : segLoT
+        endLoB := newLo ? bodyLo : segLoB
+    if fDown or fUp or na(segHi)
+        segHi  := high
+        segHiT := time
+        segHiB := bodyHi
+        segLo  := low
+        segLoT := time
+        segLoB := bodyLo
+    else
+        if high > segHi
+            segHi  := high
+            segHiT := time
+            segHiB := bodyHi
+        if low < segLo
+            segLo  := low
+            segLoT := time
+            segLoB := bodyLo
+
+    Lvl flipTopL = na
+    Lvl flipBotL = na
+    if fDown and not na(st_raw) and not na(endHi)
+        flipTopL      := Lvl.new(math.max(st_raw, endHi), math.min(st_raw, endHi), endHiT, endHiB, -1, 0, flipScoreDn)
+        lastFlipDir   := -1
+        lastFlipScore := flipScoreDn
+    if fUp and not na(st_raw) and not na(endLo)
+        flipBotL      := Lvl.new(math.min(st_raw, endLo), math.max(st_raw, endLo), endLoT, endLoB, 1, 0, flipScoreUp)
+        lastFlipDir   := 1
+        lastFlipScore := flipScoreUp
+
+    if fsTrend == 1
+        if na(trExt) or high > trExt
+            trExt  := high
+            trExtT := time
+        if not na(fsP) and (na(pbExt) or low < pbExt)
+            pbExt  := low
+            pbExtT := time
+    else if fsTrend == -1
+        if na(trExt) or low < trExt
+            trExt  := low
+            trExtT := time
+        if not na(fsP) and (na(pbExt) or high > pbExt)
+            pbExt  := high
+            pbExtT := time
+
+    // ─── Pullback Gate ───
+    if not na(gatePx) and not gateHit
+        if fsTrend == 1 and close > gatePx
+            gateHit  := true
+            evGateUp := true
+            evTrap   := gateScore >= 3
+            trapGates.push(Gate.new(gatePx, gateT, 1, gateTier, gateScore, time))
+        else if fsTrend == -1 and close < gatePx
+            gateHit  := true
+            evGateDn := true
+            evTrap   := gateScore >= 3
+            trapGates.push(Gate.new(gatePx, gateT, -1, gateTier, gateScore, time))
+
+    // RECLAIMED / TRAP: deleted on a close back through it.
+    if trapGates.size() > 0
+        for i = trapGates.size() - 1 to 0
+            Gate g = trapGates.get(i)
+            if (g.side == 1 and close < g.price - f_eps()) or (g.side == -1 and close > g.price + f_eps())
+                trapGates.remove(i)
+    while trapGates.size() > MAX_TRAP
+        trapGates.shift()
+
+    // ─── Resolution: Reversal > Continuation ───
+    if fsTrend == 1 and not na(fsT)
+        float trT  = f_trig(fsT)
+        float trR  = f_trig(fsR)
+        bool  rHi  = not na(trR) and trR > trT
+        float flr  = rHi ? trR : trT
+        Lvl   flrL = rHi ? fsR : fsT
+        float trP  = f_trig(fsP)
+        if close < flr
+            Lvl src = not na(flipTopL) ? flipTopL : fsP
+            Lvl nt  = na
+            if not na(src)
+                nt := src.copy()
+            else
+                nt := f_fallback(trExt, trExtT, -1)
+            nt.tier   := 1
+            nt.kind   := "T"
+            nt.cTxt   := "CDS" + (close > vwap_val ? "?" : "")
+            nt.cT     := flrL.t
+            nt.cPrice := flr
+            nt.cBrkT  := time
+            fsTrend  := -1
+            fsTier   := 1
+            fsT      := nt
+            tLvls.push(nt)
+            fsP      := na
+            fsR      := na
+            pbExt    := na
+            pbExtT   := na
+            trExt    := low
+            trExtT   := time
+            gatePx   := na
+            gateHit  := false
+            flipTopL := na
+            evCds    := true
+        else if not na(trP) and close > trP
+            Lvl src = not na(flipBotL) ? flipBotL : fsR
+            Lvl nt  = na
+            if not na(src)
+                nt := src.copy()
+            else
+                nt := f_fallback(pbExt, pbExtT, 1)
+            nt.tier   := fsTier + 1
+            nt.kind   := "T"
+            nt.cTxt   := "LD" + str.tostring(fsTier)
+            nt.cT     := fsP.t
+            nt.cPrice := trP
+            nt.cBrkT  := time
+            fsTier   += 1
+            fsT      := nt
+            tLvls.push(nt)
+            fsP      := na
+            fsR      := na
+            pbExt    := na
+            pbExtT   := na
+            trExt    := high
+            trExtT   := time
+            gatePx   := na
+            gateHit  := false
+            flipBotL := na
+            evLd     := true
+    else if fsTrend == -1 and not na(fsT)
+        float trT  = f_trig(fsT)
+        float trR  = f_trig(fsR)
+        bool  rLo  = not na(trR) and trR < trT
+        float clg  = rLo ? trR : trT
+        Lvl   clgL = rLo ? fsR : fsT
+        float trP  = f_trig(fsP)
+        if close > clg
+            Lvl src = not na(flipBotL) ? flipBotL : fsP
+            Lvl nt  = na
+            if not na(src)
+                nt := src.copy()
+            else
+                nt := f_fallback(trExt, trExtT, 1)
+            nt.tier   := 1
+            nt.kind   := "T"
+            nt.cTxt   := "CDL" + (close < vwap_val ? "?" : "")
+            nt.cT     := clgL.t
+            nt.cPrice := clg
+            nt.cBrkT  := time
+            fsTrend  := 1
+            fsTier   := 1
+            fsT      := nt
+            tLvls.push(nt)
+            fsP      := na
+            fsR      := na
+            pbExt    := na
+            pbExtT   := na
+            trExt    := high
+            trExtT   := time
+            gatePx   := na
+            gateHit  := false
+            flipBotL := na
+            evCdl    := true
+        else if not na(trP) and close < trP
+            Lvl src = not na(flipTopL) ? flipTopL : fsR
+            Lvl nt  = na
+            if not na(src)
+                nt := src.copy()
+            else
+                nt := f_fallback(pbExt, pbExtT, -1)
+            nt.tier   := fsTier + 1
+            nt.kind   := "T"
+            nt.cTxt   := "SD" + str.tostring(fsTier)
+            nt.cT     := fsP.t
+            nt.cPrice := trP
+            nt.cBrkT  := time
+            fsTier   += 1
+            fsT      := nt
+            tLvls.push(nt)
+            fsP      := na
+            fsR      := na
+            pbExt    := na
+            pbExtT   := na
+            trExt    := low
+            trExtT   := time
+            gatePx   := na
+            gateHit  := false
+            flipTopL := na
+            evSd     := true
+
+    // ─── Flips assign the structure ───
+    if not na(flipTopL)
+        if fsTrend == 0
+            flipTopL.tier := 1
+            fsTrend := -1
+            fsTier  := 1
+            fsT     := flipTopL
+            tLvls.push(flipTopL)
+            trExt   := low
+            trExtT  := time
+        else if fsTrend == 1
+            if na(fsP)
+                pbExt  := low
+                pbExtT := time
+            else
+                f_retire(fsP, "P")
+            flipTopL.tier := fsTier
+            flipTopL.kind := "P"
+            fsP       := flipTopL
+            gatePx    := open
+            gateT     := time
+            gateScore := flipScoreDn
+            gateTier  := fsTier
+            gateHit   := false
+        else if fsTrend == -1 and not na(fsP)
+            f_retire(fsR, "R")
+            flipTopL.tier := fsTier
+            flipTopL.kind := "R"
+            fsR := flipTopL
+    if not na(flipBotL)
+        if fsTrend == 0
+            flipBotL.tier := 1
+            fsTrend := 1
+            fsTier  := 1
+            fsT     := flipBotL
+            tLvls.push(flipBotL)
+            trExt   := high
+            trExtT  := time
+        else if fsTrend == -1
+            if na(fsP)
+                pbExt  := high
+                pbExtT := time
+            else
+                f_retire(fsP, "P")
+            flipBotL.tier := fsTier
+            flipBotL.kind := "P"
+            fsP       := flipBotL
+            gatePx    := open
+            gateT     := time
+            gateScore := flipScoreUp
+            gateTier  := fsTier
+            gateHit   := false
+        else if fsTrend == 1 and not na(fsP)
+            f_retire(fsR, "R")
+            flipBotL.tier := fsTier
+            flipBotL.kind := "R"
+            fsR := flipBotL
+
+    // A T# (not the current one) is deleted on a close through it, with its marker.
+    if tLvls.size() > 0
+        for i = tLvls.size() - 1 to 0
+            Lvl l = tLvls.get(i)
+            bool  isCur = not na(fsT) and l.t == fsT.t and l.outer == fsT.outer and l.side == fsT.side
+            float tg    = f_trig(l)
+            if not isCur and ((l.side == 1 and close < tg) or (l.side == -1 and close > tg))
+                f_retire(l, "T")
+                tLvls.remove(i)
+    while tLvls.size() > MAX_T
+        f_retire(tLvls.get(0), "T")
+        tLvls.remove(0)
+
+// ─── Stall Zones ───
+// Returns [status, touch, rejNow]: status 0 = holding, 1 = broke (EXIT), 2 = delete (trend continued).
+// Body Close Only: a close beyond the EXIT POINT counts only if it is a BuX (bear stall) / BeX (bull stall).
+f_zone(Stall z, int bar0, bool prevTouch) =>
+    int  status = 0
+    bool touch  = false
+    bool rejNow = false
+    z.t2   := time
+    z.bars := bar_index - bar0
+    bool isBear = z.side == -1
+    bool beyond = isBear ? close > z.op : close < z.op
+    bool bcOk   = not exitBcOnly or (isBear ? isBuX : isBeX)
+    if isBear ? close < z.ext : close > z.ext
+        status := 2
+    else if beyond and bcOk
+        z.state := 1
+        status  := 1
+    else if not beyond
+        touch := isBear ? (high >= z.op - REJ_ATR * atr and close < z.op) : (low <= z.op + REJ_ATR * atr and close > z.op)
+        if touch and not prevTouch
+            z.rej  += 1
+            rejNow := true
+    [status, touch, rejNow]
+
+f_farBreak(Stall z) =>
+    z.side == -1 ? close < z.ext : close > z.ext
+
+var Stall          liveZ     = na
+var Stall          pendZ     = na
+var Stall          keptBear  = na
+var Stall          keptBull  = na
+var int            liveBar0  = na
+var bool           liveTouch = false
+var array<ExitTest> exTests  = array.new<ExitTest>()
+// One after-EXIT watch per side: once you are out, a later EXIT on the same side does not draw a new 50% line.
+var array<PxTest>  pxTests   = array.new<PxTest>()
+
+bool evPxRej     = false
+bool evPxBreak   = false
+bool evStallOn   = false
+bool evStallBrk  = false
+bool evStallCont = false
+bool evRej       = false
+bool evExitRev   = false
+bool evExitCont  = false
+
+if barstate.isconfirmed and not na(st_raw) and not na(st_raw[1])
+    bool flipNow = dir_raw != dir_raw[1]
+    bool stepNow = not flipNow and (stUp ? st_raw > st_raw[1] : st_raw < st_raw[1])
+
+    // EXIT label result: the first close outside the EXIT candle range.
+    if exTests.size() > 0
+        for i = exTests.size() - 1 to 0
+            ExitTest x = exTests.get(i)
+            bool upOut = close > x.hi
+            bool dnOut = close < x.lo
+            if upOut or dnOut
+                bool rev = x.side == -1 ? upOut : dnOut
+                if rev
+                    evExitRev := true
+                else
+                    evExitCont := true
+                if not na(x.lbl)
+                    label.set_text(x.lbl, x.txt + (rev ? " ✓" : " ✕"))
+                exTests.remove(i)
+
+    // After EXIT: the RE-ENTRY 50% line lives until the box breaks or the SuperTrend flips.
+    if pxTests.size() > 0
+        for i = pxTests.size() - 1 to 0
+            PxTest x = pxTests.get(i)
+            if flipNow
+                pxTests.remove(i)
+            else
+                bool isBull = x.side == 1
+                if isBull ? (low <= st_raw and close > st_raw) : (high >= st_raw and close < st_raw)
+                    if not x.stRej
+                        evPxRej := true
+                    x.stRej := true
+                if isBull ? close > x.ext : close < x.ext
+                    evPxBreak := true
+                    pxTests.remove(i)
+
+    if not na(keptBear) and f_farBreak(keptBear)
+        f_kill(keptBear)
+        keptBear := na
+    if not na(keptBull) and f_farBreak(keptBull)
+        f_kill(keptBull)
+        keptBull := na
+    if not na(pendZ) and f_farBreak(pendZ)
+        f_kill(pendZ)
+        pendZ := na
+
+    if not na(liveZ)
+        [zs, zt, zr] = f_zone(liveZ, liveBar0, liveTouch)
+        liveTouch := zt
+        bool isBear = liveZ.side == -1
+        if zr
+            evRej := true
+            if show_rej
+                if isBear
+                    liveZ.lbls.push(label.new(bar_index, high, "REJ" + str.tostring(liveZ.rej), yloc=yloc.abovebar, style=label.style_label_down, color=color.new(col_stall, 20), textcolor=color.white, size=exit_sz))
+                else
+                    liveZ.lbls.push(label.new(bar_index, low, "REJ" + str.tostring(liveZ.rej), yloc=yloc.belowbar, style=label.style_label_up, color=color.new(col_stall, 20), textcolor=color.white, size=exit_sz))
+        if zs == 0 and liveZ.bars == STALL_BARS
+            evStallOn := true
+        if zs == 1
+            evStallBrk := true
+            string exTxt = isBear ? "EXIT SHORT" : "EXIT LONG"
+            label  exL   = na
+            if show_exits
+                if isBear
+                    exL := label.new(bar_index, low, exTxt, yloc=yloc.belowbar, style=label.style_label_up, color=col_bull, textcolor=color.white, size=exit_sz)
+                else
+                    exL := label.new(bar_index, high, exTxt, yloc=yloc.abovebar, style=label.style_label_down, color=col_bear, textcolor=color.white, size=exit_sz)
+                liveZ.lbls.push(exL)
+            exTests.push(ExitTest.new(liveZ.side, high, low, exL, exTxt))
+            while exTests.size() > MAX_TEST
+                exTests.shift()
+            bool sideBusy = false
+            if pxTests.size() > 0
+                for px in pxTests
+                    if px.side == liveZ.side
+                        sideBusy := true
+            if not sideBusy and not flipNow
+                pxTests.push(PxTest.new(liveZ.side, liveZ.ext, (liveZ.ext + stPrev) / 2, time))
+            f_kill(pendZ)
+            pendZ := liveZ
+            liveZ := na
+        else if zs == 2
+            evStallCont := true
+            f_kill(liveZ)
+            liveZ := na
+
+    if flipNow
+        if not na(pendZ)
+            pendZ.tFlip := time
+            if pendZ.side == -1
+                f_kill(keptBear)
+                keptBear := pendZ
+            else
+                f_kill(keptBull)
+                keptBull := pendZ
+            pendZ := na
+        if not na(liveZ)
+            f_kill(liveZ)
+            liveZ := na
+    if stepNow
+        if not na(liveZ)
+            f_kill(liveZ)
+            liveZ := na
+    if flipNow or stepNow
+        int sd = stUp ? 1 : -1
+        liveZ     := Stall.new(time, time, sd == 1 ? math.min(open, close) : math.max(open, close), sd == 1 ? high : low, sd, 0, 0, 0, array.new<label>(), na)
+        liveBar0  := bar_index
+        liveTouch := false
+
+bool stallOn = not na(liveZ) and liveZ.bars >= STALL_BARS
+
+// ─── Bu GMC / Be GMC Lines ───
+var float buGmcPx = na
+var int   buGmcT  = na
+var float beGmcPx = na
+var int   beGmcT  = na
+bool buGmcBroken = false
+bool beGmcBroken = false
+if barstate.isconfirmed
+    if not na(buGmcPx) and close < buGmcPx
+        buGmcPx     := na
+        buGmcT      := na
+        buGmcBroken := true
+    if not na(beGmcPx) and close > beGmcPx
+        beGmcPx     := na
+        beGmcT      := na
+        beGmcBroken := true
+    if buGmcConf
+        buGmcPx := open[1]
+        buGmcT  := time[1]
+    if beGmcConf
+        beGmcPx := open[1]
+        beGmcT  := time[1]
+
+bool evUpBreak = evCdl or evLd or fUp or evGateUp or beGmcBroken
+bool evDnBreak = evCds or evSd or fDown or evGateDn or buGmcBroken
+
+// ─── HTF SuperTrend Bias ───
+// Standard SuperTrend (2 x 14) of the chosen timeframe, from its last CLOSED candle (no repaint).
+f_htfSt() =>
+    [hSt, hD] = ta.supertrend(ST_MULT, ST_LEN)
+    [hSt[1], hD[1] < 0 ? 1 : -1]
+
+f_tfName(string tf) =>
+    int s = timeframe.in_seconds(tf)
+    s < 60 ? str.tostring(s) + "s" : s < 3600 ? str.tostring(s / 60, "#") + "m" : s < 86400 ? str.tostring(s / 3600, "#") + "h" : tf
+
+[htfStRaw, htfDirRaw] = request.security(syminfo.tickerid, htf_tf, f_htfSt(), lookahead=barmerge.lookahead_on)
+bool  htfValid = htf_on and timeframe.isintraday and timeframe.in_seconds(htf_tf) > timeframe.in_seconds()
+float htfSt    = htfValid ? htfStRaw : na
+int   htfDir   = htfValid and not na(htfStRaw) ? htfDirRaw : 0
+bool  htfFilt  = htfValid and htf_arrows
+bool  htfFade  = htfValid and htf_fade
+
+plot(htf_line ? htfSt : na, "HTF SuperTrend", color=color.new(htfDir == 1 ? col_bull : col_bear, 35), style=plot.style_stepline, linewidth=htf_width)
+
+var table htfTbl = table.new(f_pos(htf_pos_s), 2, 2, bgcolor=PANEL_BG, border_width=1, border_color=color.new(PANEL_TXT, 80))
+if barstate.islast and htf_on and htf_badge
+    string bsz = f_size(htf_size_s)
+    string tfn = f_tfName(htf_tf)
+    if not htfValid
+        table.cell(htfTbl, 0, 0, "HTF " + tfn, text_color=PANEL_TXT, text_size=bsz, text_halign=text.align_left)
+        table.cell(htfTbl, 1, 0, "PICK A TIMEFRAME HIGHER THAN THE CHART", text_color=color.orange, text_size=bsz, text_halign=text.align_left)
+        table.cell(htfTbl, 0, 1, "", text_size=bsz)
+        table.cell(htfTbl, 1, 1, "", text_size=bsz)
+    else
+        int    chDir = stUp ? 1 : -1
+        color  hc    = htfDir == 1 ? col_bull : htfDir == -1 ? col_bear : color.gray
+        string ht    = htfDir == 1 ? "BULL" : htfDir == -1 ? "BEAR" : "LOADING"
+        bool   agree = htfDir != 0 and chDir == htfDir
+        table.cell(htfTbl, 0, 0, "HTF " + tfn + " BIAS", text_color=PANEL_TXT, text_size=bsz, text_halign=text.align_left)
+        table.cell(htfTbl, 1, 0, ht, text_color=hc, text_size=bsz, text_halign=text.align_left)
+        table.cell(htfTbl, 0, 1, "CHART " + (chDir == 1 ? "BULL" : "BEAR"), text_color=chDir == 1 ? col_bull : col_bear, text_size=bsz, text_halign=text.align_left)
+        table.cell(htfTbl, 1, 1, htfDir == 0 ? "-" : agree ? "WITH BIAS" : "AGAINST BIAS", text_color=agree ? col_bull : color.orange, text_size=bsz, text_halign=text.align_left)
+
+// ─── Plots ───
+plot(show_vwap ? vwap_val : na, "VWAP", color=vwCol, linewidth=vw_width)
+plot(show_st ? stShow : na, "SuperTrend", color=stUpShow ? col_bull : col_bear, style=plot.style_stepline, linewidth=st_width)
+
+// ─── Candle Coloring ───
+bool isNbc = not isBuX and not isBeX
+color barCol = na
+if barstate.isconfirmed and color_bars
+    if fsTrend == 1
+        if stUp
+            barCol := close > vwap_val ? col_bull : color.new(col_bull, 55)
+            if htfFade and htfDir == -1
+                barCol := color.new(col_bull, 75)
+        else
+            bool pastGate = not na(gatePx) and close > gatePx
+            barCol := pastGate ? color.new(col_pb, 55) : col_pb
+    else if fsTrend == -1
+        if not stUp
+            barCol := close < vwap_val ? col_bear : color.new(col_bear, 55)
+            if htfFade and htfDir == 1
+                barCol := color.new(col_bear, 75)
+        else
+            bool pastGate = not na(gatePx) and close < gatePx
+            barCol := pastGate ? color.new(col_pb, 55) : col_pb
+if barstate.isconfirmed and nbc_on and isNbc
+    barCol := col_nbc
+
+bool buGmcPaint = gmc_bars and buGmcConf and (evUpBreak or evUpBreak[1] or evUpBreak[2])
+bool beGmcPaint = gmc_bars and beGmcConf and (evDnBreak or evDnBreak[1] or evDnBreak[2])
+
+color prevCol = barCol[1]
+if buGmcPaint[1]
+    prevCol := col_gmc_bull
+else if beGmcPaint[1]
+    prevCol := col_gmc_bear
+if buGmcPaint
+    prevCol := col_gmc_bull
+else if beGmcPaint
+    prevCol := col_gmc_bear
+barcolor(color_bars or nbc_on or gmc_bars ? prevCol : na, offset=-1, title="Candles")
+
+// ─── BULL / BEAR Arrows ───
+bool bullAlign = fsTrend == 1 and stUp and close > vwap_val and not stallOn and (not htfFilt or htfDir == 1)
+bool bearAlign = fsTrend == -1 and not stUp and close < vwap_val and not stallOn and (not htfFilt or htfDir == -1)
+var bool bullArmed = false
+var bool bearArmed = false
+if barstate.isconfirmed
+    if not bullAlign
+        bullArmed := false
+    if not bearAlign
+        bearArmed := false
+    if bullAlign and not bullAlign[1]
+        bullArmed := true
+    if bearAlign and not bearAlign[1]
+        bearArmed := true
+bool bullArrow = barstate.isconfirmed and bullAlign and bullArmed and close > high[1]
+bool bearArrow = barstate.isconfirmed and bearAlign and bearArmed and close < low[1]
+if bullArrow
+    bullArmed := false
+if bearArrow
+    bearArmed := false
+
+var array<label> arrowLbls = array.new<label>()
+if show_sigs and bullArrow
+    arrowLbls.push(label.new(bar_index, low, "BULL", yloc=yloc.belowbar, style=label.style_triangleup, color=col_bull, textcolor=col_bull, size=size.tiny))
+if show_sigs and bearArrow
+    arrowLbls.push(label.new(bar_index, high, "BEAR", yloc=yloc.abovebar, style=label.style_triangledown, color=col_bear, textcolor=col_bear, size=size.tiny))
+while arrowLbls.size() > 40
+    label.delete(arrowLbls.shift())
+
+// ─── Drawing ───
+var array<line>    drLines  = array.new<line>()
+var array<label>   drLabels = array.new<label>()
+var array<box>     drBoxes  = array.new<box>()
+var array<EdgeLvl> rGroups  = array.new<EdgeLvl>()
+
+f_add_level(float p, string txt, color c, int w, string st, int b, int e, int prio, string sz) =>
+    bool found = false
+    if rGroups.size() > 0
+        for g in rGroups
+            if math.abs(g.price - p) <= f_eps()
+                found := true
+                if str.length(txt) > 0 and g.labels.indexof(txt) == -1
+                    g.labels.push(txt)
+                g.bT := math.min(g.bT, b)
+                g.eT := math.max(g.eT, e)
+                if prio > g.prio
+                    g.col   := c
+                    g.width := w
+                    g.style := st
+                    g.prio  := prio
+                    g.sz    := sz
+                break
+    if not found
+        array<string> lb = array.new<string>()
+        if str.length(txt) > 0
+            lb.push(txt)
+        rGroups.push(EdgeLvl.new(p, lb, c, w, st, b, e, prio, sz))
+
+f_draw_groups() =>
+    if rGroups.size() > 0
+        for g in rGroups
+            drLines.push(line.new(g.bT, g.price, g.eT, g.price, xloc=xloc.bar_time, color=g.col, width=g.width, style=g.style))
+            drLabels.push(label.new(g.eT, g.price, g.labels.join(" & "), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.white, 100), textcolor=g.col, size=g.sz))
+    rGroups.clear()
+
+f_drawLvl(Lvl l, string txt, color c, string lstyle, int lwidth, int tR, int prio) =>
+    float trig = f_trig(l)
+    float zTop = math.max(l.outer, l.inner)
+    float zBot = math.min(l.outer, l.inner)
+    if show_boxes and zTop > zBot
+        drBoxes.push(box.new(l.t, zTop, tR, zBot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(c, box_transp)))
+    if show_struct
+        f_add_level(trig, txt, c, lwidth, lstyle, l.t, tR, prio, lbl_sz)
+    if show_stems and not na(l.anchor)
+        float edge = l.side == -1 ? zBot : zTop
+        bool  gap  = l.side == -1 ? l.anchor < edge : l.anchor > edge
+        if gap
+            drLines.push(line.new(l.t, l.anchor, l.t, edge, xloc=xloc.bar_time, color=c, width=1, style=line.style_dotted))
+    if show_marks and str.length(l.cTxt) > 0 and not na(l.cPrice) and not na(l.cT)
+        color mc = l.side == 1 ? col_bull : col_bear
+        drLines.push(line.new(l.cT, l.cPrice, l.cBrkT, l.cPrice, xloc=xloc.bar_time, color=mc, width=1, style=line.style_solid))
+        drLabels.push(label.new(math.round((l.cT + l.cBrkT) / 2), l.cPrice, lbl_prefix + l.cTxt, xloc=xloc.bar_time, style=l.side == 1 ? label.style_label_down : label.style_label_up, color=color.new(color.white, 100), textcolor=mc, size=lbl_sz))
+
+f_drawHist(Lvl h) =>
+    float  trig = f_trig(h)
+    bool   isT  = h.kind == "T"
+    bool   isP  = h.kind == "P"
+    color  base = isP ? col_pb : h.side == 1 ? col_bull : col_bear
+    color  c    = color.new(base, 60)
+    string st   = isT ? line.style_solid : isP ? line.style_dashed : line.style_dotted
+    float  zTop = math.max(h.outer, h.inner)
+    float  zBot = math.min(h.outer, h.inner)
+    if hist_boxes and zTop > zBot
+        drBoxes.push(box.new(h.t, zTop, h.endT, zBot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(base, math.min(100, box_transp + 7))))
+    drLines.push(line.new(h.t, trig, h.endT, trig, xloc=xloc.bar_time, color=c, width=1, style=st))
+
+// Bear stall box (broke UP): info text below its low. Bull stall box (broke DOWN): info text above its high.
+f_drawBox(Stall s) =>
+    bool   isBr = s.side == -1
+    int    tBox = na(s.tFlip) ? time : s.tFlip
+    float  top  = math.max(s.op, s.ext)
+    float  bot  = math.min(s.op, s.ext)
+    color  lc   = isBr ? col_bull : col_bear
+    drBoxes.push(box.new(s.t1, top, tBox, bot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(col_stall, 85)))
+    drLines.push(line.new(s.t1, s.op, tBox, s.op, xloc=xloc.bar_time, color=lc, width=2, style=line.style_solid))
+    drLines.push(line.new(s.t1, s.ext, time, s.ext, xloc=xloc.bar_time, color=lc, width=1, style=line.style_solid))
+    if show_ztxt
+        string txt = "STALL " + str.tostring(s.bars) + " bars | " + f_dur(s.bars * barMs) + " | " + str.tostring(s.rej) + " REJ"
+        drLabels.push(label.new(s.t1, s.ext, txt, xloc=xloc.bar_time, style=isBr ? label.style_label_upper_left : label.style_label_lower_left, color=color.new(color.white, 100), textcolor=color.new(col_stall, 10), size=stall_sz))
+
+f_drawLive(Stall s) =>
+    int tEnd = time + EXIT_EXT * barMs
+    drLines.push(line.new(s.t1, s.op, tEnd, s.op, xloc=xloc.bar_time, color=color.new(col_stall, 20), width=1, style=line.style_solid))
+    drLabels.push(label.new(tEnd, s.op, lbl_prefix + "EXIT POINT", xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.white, 100), textcolor=col_stall, size=size.tiny))
+
+// Bull trend gate = BePG#, bear trend gate = BuPG#. Stops at the reclaim candle.
+f_drawTrap(Gate g) =>
+    color  gc = g.side == 1 ? col_bull : col_bear
+    string gn = f_bp(-g.side) + "PG" + str.tostring(g.tier)
+    string gt = g.score >= 3 ? gn + " TRAP " + str.tostring(g.score) + "/4" : gn + " RECLAIMED"
+    drLines.push(line.new(g.t, g.price, g.hitT, g.price, xloc=xloc.bar_time, color=gc, width=1, style=line.style_solid))
+    drLabels.push(label.new(g.hitT, g.price, lbl_prefix + gt, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.white, 100), textcolor=gc, size=lbl_sz))
+
+if barstate.islast
+    while drLines.size() > 0
+        line.delete(drLines.pop())
+    while drLabels.size() > 0
+        label.delete(drLabels.pop())
+    while drBoxes.size() > 0
+        box.delete(drBoxes.pop())
+    rGroups.clear()
+
+    int tR = time + line_ext * barMs
+
+    if show_stall
+        if not na(keptBear)
+            f_drawBox(keptBear)
+        if not na(keptBull)
+            f_drawBox(keptBull)
+        if not na(pendZ)
+            f_drawBox(pendZ)
+        if not na(liveZ)
+            f_drawLive(liveZ)
+
+    if show_reent and pxTests.size() > 0
+        for x in pxTests
+            if not na(x.mid)
+                color rc = x.side == 1 ? col_bull : col_bear
+                drLines.push(line.new(x.t0, x.mid, tR, x.mid, xloc=xloc.bar_time, color=rc, width=1, style=line.style_dotted))
+                drLabels.push(label.new(tR, x.mid, lbl_prefix + "RE-ENTRY 50%", xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.white, 100), textcolor=rc, size=lbl_sz))
+
+    if hLvls.size() > 0
+        for h in hLvls
+            bool want = h.kind == "T" ? show_hist : show_hist_pr
+            if want and not na(h.outer) and not na(h.endT)
+                f_drawHist(h)
+
+    if tLvls.size() > 0
+        for l in tLvls
+            if not na(l.outer)
+                color tc = l.side == 1 ? col_bull : col_bear
+                f_drawLvl(l, lbl_prefix + f_bp(l.side) + "PO4 T" + str.tostring(l.tier), tc, line.style_solid, 2, tR, 5)
+
+    if not na(fsP) and not na(fsP.outer)
+        string ptxt = lbl_prefix + f_bp(fsP.side) + "P" + str.tostring(fsP.tier) + (fsP.score >= 0 ? " | " + str.tostring(fsP.score) + "/4 " + f_tag(fsP.score) : "")
+        f_drawLvl(fsP, ptxt, col_pb, line.style_dashed, 2, tR, 4)
+
+    if not na(fsR) and not na(fsR.outer)
+        color rc = fsR.side == 1 ? col_bull : col_bear
+        f_drawLvl(fsR, lbl_prefix + f_bp(fsR.side) + "R" + str.tostring(fsR.tier), rc, line.style_dotted, 2, tR, 4)
+
+    if show_gate and not na(gatePx) and not gateHit
+        string gtxt = lbl_prefix + f_bp(-fsTrend) + "PG" + str.tostring(gateTier) + (gateScore >= 0 ? " | " + str.tostring(gateScore) + "/4" : "")
+        f_add_level(gatePx, gtxt, col_pb, 1, line.style_solid, gateT, tR, 3, lbl_sz)
+
+    if show_gate and trapGates.size() > 0
+        for g in trapGates
+            f_drawTrap(g)
+
+    if show_gmc_ln and not na(buGmcPx)
+        f_add_level(buGmcPx, lbl_prefix + "Bu GMC", col_gmc_bull, 1, line.style_solid, buGmcT, tR, 2, size.tiny)
+    if show_gmc_ln and not na(beGmcPx)
+        f_add_level(beGmcPx, lbl_prefix + "Be GMC", col_gmc_bear, 1, line.style_solid, beGmcT, tR, 2, size.tiny)
+
+    f_draw_groups()
+
+// ─── Alerts ───
+alertcondition(evCdl, "CDL - Trend Turned Bullish", "CDL: a top was broken - trend turned BULLISH - new BuPO4 T1")
+alertcondition(evCds, "CDS - Trend Turned Bearish", "CDS: a bottom was broken - trend turned BEARISH - new BePO4 T1")
+alertcondition(evLd, "LD - Bull Continuation", "LD: close above BeP# - bull trend continues - new BuPO4 T#")
+alertcondition(evSd, "SD - Bear Continuation", "SD: close below BuP# - bear trend continues - new BePO4 T#")
+alertcondition(evGateUp, "BePG Reclaimed - Bull Resuming", "Close back above BePG# - the bearish pullback push failed - bull trend resuming")
+alertcondition(evGateDn, "BuPG Reclaimed - Bear Resuming", "Close back below BuPG# - the bullish pullback push failed - bear trend resuming")
+alertcondition(evTrap, "TRAP - Strong Pullback Failed", "A STRONG pullback (3/4+) had its Pullback Gate reclaimed - trapped traders, trend expected to resume")
+alertcondition(evStallOn, "Stall Started - No Trade", "3 candles without a new SuperTrend stair - the trend stopped making progress")
+alertcondition(evRej, "Stall Rejection (REJ)", "Price touched the EXIT POINT and closed back on the trend side - defense held")
+alertcondition(evStallBrk, "Stall Broke - EXIT", "Close beyond the EXIT POINT against the trend - EXIT")
+alertcondition(evStallCont, "Stall Deleted - Trend Continued", "Close beyond the Stair Candle low / high before breaking - trend continued")
+alertcondition(evExitRev, "EXIT Confirmed - Reversed", "Price closed beyond the EXIT candle in the exit direction - the exit was right")
+alertcondition(evExitCont, "EXIT Failed - Trend Continued", "Price closed beyond the EXIT candle in the trend direction - the trend came back")
+alertcondition(buGmcConf, "Bu GMC Confirmed", "Bull GMC confirmed - new Bu GMC line")
+alertcondition(beGmcConf, "Be GMC Confirmed", "Bear GMC confirmed - new Be GMC line")
+alertcondition(evPxRej, "Re-Entry: SuperTrend Rejection After EXIT", "After an EXIT, price touched the SuperTrend line and closed back on the trend side - re-entry zone")
+alertcondition(evPxBreak, "Stall Box Broken - Trend Back", "After an EXIT, price closed beyond the stall box far edge without a flip - trend is back")
+alertcondition(fUp and isBuX, "Bull Flip - Body Close", "SuperTrend flipped green with a bullish body close (BuX)")
+alertcondition(fDown and isBeX, "Bear Flip - Body Close", "SuperTrend flipped red with a bearish body close (BeX)")
+alertcondition(fDown and flipScoreDn >= 3, "Strong Bear Flip - Reversal Risk", "SuperTrend flipped red with a STRONG candle - watch BePG#")
+alertcondition(fUp and flipScoreUp >= 3, "Strong Bull Flip - Reversal Risk", "SuperTrend flipped green with a STRONG candle - watch BuPG#")
+alertcondition(bullArrow, "BULL Arrow", "Structure, SuperTrend and VWAP aligned bullish with a body close")
+alertcondition(bearArrow, "BEAR Arrow", "Structure, SuperTrend and VWAP aligned bearish with a body close")
+alertcondition(htfValid and htfDir == 1 and htfDir[1] == -1, "HTF Bias Turned Bullish", "The higher-timeframe SuperTrend turned green - HTF bias BULL")
+alertcondition(htfValid and htfDir == -1 and htfDir[1] == 1, "HTF Bias Turned Bearish", "The higher-timeframe SuperTrend turned red - HTF bias BEAR")

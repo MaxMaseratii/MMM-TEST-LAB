@@ -1,0 +1,3014 @@
+//@version=6
+indicator("MMM Pro @MaxMaserati", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=300)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MMM PRO — original visual engine (voids, eBlocks, entries, candle coloring)
+// driven by the MMM Pro Foundation 3-phase state machine.
+//
+// MMM FOUNDATION — this is the CANDLE engine "c":
+//   Flip         = CDLc / CDSc (the T1 reversal)
+//   Continuation = LDc1, LDc2… / SDc1, SDc2… (count runs until the next flip)
+//   Gate (NO GATE / MMPD 27 / MMPD fast / MMPD Delta) decides which breaks
+//   are OFFICIAL. Only official breaks arm with-trend entries and alerts.
+//
+// STATE MACHINE (transplanted verbatim in behaviour):
+//   - STATIC anchors (Pn / Rn): frozen once set per range, numbered to tier.
+//   - DYNAMIC trackers: 4 slots (raw/gap x Bu/Be), "like replaces like".
+//   - Tn origins (POLine) with coupled cause markers — Husband & Wife.
+//   - ShiftMarkers + Forced guardians for CDS/CDL lifetime.
+//   - Right-edge levels sharing a price MERGE into one line, labels
+//     joined with " & " (original behaviour) — nothing hidden, nothing
+//     overlapping.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS — 8 groups. Every on/off switch lives in "2. Display"; every other
+// group holds only the settings for that feature.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── 1. GENERAL ───
+grp_gen          = "1. General"
+label_naming_scheme = input.string("MC / GMC / MP / GMP", "Label Naming", options=["MC / GMC / MP / GMP", "UC / XUC / UP / XUP"], group=grp_gen, tooltip="Naming used on every structural label.\n\nMC / GMC / MP / GMP / MCR / GMCR — standard MMM naming.\n\nUC / XUC / UP / XUP / UCR / XUCR — Urgency naming. U = Urgency (raw body close), XU = Extreme Urgency (gap-confirmed).")
+bull_col         = input.color(#01d401, "Bull", inline="mcol", group=grp_gen, tooltip="Master colors. Used by PO4 origins, GMC / MC / GMP / MP levels, LD / SD markers, entry lines, urgency lines and eBlocks / iBlocks.")
+bear_col         = input.color(#c2185b, "Bear", inline="mcol", group=grp_gen)
+line_ext         = input.int(13, "Line Extension (Candles)", minval=0, maxval=50, group=grp_gen, tooltip="How far EVERY level line extends to the right of the current bar: PO4, GMC, MC, GMP, MP, entries and urgency lines. eBlocks / iBlocks have their own length in group 6.")
+size_secondary   = input.string("small", "Level Label Size", options=["tiny","small","normal","large"], group=grp_gen, tooltip="Label size for GMC, MC, GMP, MP, MCR / GMCR and forced guardian levels. T# and P# have their own sizes in group 3.")
+size_marker      = input.string("small", "Marker Label Size", options=["tiny","small","normal","large"], group=grp_gen, tooltip="Label size for CDS / CDL, LD / SD, entry and urgency labels.")
+purge_internal   = input.bool(true, "Purge lowercase internal cds/cdl on Tn-Pn break", group=grp_gen, tooltip="ON: when a range closes — by an LD / SD continuation OR by a reversal — its small-letter internal cds / cdl markers are cleared.\n\nOFF: they stay on the chart as history, in small letters, until price closes back through them.")
+show_tn_step     = input.bool(true, "MMM Trend & Momentum Markers", group=grp_gen, tooltip="Small markers at the right end of the lines, just in front of the labels.\n\n🟢 / 🔴 = the START of the leg — its T1 origin. It never moves and stays until that T1 is violated.\n\n🟩 / 🟥 = the LAST level of the leg — the newest Tn. This one moves, stepping forward on every LD / SD.\n\nOne pair per side: green for bull, red for bear. When only T1 exists the two print together as \"🟢🟩\". Colors are set with the Bull / Bear pickers below.")
+tm_bull_col      = input.color(#006400, "Bull", inline="tmcol", group=grp_gen)
+tm_bear_col      = input.color(#c2185b, "Bear", inline="tmcol", group=grp_gen)
+eng_tag          = input.bool(true, "Engine Tag  (CDLc / CDSc / LDc / SDc)", group=grp_gen, tooltip="Adds the engine letter to every break so you always know which MMM engine made it.\nc = Candle engine (MMM Pro) · x = Zone engine (Concepts Pro+) · s = Swing engine (Order Flow Suite).")
+max_history      = input.int(40, "Memory Guard (Max Structures Kept)", minval=5, maxval=200, group=grp_gen, tooltip="Hard cap on how many past origins, markers and guardians are kept in memory. Oldest dropped first. Raising this too high can trigger TradingView's 'Memory limits exceeded' error, which silently stops ALL drawing.")
+
+// ─── 2. DISPLAY — every on/off switch in one place ───
+grp_disp         = "2. Display"
+show_orig_lines  = input.bool(true,  "PO4 Origins (T1, T2, T3...)", group=grp_disp, tooltip="BuPO4 / BePO4 — the origin of each trend leg. T1 is born of a reversal (CDL / CDS); T2, T3... are born of a continuation (LD / SD). \"Forced\" = the origin was placed on a candle that is NOT a body close in the break direction (an NBC broke the level).")
+show_gmc_lines   = input.bool(true,  "Resumption / Control Levels (GMC, MCR, GMCR)", group=grp_disp, tooltip="Trend-direction levels. GMC = gap-confirmed momentum in the trend phase. MCR / GMCR = the resumption after a pullback.")
+show_ant         = input.bool(true,  "MC Line (Momentum Control)", group=grp_disp, tooltip="The raw trend-direction body close before any gap confirms it. Only exists in the trend phase — before a pullback forms. The moment the next candle gaps, it upgrades to GMC and this line is retired.")
+show_gmp_lines   = input.bool(true,  "GMP (Gap-Confirmed Pullbacks)", group=grp_disp, tooltip="Counter-trend body closes confirmed by a gap. The first one of each range is numbered (GMP1, GMP2...).")
+show_mp_lines    = input.bool(true,  "MP (Raw Pullbacks)", group=grp_disp, tooltip="Counter-trend body closes not yet confirmed by a gap. Upgrades to GMP the moment a gap confirms it.")
+show_pb          = input.bool(false, "LD / SD Markers", group=grp_disp, tooltip="LD (Long Delivery) / SD (Short Delivery) — the break of the numbered pullback that confirms a continuation and creates the next T-tier. A '+' (LD1+) means the broken pullback was gap-confirmed: a strong break.")
+show_int_cd      = input.bool(false, "Internal cds / cdl (small letters)", group=grp_disp, tooltip="Small-letter cds / cdl are internal breaks inside the T#–P# range: later pullback breaks, R# breaks, and breaks made by the unnumbered GMCR / MCR. OFF hides them (and their Forced guardian lines). They are still tracked. Capital CDS / CDL always show.")
+show_ent         = input.bool(true,  "Entry Lines", group=grp_disp)
+show_zones       = input.bool(true,  "eBlocks / iBlocks", group=grp_disp)
+show_tc          = input.bool(false, "Urgency Gap Anticipation Lines", group=grp_disp, tooltip="After a body close, the prior bar's high (bull) or low (bear) — the edge a gap would have to clear. Shows ✕ once price trades back through it.")
+show_all_gaps    = input.bool(false, "Structural Voids (UDG / UOG / ULG)", group=grp_disp)
+show_ccm_color   = input.bool(true,  "Candle Conviction Coloring", group=grp_disp)
+hvc_enable       = input.bool(false, "Volume Intensity Coloring", group=grp_disp, tooltip="Recolors High / Ultra-High relative volume candles using footprint data. Requires a TradingView Premium / Ultimate plan (request.footprint).")
+show_nbc_color   = input.bool(true,  "NBC Candle Coloring", group=grp_disp, tooltip="Colors every NBC (Non-Body-Close) candle — a candle that is neither a BuX nor a BeX body close — in one flat color, so the candles that actually carry structure stand out. Color is set in group 8 (white by default).")
+
+// ─── 3. TREND & PULLBACK SEQUENCE ───
+grp_tier         = "3. Trend & Pullback Sequence"
+show_tiers       = input.bool(true, "Show Tier Numbers (T1, T2... / P1, P2...)", group=grp_tier, tooltip="Tags each origin with its trend-tier (T1, T2, T3...) and each numbered pullback / resumption with the range number it belongs to.")
+t1_width         = input.int(3, "T1   Width", inline="t1sty", group=grp_tier, tooltip="T1 — the origin of a brand-new trend (reversal).")
+t1_line_style    = input.string("Solid", "Style", options=["Solid","Dashed","Dotted"], inline="t1sty", group=grp_tier)
+t1_size          = input.string("normal", "Label", options=["tiny","small","normal","large"], inline="t1sty", group=grp_tier)
+tn_width         = input.int(2, "T2+  Width", inline="tnsty", group=grp_tier, tooltip="T2, T3, T4... — origins born of a continuation (LD / SD).")
+tn_line_style    = input.string("Solid", "Style", options=["Solid","Dashed","Dotted"], inline="tnsty", group=grp_tier)
+tn_size          = input.string("small", "Label", options=["tiny","small","normal","large"], inline="tnsty", group=grp_tier)
+p1_width         = input.int(2, "P1   Width", inline="p1sty", group=grp_tier, tooltip="P1 — the first pullback of a new trend.")
+p1_line_style    = input.string("Dashed", "Style", options=["Solid","Dashed","Dotted"], inline="p1sty", group=grp_tier)
+p1_size          = input.string("normal", "Label", options=["tiny","small","normal","large"], inline="p1sty", group=grp_tier)
+pn_width         = input.int(2, "P2+  Width", inline="pnsty", group=grp_tier, tooltip="P2, P3, P4... — the first pullback of each continuation range.")
+pn_line_style    = input.string("Dashed", "Style", options=["Solid","Dashed","Dotted"], inline="pnsty", group=grp_tier)
+pn_size          = input.string("small", "Label", options=["tiny","small","normal","large"], inline="pnsty", group=grp_tier)
+po4_trig_mode    = input.string("Keep Extending", "PO4 On Touch", options=["Keep Extending","Stop Extending","Hide"], group=grp_tier, tooltip="What a PO4 line does when price comes back and touches it (a retest, not a break).\n\nKeep Extending — stays and keeps extending.\nStop Extending — stays, frozen at the touch candle.\nHide — hidden once touched.\n\nA close THROUGH a PO4 always deletes it, whatever this is set to.")
+max_orig_lines   = input.int(10, "Max PO4 Lines Drawn", minval=0, maxval=500, group=grp_tier, tooltip="Only the newest N origins are drawn. 0 = no limit. This only hides older lines — it never deletes an origin or its CDS / CDL.")
+p1_validate_mode = input.string("MPO (Raw Pullback)", "Pullbacks Plotted", options=["MPO (Raw Pullback)", "GMPO (Gap-Confirmed Only)"], group=grp_tier, tooltip="MPO — not strict. Both raw (MP) and gap-confirmed (GMP) pullbacks count. A raw MP anchors P# straight away and can validate LD / SD.\n\nGMPO — STRICT. A raw MP is not treated as a pullback at all. It waits until a gap confirms it, and only then becomes the numbered P#. So it cannot validate LD / SD and cannot become T1 on a reversal while it is still raw. Expect far fewer T-tiers and fewer reversals — only gap-backed structure.")
+pb_absorb_filter = input.bool(true, "Absorbed P# Filter", group=grp_tier, tooltip="Fixes the WEAK first BC.\n\nA raw P# (not gap-confirmed) is ABSORBED when price takes it back while:\n- the pullback never closed past the P# candle's own far edge (its low for a BeX P#, its high for a BuX P#), and\n- no R# has locked yet.\n\nON: an absorbed P# is NOT an LD / SD. It is erased and the range goes back to the trend phase, so the next opposite BC can become the real P#.\n\nA deep pullback that closed past the P# candle's edge still gives a normal LD / SD. A gap-confirmed GMP# is never absorbed.")
+pb_nbc_forced    = input.bool(true, "NBC Forced Pullback", group=grp_tier, tooltip="Fixes the NBC-ONLY pullback.\n\nIn the trend phase (no P# yet), if an NBC candle CLOSES through the last trend-phase body close (the MC or GMC), the pullback is real even though no opposite BC printed. That NBC's open becomes the P#, labelled \"NBC Forced MP#\". If the same candle broke a GMC, its CDS / CDL is married to this P#.\n\nMPO mode only — GMPO (strict) still needs a gap-confirmed P#.")
+
+// ─── 4. LEVELS (GMC / MC / GMP / MP / Urgency) ───
+grp_lvl          = "4. Levels"
+label_gmp_mp     = input.string("GMP / MP", "Pullback Naming", options=["GMP / MP", "GM Pullback / M Pullback"], group=grp_lvl, tooltip="Short or long-form pullback labels. Also converted by the Urgency naming scheme (→ XUP / UP).")
+ant_mode         = input.string("Last Active Only", "MC Line Mode", options=["Both","Last Active Only"], group=grp_lvl, tooltip="Both — keep the latest bull MC and latest bear MC at the same time.\nLast Active Only — a new MC on one side clears the other side's MC.")
+tc_mode          = input.string("Last Active Only", "Urgency Line Mode", options=["Both","Last Active Only"], group=grp_lvl, tooltip="Both — keep the latest buy and sell urgency lines at the same time.\nLast Active Only — a new one on one side clears the other side's.")
+max_cont_lines   = input.int(5, "Max CDS / CDL Markers & Guardians Drawn", minval=0, maxval=500, group=grp_lvl, tooltip="Only the newest N standalone CDS / CDL markers and forced guardians are drawn. 0 = no limit.")
+
+// ─── 5. ENTRY LINES ───
+// Three entry families, each with its own switch. Inside each family pick the
+// type: U = Urgency (raw body close), XU = Extreme Urgency (gap-confirmed),
+// PO4 = the Origin (the open of that structure's candle).
+grp_ent          = "5. Entry Lines"
+ent_trend        = input.bool(true,  "Trend",        inline="etr", group=grp_ent, tooltip="TREND entries — in the leg's own direction, from the levels printed BEFORE any pullback forms.\n\nU = MC (raw body close). Only on H1 and higher — never drawn below H1.\nXU = GMC (gap-confirmed).\nPO4 = the leg's origin (T1, T2, T3...).")
+ent_tr_u         = input.bool(false, "U",            inline="etr", group=grp_ent)
+ent_tr_xu        = input.bool(true,  "XU",           inline="etr", group=grp_ent)
+ent_tr_o         = input.bool(true,  "PO4",          inline="etr", group=grp_ent)
+ent_pb           = input.bool(false, "Pullback",     inline="epb", group=grp_ent, tooltip="PULLBACK entries — trading AGAINST the trend. ONLY on the numbered pullback of each range (MP1 / GMP1, GMP2, GMP3...). Internal small-letter mp / gmp never get an entry. Off by default.\n\nU = MP# (raw). Ignored in GMPO (strict) mode.\nXU = GMP# (gap-confirmed).\nPO4 = the open of the P# candle — the pullback's own origin.")
+ent_pb_u         = input.bool(false, "U",            inline="epb", group=grp_ent)
+ent_pb_xu        = input.bool(true,  "XU",           inline="epb", group=grp_ent)
+ent_pb_o         = input.bool(false, "PO4",          inline="epb", group=grp_ent)
+ent_ct           = input.bool(true,  "Continuation", inline="ect", group=grp_ent, tooltip="CONTINUATION entries — with the trend, after the pullback. ONLY on the numbered resumption (MCR# / GMCR#). Internal resumptions never get an entry.\n\nU = MCR# (raw).\nXU = GMCR# (gap-confirmed).\nPO4 = the open of the R# candle — the origin that becomes the next T-tier on LD / SD.")
+ent_ct_u         = input.bool(false, "U",            inline="ect", group=grp_ent)
+ent_ct_xu        = input.bool(true,  "XU",           inline="ect", group=grp_ent)
+ent_ct_o         = input.bool(false, "PO4",          inline="ect", group=grp_ent)
+ent_best_zone    = input.bool(true,  "Best Entry Zone (T1)", group=grp_ent, tooltip="Trend family only. Shades the area from the CDL down to the LOWEST LOW of the leg (bull), or from the CDS up to the HIGHEST HIGH of the leg (bear) — the best area to look for a trend entry.\n\nThe leg extreme is measured from the old trend's origin to the reversal, and it keeps extending if a later wick goes deeper while the T1 lives. The zone lives exactly as long as its T1.")
+ent_mode         = input.string("MMM Entry", "Entry Mode", options=["MMM Entry", "SBE", "Both"], group=grp_ent, tooltip="MMM Entry — the normal MMM Pro entry line.\n\nSBE (Suggested Best Entry) — most structures are born when price breaks OUT of a balance zone (a cluster of NBC candles). SBE places a second entry at the edge of that zone: the LOW of the zone for a bullish structure, the HIGH of the zone for a bearish one. It is only shown where MMM Pro already gives an entry, and only when it is a better (deeper) price than the MMM entry.\n\nBoth — show both lines.")
+sbe_min_nbc      = input.int(1, "SBE Min NBC Candles", minval=1, maxval=20, inline="sbe", group=grp_ent, tooltip="How many NBC candles the balance zone needs before the break for an SBE to be placed. Body: build the zone from candle bodies (open / close) instead of wicks (high / low).")
+sbe_body         = input.bool(true, "Body", inline="sbe", group=grp_ent)
+ent_open_only    = input.bool(false, "Only at 3rd BC Gap", group=grp_ent, tooltip="XU entries only.\n\nOn: the entry is always the 3rd candle's body-close edge (its low / high) — the strongest confirmation only.\n\nOff: the entry adapts to the 3rd candle type — body close → its low / high; strong affinity rejection → the void midline; otherwise → the gap candle's open.")
+ent_style        = input.string("Compact", "Label Style", options=["Text","Symbol","Compact"], group=grp_ent, tooltip="Text: \"Long Entry\" / \"Short Entry\"\nSymbol: ⬆ / ⬇\nCompact: \"Long ⬆\" / \"Short ⬇\"\n\nA ✓ is added only when price comes BACK and touches the entry on a later candle — never on the candle that plotted it.")
+ent_trig_mode    = input.string("Keep Extending", "On Trigger", options=["Keep Extending","Stop Extending","Hide"], group=grp_ent, tooltip="What an entry line does once price comes back and touches it.\n\nKeep Extending — stays, with a ✓.\nStop Extending — stays with a ✓, frozen at the touch candle.\nHide — removed once touched (the newest stays until a close breaks it).")
+max_ent          = input.int(10, "Max Entries Drawn", minval=0, maxval=500, group=grp_ent, tooltip="Only the newest N origin entries are drawn. 0 = no limit.")
+
+// ─── 6. eBLOCKS / iBLOCKS ───
+grp_zones        = "6. eBlocks / iBlocks"
+zone_po4         = input.bool(false, "eBlock  (T1 Origins)", group=grp_zones, tooltip="eBlock — the highest tier. Drawn ONLY on T1 origins, where a reversal (CDL / CDS) started a new trend. Labelled \"eBlock CDL\" / \"eBlock CDS\".")
+zone_res         = input.bool(false, "iBlock  (Official Resumptions T2, T3...)", group=grp_zones, tooltip="iBlock — official resumption blocks. Drawn on every T2, T3, T4... origin, born of an LD / SD continuation (LD+ / SD+ included). Labelled \"MMM iBlock L / S\".")
+zone_gmc         = input.bool(false, "XU iBlock  (Extreme Urgency — GMC)", group=grp_zones, tooltip="Extreme Urgency. Drawn on gap-confirmed momentum levels (GMC / GMCR): a body close the next candle confirmed with a gap. Labelled \"MMM XU iBlock L / S\".")
+zone_mc          = input.bool(false, "U iBlock  (Urgency — MC)", group=grp_zones, tooltip="Urgency — the lowest tier. Drawn on raw body closes (MC / MCR) not yet gap-confirmed. Off by default: once one gap-confirms it becomes an XU iBlock instead. Labelled \"MMM U iBlock L / S\".")
+zone_show_name   = input.bool(true,  "Name Inside Box", inline="zlbl", group=grp_zones, tooltip="Name: draws the block's name inside the box, pinned to its right edge.\nVolume: adds a label on the block's edge with the anchor candle's relative volume, e.g. \"Strong: 180% 🔥\".")
+zone_show_vol    = input.bool(false, "Volume Strength", inline="zlbl", group=grp_zones)
+zone_ext         = input.int(7, "Block Extension (Candles)", minval=0, maxval=100, group=grp_zones, tooltip="How many candles every block extends past the current bar.")
+zone_calc_basis  = input.string("High/Low", "Calculation Basis", options=["High/Low", "Open/Close (Body)"], group=grp_zones, tooltip="Whether the block divides the full wick range or only the candle body.")
+zone_tier        = input.string("50% (0-50% / 50-100%)", "Zone Selection", options=["Extreme (0-12.5% / 87.5-100%)", "Balanced (12.5-25% / 75-87.5%)", "Standard (25-50% / 50-75%)", "50% (0-50% / 50-100%)"], group=grp_zones)
+show_50_line     = input.bool(false, "50% Line", inline="50_line", group=grp_zones, tooltip="The dashed midline through each block (the 50% of the anchor candle), plus its short connector to the candle edge. Off by default.")
+line_50_style    = input.string("Dashed", "", options=["Solid", "Dashed", "Dotted"], inline="50_line", group=grp_zones)
+line_50_width    = input.int(1, "Width", minval=1, maxval=10, inline="50_line", group=grp_zones)
+max_zones        = input.int(5, "Max Blocks Drawn", minval=0, maxval=500, group=grp_zones, tooltip="Only the newest N blocks are drawn. 0 = no limit.")
+
+// ─── 7. STRUCTURAL VOIDS ───
+grp_gaps         = "7. Structural Voids"
+show_upg         = input.bool(true, "UDG", inline="g1", group=grp_gaps, tooltip="Unfair Delivery Gap — delivery skipped entirely between candle 1 and candle 3. Strongest tier.")
+bull_upg_css     = input.color(color.new(#2157f3,80), "Bull", inline="g1", group=grp_gaps)
+bear_upg_css     = input.color(color.new(#ff1100,80), "Bear", inline="g1", group=grp_gaps)
+show_og          = input.bool(true, "UOG", inline="g2", group=grp_gaps, tooltip="Unfair Opening Gap — a clean open above the prior high (bull) or below the prior low (bear).")
+bull_og_css      = input.color(color.new(#2157f3,50), "Bull", inline="g2", group=grp_gaps)
+bear_og_css      = input.color(color.new(#ff1100,50), "Bear", inline="g2", group=grp_gaps)
+show_vi          = input.bool(true, "ULG", inline="g3", group=grp_gaps, tooltip="Unfair Liquidity Gap — bodies don't overlap but wicks do. The subtlest tier.")
+bull_vi_css      = input.color(color.new(#2157f3,0), "Bull", inline="g3", group=grp_gaps)
+bear_vi_css      = input.color(color.new(#ff1100,0), "Bear", inline="g3", group=grp_gaps)
+min_udg_ticks    = input.int(2, "Min UDG Size (Ticks)", group=grp_gaps, tooltip="Minimum gap size to count as a UDG. Filters out microscopic 1-tick gaps. This also drives GMC / GMP gap confirmation.")
+gapExtMode       = input.string("Filled & Unfilled (Sliced)", "Extension Mode", options=["Minimalistic","Until First Touch","Until Filled","Filled & Unfilled (Sliced)"], group=grp_gaps, tooltip="Minimalistic: fixed length (Mini Length).\nUntil First Touch: extends until price first touches it.\nUntil Filled: extends until fully filled.\nSliced: split into slices that change color as price fills them.")
+mini_len         = input.int(3, "Mini Length", minval=1, maxval=50, inline="gsz", group=grp_gaps)
+slices_count     = input.int(8, "Slices", minval=2, maxval=30, inline="gsz", group=grp_gaps)
+col_partial      = input.color(color.new(color.gray,90), "Touched Slice", group=grp_gaps)
+show_midlines    = input.bool(false, "Midlines", inline="gopt", group=grp_gaps)
+hide_filled      = input.bool(true, "Delete When Filled", inline="gopt", group=grp_gaps)
+show_gap_labels  = input.bool(false, "Void Labels", inline="g6", group=grp_gaps)
+gap_lbl_side     = input.string("Left", "", options=["Left","Right"], inline="g6", group=grp_gaps)
+gap_lbl_col      = input.color(color.white, "", inline="g6", group=grp_gaps)
+maxGaps          = input.int(5, "Max Voids Drawn", minval=0, maxval=500, group=grp_gaps, tooltip="Only the newest N voids are kept. 0 = no limit.")
+
+// ─── 8. CANDLE COLORING ───
+grp_ccm          = "8. Candle Coloring"
+ccm_mmm_theme    = input.bool(true, "MMM Theme (Cyan / Purple)", group=grp_ccm, tooltip="Off = Classic theme (green / red).\n\nAll candle coloring is applied only once a candle has CLOSED — the live candle keeps its normal color.")
+nbc_col          = input.color(color.white, "NBC Candle Color", group=grp_ccm, tooltip="Color for every NBC (Non-Body-Close) candle. Turn it on / off in group 2.")
+ccm_gap_bull_col = input.color(color.red,  "Gap Absorbed  Bull", inline="ccm1", group=grp_ccm, tooltip="Net-bull close with a red body, and net-bear close with a green body.")
+ccm_gap_bear_col = input.color(color.lime, "Bear", inline="ccm1", group=grp_ccm)
+ccm_pause_col    = input.color(#9e9e9e, "Balanced", inline="ccm2", group=grp_ccm)
+ccm_doji_col     = input.color(#616161, "Doji", inline="ccm2", group=grp_ccm)
+hvc_show_ultra   = input.bool(true, "Ultra-High", inline="hvcs", group=grp_ccm, tooltip="Volume Intensity tiers shown (turn the feature on in group 2).")
+hvc_show_high    = input.bool(true, "High", inline="hvcs", group=grp_ccm)
+hvc_filter_poc_va = input.bool(false, "Must Close Beyond POC & VA", group=grp_ccm, tooltip="On: a bull Ultra/High candle must close above POC and VAH; a bear one below POC and VAL.")
+hvc_bull_ultra_col = input.color(#006400, "Ultra Bull", inline="hvc1", group=grp_ccm)
+hvc_bull_high_col  = input.color(#01d401, "High Bull",  inline="hvc1", group=grp_ccm)
+hvc_bear_ultra_col = input.color(#880e4f, "Ultra Bear", inline="hvc2", group=grp_ccm)
+hvc_bear_high_col  = input.color(#ff00ff, "High Bear",  inline="hvc2", group=grp_ccm)
+hvc_length       = input.int(20, "Volume SMA", minval=1, inline="hvcn", group=grp_ccm)
+hvc_high_mult    = input.float(1.5, "High ×", step=0.1, inline="hvcn", group=grp_ccm)
+hvc_ultra_mult   = input.float(2.0, "Ultra ×", step=0.1, inline="hvcn", group=grp_ccm)
+hvc_ticks_per_row = input.int(4, "Ticks / Row", minval=1, inline="hvcf", group=grp_ccm)
+hvc_va_percent   = input.int(70, "VA %", minval=1, maxval=100, inline="hvcf", group=grp_ccm)
+hvc_max_bars     = input.int(300, "Max Footprint Bars", minval=50, maxval=1000, group=grp_ccm)
+
+// ─── 9. GATE & HTF BIAS ───
+grp_gate         = "9. Gate & HTF Bias"
+gate_mode        = input.string("NO GATE", "Gate", options=["NO GATE", "MMPD 27", "MMPD fast", "MMPD Delta"], group=grp_gate, tooltip="NO GATE = every break is official (normal break, no filter).\n\nMMPD 27 / MMPD fast / MMPD Delta = the MMM Pro Edge rhythm:\n• Flip (CDLc / CDSc) is official only if the old leg reached its extreme first: oscillator ≤ 20 before a CDLc, ≥ 80 before a CDSc.\n• Continuation (LDc / SDc) is official only if the leg reached its OWN extreme (bull ≥ 80) and THEN the pullback reached the OPPOSITE extreme (≤ 20) before the break.\n\nMMPD Delta = the natural order-flow version (built on candle delta).\nThe structure never changes with the gate. A failed break keeps its PO4 (marked ✗) but gets no with-trend entry, no block, no alert.")
+gate_fast        = input.int(9, "MMPD fast Length", minval=5, maxval=50, group=grp_gate)
+show_failed      = input.bool(false, "Show Failed Breaks (small grey)", group=grp_gate, tooltip="OFF = the cause label of a failed break is hidden.\nON = it is drawn in grey, lowercase (cdlc, ldc2...).")
+htf_mode         = input.string("Off", "HTF Bias From", options=["Off", "Last Flip (CDLc/CDSc)", "Last Continuation (LDc/SDc)", "Last BC"], group=grp_gate, tooltip="A compact copy of the PO4 engine (T# / P# / R#) runs on the HTF — last CLOSED HTF candle only, no repaint.\n\nLast Flip = direction of the last HTF CDLc / CDSc (the trend).\nLast Continuation = direction of the last HTF LDc / SDc made AFTER the last flip. No continuation yet = no bias.\nLast BC = direction of the last HTF body close candle.\n\nOff = no HTF filter.")
+htf_tf           = input.timeframe("240", "HTF Timeframe", group=grp_gate)
+htf_filter       = input.bool(true, "Entries With HTF Bias Only", group=grp_gate)
+htf_table        = input.bool(true, "Show HTF Bias Box", inline="hb", group=grp_gate)
+htf_tbl_pos      = input.string("Top Right", "", options=["Top Left","Top Center","Top Right","Bottom Left","Bottom Center","Bottom Right"], inline="hb", group=grp_gate)
+
+// ─── 10. NEWS BLOCK ───
+grp_news     = "10. News Block"
+news_on      = input.bool(true, "Block Entries Around News", group=grp_news, tooltip="No new entry, and every NOT-YET-FILLED entry is cancelled, on a candle that touches a news window (New York time). Intraday charts only.")
+news_builtin = input.bool(true, "Built-in: CPI · FOMC · NFP", group=grp_news, tooltip="Always-on safety list for the 3 biggest US events, all year (no paste needed).\nCPI 08:30 · NFP first Friday 08:30 · FOMC 14:00 statement + 14:30 press conference (New York).\nThe CPI / FOMC dates live in the two boxes at the bottom of this group.")
+news_paste   = input.text_area("", "Pasted Calendar (from MMM News Converter)", group=grp_news, tooltip="Paste the lines made by the MMM News Converter page. One event per line:\nYYYY-MM-DD HH:MM CUR I Title\nTime = New York. I = H (red) · M (orange) · L (yellow) · N (grey).\nExample: 2026-10-14 08:30 USD H CPI m/m\nForexFactory only exports the CURRENT week, so paste once a week (Sunday / Monday). You can keep several weeks in the box.")
+news_cur     = input.string("USD", "Currencies", group=grp_news, tooltip="Comma list of currencies to use from the pasted calendar. ES / NQ = USD.")
+news_red     = input.bool(true,  "🔴 High", inline="imp", group=grp_news, tooltip="Which pasted impacts are used: red = High, orange = Medium, yellow = Low, grey = non-economic / holiday.")
+news_org     = input.bool(false, "🟠 Medium", inline="imp", group=grp_news)
+news_yel     = input.bool(false, "🟡 Low", inline="imp", group=grp_news)
+news_gry     = input.bool(false, "⚪ Grey", inline="imp", group=grp_news)
+news_pre     = input.int(5, "Block: Min Before", minval=0, maxval=120, inline="nw", group=grp_news)
+news_post    = input.int(15, "Min After", minval=0, maxval=240, inline="nw", group=grp_news)
+news_dot     = input.bool(true, "Warning Dot", inline="dot", group=grp_news, tooltip="A dot on the candle where the warning time sits (15 or 30 minutes before the news) — the closed candle or the live one. Hover it to read the event.")
+news_dot_min = input.string("30", "Min Before", options=["15", "30"], inline="dot", group=grp_news)
+news_dot_at  = input.string("High", "At", options=["High", "Low"], inline="dot", group=grp_news)
+news_dot_txt = input.bool(false, "Name", inline="dot", group=grp_news)
+news_bg      = input.bool(true, "Shade News Windows", group=grp_news)
+cpi_dates    = input.text_area("2026-01-13,2026-02-13,2026-03-11,2026-04-10,2026-05-12,2026-06-10,2026-07-14,2026-08-12,2026-09-11,2026-10-14,2026-11-10,2026-12-10,2027-01-13,2027-02-11,2027-03-10,2027-04-13,2027-05-12,2027-06-10,2027-07-14,2027-08-11,2027-09-14,2027-10-14,2027-11-10,2027-12-10", "Built-in CPI Dates", group=grp_news, tooltip="Comma separated, New York date. Source: BLS release schedule.")
+fomc_dates   = input.text_area("2025-01-29,2025-03-19,2025-05-07,2025-06-18,2025-07-30,2025-09-17,2025-10-29,2025-12-10,2026-01-28,2026-03-18,2026-04-29,2026-06-17,2026-07-29,2026-09-16,2026-10-28,2026-12-09,2027-01-27,2027-03-17,2027-04-28,2027-06-09,2027-07-28,2027-09-15,2027-10-27,2027-12-08", "Built-in FOMC Dates", group=grp_news, tooltip="Comma separated, decision day only. 2027 dates are tentative — check federalreserve.gov.")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DERIVED SETTINGS — values that used to be separate inputs, now driven by the
+// master settings above. The rest of the script reads these exactly as before.
+// ═══════════════════════════════════════════════════════════════════════════
+color mc_bull_col   = bull_col
+color mc_bear_col   = bear_col
+color ld_base_col   = bull_col
+color sd_base_col   = bear_col
+color long_ent_col  = bull_col
+color short_ent_col = bear_col
+color tc_bull_col   = bull_col
+color tc_bear_col   = bear_col
+color lqc_buy_col   = color.new(bull_col, 40)
+color lqc_sell_col  = color.new(bear_col, 40)
+color zone_pel_col  = color.new(bull_col, 85)
+color zone_pes_col  = color.new(bear_col, 85)
+
+int ext_mc  = line_ext
+int ant_ext = line_ext
+int ent_ext = line_ext
+int ext_ant = line_ext
+
+string orig_size  = size_marker
+string ld_sd_size = size_marker
+string ent_size   = size_marker
+string tc_size    = size_marker
+string gmc_size   = size_secondary
+string gmp_size   = size_secondary
+string mp_size    = size_secondary
+string ant_size   = size_secondary
+string lqc_size   = size_secondary
+
+// "Max ... Drawn" of 0 = no limit.
+bool limit_orig_lines = max_orig_lines > 0
+bool limit_cont_lines = max_cont_lines > 0
+bool limit_ent        = max_ent > 0
+bool limit_gaps       = maxGaps > 0
+bool limit_zones      = max_zones > 0
+
+// T1 / T2+ / P1 / P2+ always use their own style rows now (the old checkboxes
+// only swapped styles and looked like show/hide switches).
+bool show_t1      = true
+bool show_p1      = true
+bool tn_label_hdr = true
+bool pn_label_hdr = true
+
+// ─── CCM THEME COLORS ───────────────────────────────────────────────────────
+color ccm_base_bull = ccm_mmm_theme ? #27ffc3 : #00c853
+color ccm_base_bear = ccm_mmm_theme ? #9c27b0 : #d50000
+
+color ccm_strongest_bull = ccm_base_bull
+color ccm_strong_bull    = color.new(ccm_base_bull, 40)
+color ccm_weak_bull      = color.new(ccm_base_bull, 80)
+color ccm_strongest_bear = ccm_base_bear
+color ccm_strong_bear    = color.new(ccm_base_bear, 40)
+color ccm_weak_bear      = color.new(ccm_base_bear, 80)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Structural Voids (ORIGINAL — untouched) ───
+type GapBox
+    box    b
+    line   l
+    label  lbl
+    float  top
+    float  bot
+    bool   isBull
+    string gType
+    bool   isTouched
+    bool   stoppedExtending
+    color  origBg
+    color  origBorder
+    color  origLine
+    color  origLblText
+    int    creationBar
+    float  mid
+    box[]  slices
+    bool[] sliceTouched
+
+type RenderZone
+    int    t
+    int    end_t
+    float  z_top
+    float  z_bot
+    float  z_mid
+    color  bg_col
+    bool   isBull
+    float  c_top
+    float  c_bot
+    string blockName     // drawn STRICTLY INSIDE the box via box.new(text=...)
+    float  volPct
+
+// ─── STATE MACHINE NODE (Foundation type + visual fields for entries/eBlocks) ───
+type Node
+    float  price
+    int    t
+    bool   isGap
+    bool   isPrimary
+    bool   shiftPrinted     = false   // debounces the CDL/CDS marker
+    bool   isPhase3Internal = false   // resumption-role dynamic created after Rn locked
+    bool   isForced         = false   // P# placed on an NBC (NBC Forced Pullback)
+    bool   delivered        = false   // P# only: price closed past the P# candle's far edge
+    // VISUAL BRIDGE — candle OHLC for eBlocks, entry state for Entry Lines.
+    float  c_high           = na
+    float  c_low            = na
+    float  c_open           = na
+    float  c_close          = na
+    int    c_time           = na
+    float  c_volPct         = na   // anchor candle's relative volume, for the block's volume label
+    float  ent_price        = na
+    float  tgt_price        = na
+    float  alt_price        = na
+    bool   is_swept_rejected = false
+    bool   entry_triggered  = false
+    string ent_str          = ""
+    int    ent_freeze_t     = na
+    int    ent_arm_bar      = na   // bar the entry was plotted on — a touch only counts AFTER it
+    // ORIGIN entry (PO4 type) — at this node's own open.
+    float  org_price        = na
+    string org_str          = ""
+    bool   org_trig         = false
+    int    org_freeze_t     = na
+    int    org_arm_bar      = na
+    // SBE — edge of the balance zone this node's candle broke out of.
+    float  sbe_price        = na
+    bool   sbe_on           = false   // set only when MMM Pro gives this node an entry
+    bool   sbe_trig         = false
+    int    sbe_freeze_t     = na
+
+// ─── Tn ORIGIN (PO4) ───
+type POLine
+    float  price
+    int    t
+    int    side
+    int    tier
+    bool   isDirect
+    // Coupled cause marker ("wife") — dies with this record automatically.
+    string causeText
+    int    causeT
+    float  causePrice
+    bool   causeMajor
+    int    causeBreakT
+    // true = placed on a candle that is NOT a body close in the break
+    // direction (an NBC, or an opposite BC, broke the level).
+    bool   isForced         = false
+    // T1 only: the leg's extreme — lowest low (bull) / highest high (bear).
+    // The far edge of the Best Entry Zone.
+    float  legExt           = na
+    // VISUAL BRIDGE
+    float  c_high           = na
+    float  c_low            = na
+    float  c_open           = na
+    float  c_close          = na
+    int    c_time           = na
+    float  c_volPct         = na
+    float  ent_price        = na
+    bool   entry_triggered  = false
+    string ent_str          = ""
+    int    ent_freeze_t     = na
+    int    ent_arm_bar      = na
+    bool   po4_touched      = false
+    int    po4_freeze_t     = na
+    float  sbe_price        = na
+    bool   sbe_on           = false
+    bool   sbe_trig         = false
+    int    sbe_freeze_t     = na
+    bool   official         = true    // the break that made this Tn passed the gate
+
+// ─── Standalone CDS/CDL not coupled to a Tn ───
+type ShiftMarker
+    float  price
+    int    ownerT
+    int    breakT
+    string markerTxt
+    int    side          // 1 = bullish break (CDL), -1 = bearish break (CDS)
+    bool   isInternal
+    bool   fromPullback
+    int    guardianT
+    float  guardianPrice
+    // true = the FIRST pullback-direction CDS/CDL after this range's P#. It is
+    // married to that P# (guardianT/guardianPrice = the P#'s bar + price) and
+    // lives exactly as long as the P# does — not as long as a Forced guardian.
+    bool   pMarried = false
+
+// ─── RIGHT-EDGE RENDER GROUP (from the original script) ───
+// Every forward-extending level draws its label at the same x. Rather than
+// hiding lower-priority levels, levels sharing a price are MERGED into one
+// line whose label joins every name with " & " — so nothing is lost and
+// nothing overlaps. Styling comes from the highest-priority member.
+type EdgeLvl
+    float         price
+    array<string> labels
+    color         ln_col
+    int           ln_width
+    string        ln_style
+    int           b_time
+    int           e_time
+    int           priority
+    string        txt_sz
+
+// ─── SBE — Suggested Best Entry, a standalone line ───
+// Once placed, an SBE lives on its own: it is NOT tied to the node it came
+// from. The ONLY thing that removes it is a candle CLOSING through it (long:
+// close below, short: close above) — the same rule as a normal entry. A wick
+// through it on a LATER candle marks it touched (✓).
+type SbeLine
+    float price
+    int   t
+    int   side          // 1 = SBE Long, -1 = SBE Short
+    bool  trig     = false
+    int   freeze_t = na
+    int   arm_bar  = na
+
+// ─── Guardian minted at every break, anchors marker lifetime ───
+type ForcedNode
+    float  price
+    int    t
+    int    side
+    string lbl
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════════
+var array<GapBox>      visual_gaps  = array.new<GapBox>()
+var array<POLine>      poLines      = array.new<POLine>()
+var array<ShiftMarker> shiftMarkers = array.new<ShiftMarker>()
+var array<ForcedNode>  forcedNodes  = array.new<ForcedNode>()
+var array<SbeLine>     sbeLines     = array.new<SbeLine>()
+var array<EdgeLvl>     render_groups = array.new<EdgeLvl>()
+
+var array<line>  drawn_lines   = array.new<line>()
+var array<label> drawn_labels  = array.new<label>()
+var array<box>   drawn_zones   = array.new<box>()   // eBlock / iBlock boxes
+var array<line>  drawn_z_lines = array.new<line>()
+
+// STATIC anchors (Pn / Rn) — frozen once set per range.
+var Node buStatic = na
+var Node beStatic = na
+// DYNAMIC trackers — raw and gap tracked INDEPENDENTLY, "like replaces like".
+// TREND-PHASE CONTROL slots — the MC / GMC printed in the trend's own
+// direction BEFORE a pullback forms. They are separate from the dynamic slots
+// on purpose: a resumption-phase MCR / GMCR must never overwrite them. Only a
+// newer MC / GMC, a break (CDS / CDL), or a full range reset removes them.
+var Node buCtlRaw = na
+var Node buCtlGap = na
+var Node beCtlRaw = na
+var Node beCtlGap = na
+var Node buDynRaw = na
+var Node buDynGap = na
+var Node beDynRaw = na
+var Node beDynGap = na
+
+// BALANCE ZONE — the running cluster of NBC candles. When a body-close candle
+// breaks out, the cluster it broke out of is snapshotted for that bar.
+var float bzRunHi  = na
+var float bzRunLo  = na
+var int   bzRunCnt = 0
+
+var int   mainSide = 0
+var int   curTier  = 0
+var float tnPrice  = na
+var int   tnTime   = na
+var bool  primaryPullbackDone   = false
+var bool  primaryResumptionDone = false
+
+// RANGE SHIFT MEMORY — the most recent CDL and CDS printed since the current Tn
+// formed. On a reversal, T1 ADOPTS this earlier shift instead of printing a new
+// one at the broken PO4. The PO4 break only prints its own CDL/CDS when NO
+// shift happened in the range (no GMC existed between Pn and Tn — blueprint
+// 9.2). This is what stops "CDL following CDL" / "CDS following CDS".
+// Reset every time a new Tn forms.
+// FIRST P-SHIFT — has the current range's P# already produced its first
+// pullback-direction CDS/CDL? The first one is capital and married to the P#;
+// every later one in the same range is internal (small letters).
+var bool firstPShiftDone = false
+// FIRST R-SHIFT — has the current R# (GMCR# / MCR#) already produced its first
+// resumption-direction CDL / CDS? Only that first one is capital and married
+// to the R#; later ones (made by the unnumbered GMCR / MCR) are small letters.
+var bool firstRShiftDone = false
+var int    rngCdlT      = na
+var float  rngCdlPrice  = na
+var string rngCdlTxt    = ""
+var int    rngCdlBreakT = na
+var int    rngCdsT      = na
+var float  rngCdsPrice  = na
+var string rngCdsTxt    = ""
+var int    rngCdsBreakT = na
+
+// Urgency Gap Anticipation (ORIGINAL — untouched)
+var float tc_bull_lvl      = na
+var int   tc_bull_t        = na
+var bool  tc_bull_violated = false
+var float tc_bear_lvl      = na
+var int   tc_bear_t        = na
+var bool  tc_bear_violated = false
+
+// MC Anticipation (ORIGINAL — untouched)
+var float ant_bull_price  = na
+var int   ant_bull_t      = na
+var bool  ant_bull_active = false
+var float ant_bull_h      = na
+var float ant_bull_l      = na
+var float ant_bull_o      = na
+var float ant_bull_c      = na
+var float ant_bull_v      = na   // relative volume of the MC candle, stored when it printed
+
+var float ant_bear_price  = na
+var int   ant_bear_t      = na
+var bool  ant_bear_active = false
+var float ant_bear_h      = na
+var float ant_bear_l      = na
+var float ant_bear_o      = na
+var float ant_bear_c      = na
+var float ant_bear_v      = na
+
+// ─── ALERT FLAGS ───
+bool alert_po4_bull = false
+bool alert_po4_bear = false
+bool alert_gmc_bull = false
+bool alert_gmc_bear = false
+bool alert_ent_bull = false
+bool alert_ent_bear = false
+bool alert_sbe_bull = false
+bool alert_sbe_bear = false
+bool alert_cdl      = false
+bool alert_cds      = false
+bool alert_ld       = false
+bool alert_sd       = false
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GATE OSCILLATORS (same math as Super MMPD / MMM Pro Edge)
+// ═══════════════════════════════════════════════════════════════════════════
+const color FAIL_COL = #9e9e9e
+bool gateOn = gate_mode != "NO GATE"
+
+f_xsa(float src, int len) =>
+    var float out = na
+    float ma = ta.sma(src, len)
+    out := na(out) ? ma : (src + out * (len - 1)) / len
+    out
+
+f_mmpd(int len) =>
+    float cl = (close - ta.lowest(low, len)) / (ta.highest(high, len) - ta.lowest(low, len)) * 100
+    float s1 = f_xsa(cl, 5)
+    float s2 = f_xsa(s1, 3)
+    float c  = (3 * s1 - 2 * s2 - 50) * 1.032 + 50
+    float o  = ta.ema(((2 * close + high + low + open) / 5 - ta.lowest(low, len + 7)) / (ta.highest(high, len + 7) - ta.lowest(low, len + 7)) * 100, 13)
+    [c, o]
+
+f_dma() =>
+    float v  = na(volume) or volume == 0 ? 1.0 : volume
+    float dl = close > open and close > close[1] ? v : close < open and close < close[1] ? -v : close > close[1] ? v * 0.5 : close < close[1] ? -v * 0.5 : 0.0
+    float ds = ta.ema(dl, 3)
+    float lo = ta.lowest(ds, 14)
+    float dr = ta.highest(ds, 14) - lo
+    float c  = ta.ema(dr > 0 ? (ds - lo) / dr * 100 : 50, 3)
+    float o  = ta.ema(c, 13)
+    [c, o]
+
+f_gateNow() =>
+    [c1, o1] = f_mmpd(27)
+    [c2, o2] = f_mmpd(gate_fast)
+    [c3, o3] = f_dma()
+    float hi = gate_mode == "MMPD 27" ? math.max(c1, o1) : gate_mode == "MMPD fast" ? math.max(c2, o2) : math.max(c3, o3)
+    float lo = gate_mode == "MMPD 27" ? math.min(c1, o1) : gate_mode == "MMPD fast" ? math.min(c2, o2) : math.min(c3, o3)
+    [hi, lo]
+
+[gHi, gLo] = f_gateNow()
+
+// Gate memory (impulse -> pullback -> continuation)
+var bool hitXD   = false   // oscillator <= 20 since the last flip
+var bool hitXP   = false   // oscillator >= 80 since the last flip
+var bool bullImp = false   // bull leg reached its own extreme (>= 80)
+var bool bullPb  = false   // then the pullback reached <= 20
+var bool bearImp = false
+var bool bearPb  = false
+var bool legOfficial = true   // the break that made the current Tn passed the gate
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HTF BIAS — compact copy of the PO4 engine (T# / P# / R#) on the HTF.
+// Last CLOSED HTF candle only ([1] + lookahead_on) = no repaint.
+// ═══════════════════════════════════════════════════════════════════════════
+f_htfPro() =>
+    var int   side   = 0
+    var float tn     = na
+    var float pb     = na
+    var float rs     = na
+    var int   lastC  = 0
+    var int   lastBC = 0
+    bool bu   = close > high[1]
+    bool be   = close < low[1]
+    bool done = false
+    if side == 1
+        if close < tn
+            side  := -1
+            tn    := na(pb) ? open : pb
+            pb    := na
+            rs    := na
+            lastC := 0
+            done  := true
+        else if not na(pb) and close > pb
+            tn    := na(rs) ? open : rs
+            pb    := na
+            rs    := na
+            lastC := 1
+            done  := true
+    else if side == -1
+        if close > tn
+            side  := 1
+            tn    := na(pb) ? open : pb
+            pb    := na
+            rs    := na
+            lastC := 0
+            done  := true
+        else if not na(pb) and close < pb
+            tn    := na(rs) ? open : rs
+            pb    := na
+            rs    := na
+            lastC := -1
+            done  := true
+    else
+        if bu
+            side := 1
+            tn   := open
+            done := true
+        else if be
+            side := -1
+            tn   := open
+            done := true
+    if not done
+        if side == 1
+            if not na(rs) and close < rs
+                rs := na
+            if be and na(pb)
+                pb := open
+            else if bu and not na(pb) and na(rs)
+                rs := open
+        else if side == -1
+            if not na(rs) and close > rs
+                rs := na
+            if bu and na(pb)
+                pb := open
+            else if be and not na(pb) and na(rs)
+                rs := open
+    if bu
+        lastBC := 1
+    if be
+        lastBC := -1
+    [nz(side[1]), nz(lastC[1]), nz(lastBC[1])]
+
+[htfSig, htfCont, htfBC] = request.security(syminfo.tickerid, htf_tf, f_htfPro(), lookahead=barmerge.lookahead_on)
+int  htfBias  = htf_mode == "Last Flip (CDLc/CDSc)" ? htfSig : htf_mode == "Last Continuation (LDc/SDc)" ? htfCont : htf_mode == "Last BC" ? htfBC : 0
+bool htfLong  = htf_mode == "Off" or not htf_filter or htfBias == 1
+bool htfShort = htf_mode == "Off" or not htf_filter or htfBias == -1
+
+// ═══════════════════════════════════════════════════════════════
+// NEWS ENGINE (shared by every MMM indicator) — light: no library,
+// no external request. Events = built-in CPI/FOMC/NFP + pasted calendar.
+// ═══════════════════════════════════════════════════════════════
+const string NWS_TZ = "America/New_York"
+
+f_nwImpOk(string imp) =>
+    imp == "H" ? news_red : imp == "M" ? news_org : imp == "L" ? news_yel : imp == "N" ? news_gry : false
+
+f_nwCol(string imp) =>
+    imp == "H" ? color.red : imp == "M" ? color.orange : imp == "L" ? color.yellow : color.gray
+
+f_nwRank(string imp) =>
+    imp == "H" ? 4 : imp == "M" ? 3 : imp == "L" ? 2 : 1
+
+f_nwDate(string d, int hh, int mm) =>
+    int t = na
+    if str.length(d) == 10
+        float y = str.tonumber(str.substring(d, 0, 4))
+        float m = str.tonumber(str.substring(d, 5, 7))
+        float dd = str.tonumber(str.substring(d, 8, 10))
+        if not na(y) and not na(m) and not na(dd)
+            t := timestamp(NWS_TZ, int(y), int(m), int(dd), hh, mm)
+    t
+
+var array<int>    nwT = array.new<int>()
+var array<string> nwI = array.new<string>()
+var array<string> nwN = array.new<string>()
+
+if barstate.isfirst
+    array<int>    tT = array.new<int>()
+    array<string> tI = array.new<string>()
+    array<string> tN = array.new<string>()
+    if news_builtin
+        for d in str.split(cpi_dates, ",")
+            int t = f_nwDate(str.trim(d), 8, 30)
+            if not na(t)
+                tT.push(t)
+                tI.push("H")
+                tN.push("USD CPI")
+        for d in str.split(fomc_dates, ",")
+            int t1 = f_nwDate(str.trim(d), 14, 0)
+            int t2 = f_nwDate(str.trim(d), 14, 30)
+            if not na(t1)
+                tT.push(t1)
+                tI.push("H")
+                tN.push("USD FOMC Statement")
+                tT.push(t2)
+                tI.push("H")
+                tN.push("USD FOMC Press Conference")
+        for y = 2024 to 2028
+            for m = 1 to 12
+                for dd = 1 to 7
+                    int t = timestamp(NWS_TZ, y, m, dd, 8, 30)
+                    if dayofweek(t, NWS_TZ) == dayofweek.friday
+                        tT.push(t)
+                        tI.push("H")
+                        tN.push("USD NFP")
+                        break
+    string curList = "," + str.replace_all(str.upper(news_cur), " ", "") + ","
+    for ln in str.split(str.replace_all(news_paste, ";", "\n"), "\n")
+        array<string> tk = str.split(str.trim(ln), " ")
+        if tk.size() >= 4
+            string dS  = tk.get(0)
+            string tS  = tk.get(1)
+            string cur = str.upper(tk.get(2))
+            string imp = str.upper(tk.get(3))
+            if str.length(tS) == 5 and str.contains(curList, "," + cur + ",") and f_nwImpOk(imp)
+                float hh = str.tonumber(str.substring(tS, 0, 2))
+                float mm = str.tonumber(str.substring(tS, 3, 5))
+                if not na(hh) and not na(mm)
+                    int t = f_nwDate(dS, int(hh), int(mm))
+                    if not na(t)
+                        string ttl = cur
+                        if tk.size() > 4
+                            for k = 4 to tk.size() - 1
+                                ttl += " " + tk.get(k)
+                        tT.push(t)
+                        tI.push(imp)
+                        tN.push(ttl)
+    if tT.size() > 0
+        array<int> ord = tT.sort_indices(order.ascending)
+        for k = 0 to ord.size() - 1
+            nwT.push(tT.get(ord.get(k)))
+            nwI.push(tI.get(ord.get(k)))
+            nwN.push(tN.get(ord.get(k)))
+
+int    nwPre   = news_pre * 60000
+int    nwPost  = news_post * 60000
+int    nwWarn  = (news_dot_min == "15" ? 15 : 30) * 60000
+int    nwBarMs = timeframe.in_seconds(timeframe.period) * 1000
+int    nwEnd   = nz(time_close, time + nwBarMs)
+var int nwPtr  = 0
+bool   nwHit   = false
+string nwWarnTxt = ""
+string nwWarnImp = ""
+if timeframe.isintraday and nwT.size() > 0
+    while nwPtr < nwT.size()
+        if nwT.get(nwPtr) + math.max(nwPost, 0) < time
+            nwPtr += 1
+        else
+            break
+    if nwPtr < nwT.size()
+        for j = nwPtr to nwT.size() - 1
+            int et = nwT.get(j)
+            if et - math.max(nwPre, nwWarn) >= nwEnd
+                break
+            if time < et + nwPost and nwEnd > et - nwPre
+                nwHit := true
+            int wt = et - nwWarn
+            if wt >= time and wt < nwEnd
+                nwWarnTxt += (str.length(nwWarnTxt) > 0 ? "\n" : "") + str.format_time(et, "HH:mm", NWS_TZ) + " NY · " + nwI.get(j) + " · " + nwN.get(j)
+                if str.length(nwWarnImp) == 0 or f_nwRank(nwI.get(j)) > f_nwRank(nwWarnImp)
+                    nwWarnImp := nwI.get(j)
+bool newsBlock = news_on and nwHit
+
+bgcolor(news_bg and nwHit ? color.new(color.orange, 85) : na, title="News Window")
+
+// Warning dot — on the candle holding (news time - 15/30 min), live or closed.
+var label[] nwDots = array.new<label>()
+if news_dot and str.length(nwWarnTxt) > 0
+    color  dc   = f_nwCol(nwWarnImp)
+    bool   atHi = news_dot_at == "High"
+    string dTx  = news_dot_txt ? "◉ " + nwWarnTxt : ""
+    label  dl   = label.new(bar_index, atHi ? high : low, dTx, yloc=atHi ? yloc.abovebar : yloc.belowbar, style=news_dot_txt ? (atHi ? label.style_label_down : label.style_label_up) : label.style_circle, color=news_dot_txt ? color(na) : dc, textcolor=dc, size=size.tiny, tooltip="News in " + news_dot_min + " min:\n" + nwWarnTxt)
+    if barstate.isconfirmed
+        nwDots.push(dl)
+        if nwDots.size() > 100
+            label.delete(nwDots.shift())
+
+// ENTRY FILTER — every entry line passes the same checks: no news window,
+// HTF bias agrees, and (with a gate on) a WITH-TREND entry needs the current
+// leg's break to be official. Counter-trend pullback entries skip the gate.
+f_entOk(bool isLong) =>
+    bool withTrend = (isLong and mainSide == 1) or (not isLong and mainSide == -1)
+    not newsBlock and (isLong ? htfLong : htfShort) and (not gateOn or not withTrend or legOfficial)
+
+// Engine letter on every break name (c = candle engine).
+f_eng(string txt) =>
+    string r = txt
+    if eng_tag
+        r := str.replace_all(r, "CDL", "CDLc")
+        r := str.replace_all(r, "CDS", "CDSc")
+        r := str.replace_all(r, "cdl", "cdlc")
+        r := str.replace_all(r, "cds", "cdsc")
+        r := str.replace_all(r, "LD", "LDc")
+        r := str.replace_all(r, "SD", "SDc")
+        r := str.replace_all(r, "ld", "ldc")
+        r := str.replace_all(r, "sd", "sdc")
+    r
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPERS (all global scope — Pine rejects declarations inside if blocks)
+// ═══════════════════════════════════════════════════════════════════════════
+// STRICT PULLBACKS: in "GMPO (Gap-Confirmed Only)" a raw MP is not a pullback
+// at all. It cannot anchor P#, cannot validate LD / SD, and cannot become T1 on
+// a reversal. It must be gap-confirmed first. In "MPO (Raw Pullback)" both raw
+// and gap-confirmed pullbacks count, exactly as before.
+bool strictP = p1_validate_mode == "GMPO (Gap-Confirmed Only)"
+
+// ENTRY MATRIX — family switch AND type switch. Trend U (MC) never below H1.
+bool mcEntryTfOk = timeframe.in_seconds() >= 3600
+bool eTrU  = ent_trend and ent_tr_u and mcEntryTfOk
+bool eTrXU = ent_trend and ent_tr_xu
+bool eTrO  = ent_trend and ent_tr_o
+bool ePbU  = ent_pb and ent_pb_u and not strictP
+bool ePbXU = ent_pb and ent_pb_xu
+bool ePbO  = ent_pb and ent_pb_o
+bool eCtU  = ent_ct and ent_ct_u
+bool eCtXU = ent_ct and ent_ct_xu
+bool eCtO  = ent_ct and ent_ct_o
+
+f_eps() => math.max(syminfo.mintick * 0.51, 1e-5)
+
+f_sz(string s) =>
+    s == "large" ? size.large : s == "normal" ? size.normal : s == "small" ? size.small : size.tiny
+
+f_ln_style(string s) =>
+    s == "Solid" ? line.style_solid : s == "Dotted" ? line.style_dotted : line.style_dashed
+
+var int bar_time_diff = timeframe.in_seconds() * 1000
+f_future_time(int ext) =>
+    int diff = time - nz(time[1], time)
+    if diff <= 0
+        diff := bar_time_diff
+    if diff <= 0
+        diff := 60000
+    time + math.round(diff * ext)
+
+// Swaps MC/GMC/MP/GMP for the Urgency naming when selected. Longer tokens are
+// replaced first so GMC doesn't partially match the MC replacement.
+// Converts EVERY structural token to the Urgency scheme when selected —
+// uppercase and lowercase alike, resumptions (MCR/GMCR -> UCR/XUCR) included,
+// and the long-form "GM Pullback / M Pullback" naming too. Longest tokens are
+// replaced first so GMCR never partially matches the GMC or MC rules.
+f_apply_naming(string txt) =>
+    string result = txt
+    if label_naming_scheme == "UC / XUC / UP / XUP"
+        // long-form pullback naming first (it contains the short tokens)
+        result := str.replace_all(result, "GM Pullback", "XUP")
+        result := str.replace_all(result, "M Pullback",  "UP")
+        result := str.replace_all(result, "gm pullback", "xup")
+        result := str.replace_all(result, "m pullback",  "up")
+        // uppercase
+        result := str.replace_all(result, "GMCR", "XUCR")
+        result := str.replace_all(result, "GMC",  "XUC")
+        result := str.replace_all(result, "GMP",  "XUP")
+        result := str.replace_all(result, "MCR",  "UCR")
+        result := str.replace_all(result, "MC",   "UC")
+        result := str.replace_all(result, "MP",   "UP")
+        // lowercase (internal/secondary labels)
+        result := str.replace_all(result, "gmcr", "xucr")
+        result := str.replace_all(result, "gmc",  "xuc")
+        result := str.replace_all(result, "gmp",  "xup")
+        result := str.replace_all(result, "mcr",  "ucr")
+        result := str.replace_all(result, "mc",   "uc")
+        result := str.replace_all(result, "mp",   "up")
+    result
+
+// Marker lifetime is anchored ONLY to the dedicated Forced guardians, never to
+// the shared MP/MC/MCR slots — those churn constantly and would sweep markers
+// within a bar or two. Every break mints its own guardian.
+f_guardianExists(int gT, float gPrice) =>
+    bool found = false
+    if forcedNodes.size() > 0
+        for fn in forcedNodes
+            if fn.t == gT and math.abs(fn.price - gPrice) <= f_eps()
+                found := true
+    found
+
+// Is there a live PO4 origin at this exact bar + price? After an LD / SD the
+// R# becomes the new Tn, so the R#'s first CDL / CDS stays married to that Tn.
+f_poLineAt(int gT, float gP) =>
+    bool found = false
+    if poLines.size() > 0
+        for pl in poLines
+            if pl.t == gT and math.abs(pl.price - gP) <= f_eps()
+                found := true
+    found
+
+// A P#-married CDS lives on the bull trend's BeX pullback anchor (beStatic);
+// a P#-married CDL lives on the bear trend's BuX pullback anchor (buStatic).
+// Alive = that exact anchor (same bar + price) still exists.
+// The REAL node (one of the six state slots) that sits at this exact bar +
+// price, or na. This is the husband when the breaking candle was a body close.
+f_slotNodeAt(int gT, float gP) =>
+    Node res = na
+    if not na(buStatic) and buStatic.t == gT and math.abs(buStatic.price - gP) <= f_eps()
+        res := buStatic
+    if na(res) and not na(beStatic) and beStatic.t == gT and math.abs(beStatic.price - gP) <= f_eps()
+        res := beStatic
+    if na(res) and not na(buDynRaw) and buDynRaw.t == gT and math.abs(buDynRaw.price - gP) <= f_eps()
+        res := buDynRaw
+    if na(res) and not na(buDynGap) and buDynGap.t == gT and math.abs(buDynGap.price - gP) <= f_eps()
+        res := buDynGap
+    if na(res) and not na(beDynRaw) and beDynRaw.t == gT and math.abs(beDynRaw.price - gP) <= f_eps()
+        res := beDynRaw
+    if na(res) and not na(beDynGap) and beDynGap.t == gT and math.abs(beDynGap.price - gP) <= f_eps()
+        res := beDynGap
+    if na(res) and not na(buCtlRaw) and buCtlRaw.t == gT and math.abs(buCtlRaw.price - gP) <= f_eps()
+        res := buCtlRaw
+    if na(res) and not na(buCtlGap) and buCtlGap.t == gT and math.abs(buCtlGap.price - gP) <= f_eps()
+        res := buCtlGap
+    if na(res) and not na(beCtlRaw) and beCtlRaw.t == gT and math.abs(beCtlRaw.price - gP) <= f_eps()
+        res := beCtlRaw
+    if na(res) and not na(beCtlGap) and beCtlGap.t == gT and math.abs(beCtlGap.price - gP) <= f_eps()
+        res := beCtlGap
+    res
+
+// Does ANY husband exist at this bar + price — a real node or a Forced one?
+f_nodeExistsAt(int gT, float gP) =>
+    not na(f_slotNodeAt(gT, gP)) or f_guardianExists(gT, gP)
+
+f_pAnchorAlive(ShiftMarker sm) =>
+    Node a = sm.side == -1 ? beStatic : buStatic
+    not na(a) and a.t == sm.guardianT and math.abs(a.price - sm.guardianPrice) <= f_eps()
+
+// Merges a level into the right-edge render groups. Levels within one tick of
+// each other collapse into a single line; their labels are joined with " & "
+// and the highest-priority member dictates color, width, style and text size.
+f_add_level(float p_price, string p_text, color p_col, int p_width, string p_style, int p_start_t, int p_end_t, int p_prio, string p_txt_sz) =>
+    bool found = false
+    int safe_start = nz(p_start_t, time)
+    int safe_end   = nz(p_end_t, time)
+    int final_b    = math.min(safe_start, safe_end)
+    int final_e    = math.max(safe_start, safe_end)
+
+    if render_groups.size() > 0
+        for grp in render_groups
+            if math.abs(grp.price - p_price) <= f_eps()
+                found := true
+                if str.length(p_text) > 0 and array.indexof(grp.labels, p_text) == -1
+                    grp.labels.push(p_text)
+                grp.b_time := math.min(grp.b_time, final_b)
+                grp.e_time := math.max(grp.e_time, final_e)
+                if p_prio > grp.priority
+                    grp.ln_col   := p_col
+                    grp.ln_width := p_width
+                    grp.ln_style := p_style
+                    grp.priority := p_prio
+                    grp.txt_sz   := p_txt_sz
+                break
+
+    if not found
+        array<string> new_labels = array.new<string>()
+        if str.length(p_text) > 0
+            new_labels.push(p_text)
+        render_groups.push(EdgeLvl.new(price=p_price, labels=new_labels, ln_col=p_col, ln_width=p_width, ln_style=p_style, b_time=final_b, e_time=final_e, priority=p_prio, txt_sz=p_txt_sz))
+
+f_draw_groups() =>
+    if render_groups.size() > 0
+        for grp in render_groups
+            string combined_txt = array.join(grp.labels, " & ")
+            drawn_lines.push(line.new(grp.b_time, grp.price, grp.e_time, grp.price, xloc=xloc.bar_time, color=grp.ln_col, width=grp.ln_width, style=grp.ln_style))
+            drawn_labels.push(label.new(grp.e_time, grp.price, combined_txt, xloc=xloc.bar_time, textcolor=grp.ln_col, color=color(na), style=label.style_label_left, size=f_sz(grp.txt_sz)))
+    render_groups.clear()
+
+// STATIC anchor text — capitalized, numbered to the range's tier.
+f_staticText(Node n, string candleType, bool isPullbackRole, int tier) =>
+    string pullLbl = label_gmp_mp == "GMP / MP" ? (n.isGap ? "GMP" : "MP") : (n.isGap ? "GM Pullback" : "M Pullback")
+    string roleLabel = isPullbackRole ? pullLbl : (n.isGap ? "GMCR" : "MCR")
+    candleType + " " + roleLabel + (show_tiers ? str.tostring(tier) : "")
+
+// DYNAMIC pullback text — lowercase, never numbered (internal, counter-trend).
+f_dynPullbackText(Node n, string candleType) =>
+    string pullLbl = label_gmp_mp == "GMP / MP" ? (n.isGap ? "GMP" : "MP") : (n.isGap ? "GM Pullback" : "M Pullback")
+    str.lower(candleType + " " + pullLbl)
+
+// DYNAMIC resumption text — always capitalized (with-trend), never numbered.
+// Uses the node's OWN stamped phase flag so it can't retroactively relabel.
+f_dynResumeText(Node n, string candleType) =>
+    string roleLabel = n.isPhase3Internal ? (n.isGap ? "GMCR" : "MCR") : (n.isGap ? "GMC" : "MC")
+    candleType + " " + roleLabel
+
+// PURGE OFF + a range closing: the state machine must empty its slots, but a
+// node still married to a CDS / CDL cannot just vanish. Each such node is kept
+// on the chart as a standalone husband (same bar, price and name) so the pair
+// stays together until price closes back through it.
+// EXCEPTION: a marker whose husband just BECAME the new Tn (the R# promoted on
+// an LD / SD) is not copied — it stays married to that PO4 instead, so no
+// "BuX GMCR#" label is ever drawn beside the new "BuPO4 T#".
+f_preserveHusbands(int oldSide, int tier) =>
+    if shiftMarkers.size() > 0
+        for sm in shiftMarkers
+            if not sm.pMarried and not f_guardianExists(sm.guardianT, sm.guardianPrice) and not f_poLineAt(sm.guardianT, sm.guardianPrice)
+                Node h = f_slotNodeAt(sm.guardianT, sm.guardianPrice)
+                if not na(h)
+                    bool   isBu   = sm.side == 1
+                    bool   pbRole = isBu ? oldSide == -1 : oldSide == 1
+                    string ct     = isBu ? "BuX" : "BeX"
+                    string lbl    = h.isPrimary ? f_staticText(h, ct, pbRole, tier) : (pbRole ? f_dynPullbackText(h, ct) : f_dynResumeText(h, ct))
+                    forcedNodes.push(ForcedNode.new(price=h.price, t=h.t, side=sm.side, lbl=lbl))
+
+// p1_validate_mode display filter: in "GMPO (Gap-Confirmed Only)" mode only
+// gap-confirmed pullbacks (GMP) are plotted. Raw MP levels are still tracked
+// and still validate LD/SD — they are simply not drawn. Origins (PO4) are
+// never affected by this.
+// Anchor-candle relative volume, as a percentage of its 20-bar average.
+// Called ONCE per bar at global scope (g_volPct below), so the average is
+// built on every bar. Never call it inside an if block or the render.
+var int volLen = 20
+f_volPct() =>
+    float avg = ta.sma(volume, volLen)
+    avg > 0 ? volume / avg * 100 : float(na)
+
+float g_volPct = f_volPct()
+
+f_pullbackVisible(Node n) =>
+    p1_validate_mode == "MPO (Raw Pullback)" or n.isGap
+
+f_sbeStr(bool isLong) =>
+    isLong ? (ent_style == "Text" ? "SBE Long Entry" : ent_style == "Compact" ? "SBE Long ⬆" : "SBE ⬆") : (ent_style == "Text" ? "SBE Short Entry" : ent_style == "Compact" ? "SBE Short ⬇" : "SBE ⬇")
+
+// An SBE is only worth showing when it is a BETTER price than the MMM entry:
+// lower for a long, higher for a short.
+f_sbeValid(float sbe, float ent, bool isLong) =>
+    not na(sbe) and not na(ent) and (isLong ? sbe < ent - f_eps() : sbe > ent + f_eps())
+
+// Place an SBE if it is a better price than the MMM entry. Skips a duplicate
+// at the same price + side so the same zone edge is never stacked twice.
+f_armSbe(float sbe, float ent, bool isLong, int t) =>
+    if f_sbeValid(sbe, ent, isLong) and f_entOk(isLong)
+        int  sd  = isLong ? 1 : -1
+        bool dup = false
+        if sbeLines.size() > 0
+            for x in sbeLines
+                if x.side == sd and math.abs(x.price - sbe) <= f_eps()
+                    dup := true
+        if not dup
+            sbeLines.push(SbeLine.new(price=sbe, t=t, side=sd, arm_bar=bar_index))
+
+f_entStr(bool isLong) =>
+    isLong ? (ent_style == "Text" ? "Long Entry" : ent_style == "Compact" ? "Long ⬆" : "⬆") : (ent_style == "Text" ? "Short Entry" : ent_style == "Compact" ? "Short ⬇" : "⬇")
+
+// Arms a node's U / XU entry. ent_arm_bar records the bar it was plotted on:
+// a touch only counts (✓) on a LATER bar — price must come BACK to it.
+f_armEnt(Node n, float p, float tgt, float alt, bool isLong) =>
+    if f_entOk(isLong)
+        n.ent_price         := p
+        n.tgt_price         := tgt
+        n.alt_price         := alt
+        n.ent_str           := f_entStr(isLong)
+        n.entry_triggered   := false
+        n.is_swept_rejected := false
+        n.ent_freeze_t      := na
+        n.ent_arm_bar       := bar_index
+        f_armSbe(n.sbe_price, p, isLong, n.t)
+
+// Arms a node's ORIGIN (PO4 type) entry at its own open.
+f_armOrg(Node n, bool isLong) =>
+    if f_entOk(isLong)
+        n.org_price    := n.price
+        n.org_str      := f_entStr(isLong)
+        n.org_trig     := false
+        n.org_freeze_t := na
+        n.org_arm_bar  := bar_index
+        f_armSbe(n.sbe_price, n.price, isLong, n.t)
+
+// Keeps a U entry alive when its MC upgrades to GMC and XU entries are off.
+f_copyEnt(Node src, Node dst) =>
+    dst.ent_price         := src.ent_price
+    dst.tgt_price         := src.tgt_price
+    dst.alt_price         := src.alt_price
+    dst.ent_str           := src.ent_str
+    dst.entry_triggered   := src.entry_triggered
+    dst.is_swept_rejected := src.is_swept_rejected
+    dst.ent_freeze_t      := src.ent_freeze_t
+    dst.ent_arm_bar       := src.ent_arm_bar
+
+// Touch / sweep / close-through for a node's U-XU entry and its origin entry.
+// Returns true when either entry was touched on this bar.
+f_entTick(Node n, bool isLong) =>
+    bool hit = false
+    if not na(n)
+        if newsBlock
+            if not na(n.ent_price) and not n.entry_triggered
+                n.ent_price := na
+                n.ent_str   := ""
+            if not na(n.org_price) and not n.org_trig
+                n.org_price := na
+                n.org_str   := ""
+        if not na(n.ent_price)
+            if bar_index > nz(n.ent_arm_bar, -1)
+                if not n.entry_triggered and (isLong ? low <= n.ent_price : high >= n.ent_price)
+                    n.entry_triggered := true
+                    n.ent_freeze_t    := time
+                    hit               := true
+                else if not n.entry_triggered and not n.is_swept_rejected and not na(n.tgt_price) and not na(n.alt_price) and (isLong ? high >= n.tgt_price : low <= n.tgt_price)
+                    n.is_swept_rejected := true
+                    n.ent_price         := n.alt_price
+            if (isLong ? close < n.ent_price : close > n.ent_price) or (n.entry_triggered and ent_trig_mode == "Hide")
+                n.ent_price := na
+                n.ent_str   := ""
+        if not na(n.org_price)
+            if bar_index > nz(n.org_arm_bar, -1) and not n.org_trig and (isLong ? low <= n.org_price : high >= n.org_price)
+                n.org_trig     := true
+                n.org_freeze_t := time
+                hit            := true
+            if (isLong ? close < n.org_price : close > n.org_price) or (n.org_trig and ent_trig_mode == "Hide")
+                n.org_price := na
+                n.org_str   := ""
+    hit
+
+// Pushes a node's U-XU entry and origin entry into the right-edge groups.
+f_drawNodeEnt(Node n, bool isLong, int fEnt) =>
+    if not na(n)
+        color ec = isLong ? long_ent_col : short_ent_col
+        if not na(n.ent_price)
+            int ee = (n.entry_triggered and ent_trig_mode == "Stop Extending") ? n.ent_freeze_t : fEnt
+            f_add_level(n.ent_price, n.entry_triggered ? n.ent_str + " ✓" : n.ent_str, ec, 1, line.style_dotted, n.t, ee, 3, ent_size)
+        if not na(n.org_price)
+            int oe = (n.org_trig and ent_trig_mode == "Stop Extending") ? n.org_freeze_t : fEnt
+            f_add_level(n.org_price, n.org_trig ? n.org_str + " ✓" : n.org_str, ec, 1, line.style_dotted, n.t, oe, 3, ent_size)
+
+// LEG EXTREME — the lowest low (bull) / highest high (bear) from startT up to
+// the current bar. Scans back at most 299 bars (the script's history limit).
+f_legExtreme(int startT, bool isBull) =>
+    float ext = isBull ? low : high
+    int lookback = math.min(bar_index, 299)
+    for i = 0 to lookback
+        if time[i] < startT
+            break
+        ext := isBull ? math.min(ext, low[i]) : math.max(ext, high[i])
+    ext
+
+f_buildSlices(float gTop, float gBot, color bgCol, int le, int re) =>
+    box[]  sl  = array.new<box>()
+    bool[] tch = array.new<bool>()
+    float h = (gTop - gBot) / slices_count
+    for k = 0 to slices_count - 1
+        sl.push(box.new(le, gTop-k*h, re, gTop-(k+1)*h, bgcolor=bgCol, border_color=na))
+        tch.push(false)
+    [sl, tch]
+
+method erase(GapBox u) =>
+    if not na(u.b)
+        box.delete(u.b)
+    if not na(u.l)
+        line.delete(u.l)
+    if not na(u.lbl)
+        label.delete(u.lbl)
+    for s in u.slices
+        box.delete(s)
+
+// Builds a fractional eBlock/iBlock zone from a candle's OHLC.
+f_pushZone(array<RenderZone> arr, int zt, int zend, float ch, float cl, float co, float cc, bool isBull, color bg, string blockName, float volPct) =>
+    float calc_top = zone_calc_basis == "High/Low" ? ch : math.max(co, cc)
+    float calc_bot = zone_calc_basis == "High/Low" ? cl : math.min(co, cc)
+    float rng = calc_top - calc_bot
+    float z_top = na
+    float z_bot = na
+    if isBull
+        if zone_tier == "Extreme (0-12.5% / 87.5-100%)"
+            z_top := calc_bot + rng * 0.125
+            z_bot := calc_bot
+        else if zone_tier == "Balanced (12.5-25% / 75-87.5%)"
+            z_top := calc_bot + rng * 0.25
+            z_bot := calc_bot + rng * 0.125
+        else if zone_tier == "Standard (25-50% / 50-75%)"
+            z_top := calc_bot + rng * 0.50
+            z_bot := calc_bot + rng * 0.25
+        else
+            z_top := calc_bot + rng * 0.50
+            z_bot := calc_bot
+    else
+        if zone_tier == "Extreme (0-12.5% / 87.5-100%)"
+            z_top := calc_top
+            z_bot := calc_bot + rng * 0.875
+        else if zone_tier == "Balanced (12.5-25% / 75-87.5%)"
+            z_top := calc_bot + rng * 0.875
+            z_bot := calc_bot + rng * 0.75
+        else if zone_tier == "Standard (25-50% / 50-75%)"
+            z_top := calc_bot + rng * 0.75
+            z_bot := calc_bot + rng * 0.50
+        else
+            z_top := calc_top
+            z_bot := calc_bot + rng * 0.50
+    arr.push(RenderZone.new(zt, zend, z_top, z_bot, calc_bot + rng * 0.50, bg, isBull, calc_top, calc_bot, blockName, volPct))
+
+// ─── REAL-TIME URGENCY FAILURE DETECTION (ORIGINAL — untouched) ───
+if show_tc
+    if tc_bull_violated
+        tc_bull_lvl := na
+        tc_bull_violated := false
+    if not na(tc_bull_lvl) and low <= tc_bull_lvl and not tc_bull_violated
+        tc_bull_violated := true
+
+    if tc_bear_violated
+        tc_bear_lvl := na
+        tc_bear_violated := false
+    if not na(tc_bear_lvl) and high >= tc_bear_lvl and not tc_bear_violated
+        tc_bear_violated := true
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIRMED BAR — waterfall (Armor Rule 1): gap-confirm → evaluate breaks →
+// resolve → assign this candle → lifetime sweeps.
+// ═══════════════════════════════════════════════════════════════════════════
+if barstate.isconfirmed
+
+    // GATE MEMORY — this candle's oscillator (only matters when a gate is on)
+    if gateOn and not na(gHi) and not na(gLo)
+        if gHi >= 80
+            hitXP := true
+            if mainSide == 1
+                bullImp := true
+            if mainSide == -1 and bearImp
+                bearPb := true
+        if gLo <= 20
+            hitXD := true
+            if mainSide == -1
+                bearImp := true
+            if mainSide == 1 and bullImp
+                bullPb := true
+
+    // TWO-WAY CANDLE: a candle that opens beyond one side of the prior range
+    // and CLOSES beyond the other side is ONE body close only — the close
+    // decides. It never mints a bull node and a bear node at the same price.
+    bool isBuX = close > high[1] or (open > high[1] and not (close < low[1]))
+    bool isBeX = close < low[1]  or (open < low[1]  and not (close > high[1]))
+    bool isNBC = not isBuX and not isBeX
+    float curVolPct = g_volPct
+
+    // Balance zone this candle broke out of (valid only on a body-close bar).
+    float bzBrkHi = na
+    float bzBrkLo = na
+    if not isBuX and not isBeX
+        float bzH = sbe_body ? math.max(open, close) : high
+        float bzL = sbe_body ? math.min(open, close) : low
+        bzRunHi  := bzRunCnt == 0 ? bzH : math.max(bzRunHi, bzH)
+        bzRunLo  := bzRunCnt == 0 ? bzL : math.min(bzRunLo, bzL)
+        bzRunCnt += 1
+    else
+        if bzRunCnt >= sbe_min_nbc
+            bzBrkHi := bzRunHi
+            bzBrkLo := bzRunLo
+        bzRunHi  := na
+        bzRunLo  := na
+        bzRunCnt := 0
+
+    // usedAsDirectBreak lock — a candle that skipped a pending state and became
+    // the new Tn directly must not ALSO be assigned to an MP/MC/MCR slot.
+    bool buLockedThisBar = false
+    bool beLockedThisBar = false
+
+    float udg_min = min_udg_ticks * syminfo.mintick
+    bool  bullUdg = (low - high[2]) >= udg_min and close[1] > high[2] and not (low > high[1])
+    bool  bearUdg = (low[2] - high) >= udg_min and close[1] < low[2] and not (high < low[1])
+
+    // GAP CONFIRMATION (state machine): candle 2 is a GMC whenever a gap is
+    // left between candle 1 and candle 3 — INCLUDING when candle 3 opens fully
+    // beyond candle 2 (gap over gap), and when candle 2 only OPENED beyond
+    // candle 1 and closed back inside. Candle 2 must be a body close (a node
+    // only exists for a BuX / BeX candle). bullUdg / bearUdg above stay for
+    // drawing the voids only (UDG vs UOG remain separate on the chart).
+    bool  bullGapCf = (low - high[2]) >= udg_min
+    bool  bearGapCf = (low[2] - high) >= udg_min
+
+    float bull_gap_top = math.min(close, open)
+    float bull_gap_bot = math.max(close[1], open[1])
+    bool  bull_ulg_now = open>close[1] and high[1]>low and close>close[1] and open>open[1] and high[1]<bull_gap_top
+    bool  bull_uog_now = low > high[1]
+
+    float bear_gap_top = math.min(close[1], open[1])
+    float bear_gap_bot = math.max(close, open)
+    bool  bear_ulg_now = open<close[1] and low[1]<high and close<close[1] and open<open[1] and low[1]>bear_gap_bot
+    bool  bear_uog_now = high < low[1]
+
+    // ─── MC ANTICIPATION TRACKING (ORIGINAL — untouched) ───
+    if ant_bear_active and close > ant_bear_price
+        ant_bear_active := false
+    if ant_bull_active and close < ant_bull_price
+        ant_bull_active := false
+
+    if isBuX
+        if ant_mode == "Last Active Only"
+            ant_bear_active := false
+        ant_bull_price  := open
+        ant_bull_t      := time
+        ant_bull_h      := high
+        ant_bull_l      := low
+        ant_bull_o      := open
+        ant_bull_c      := close
+        ant_bull_v      := curVolPct
+        ant_bull_active := true
+    if isBeX
+        if ant_mode == "Last Active Only"
+            ant_bull_active := false
+        ant_bear_price  := open
+        ant_bear_t      := time
+        ant_bear_h      := high
+        ant_bear_l      := low
+        ant_bear_o      := open
+        ant_bear_c      := close
+        ant_bear_v      := curVolPct
+        ant_bear_active := true
+
+    // ─── URGENCY GAP ANTICIPATION (ORIGINAL — untouched) ───
+    if show_tc
+        if isBuX
+            if tc_mode=="Last Active Only"
+                tc_bear_lvl := na
+                tc_bear_violated := false
+            tc_bull_lvl  := high[1]
+            tc_bull_t    := nz(time[1], time)
+            tc_bull_violated := false
+        if isBeX
+            if tc_mode=="Last Active Only"
+                tc_bull_lvl := na
+                tc_bull_violated := false
+            tc_bear_lvl  := low[1]
+            tc_bear_t    := nz(time[1], time)
+            tc_bear_violated := false
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STRUCTURAL VOIDS ENGINE (ORIGINAL — untouched)
+    // ═══════════════════════════════════════════════════════════════════════
+    color grey_box  = color.new(#636363,85)
+    color grey_line = color.new(#636363,60)
+    if visual_gaps.size() > 0
+        for i = visual_gaps.size()-1 to 0
+            GapBox u = visual_gaps.get(i)
+            bool isFilled     = false
+            bool newlyTouched = false
+            bool isSlicedLoop = gapExtMode=="Filled & Unfilled (Sliced)"
+            if bar_index >= u.creationBar
+                if u.isBull
+                    if low<=u.top and not u.isTouched
+                        u.isTouched  := true
+                        newlyTouched := true
+                    if low<=u.bot
+                        isFilled := true
+                    if not u.stoppedExtending and not isSlicedLoop and not na(u.mid) and low<=u.mid
+                        u.stoppedExtending := true
+                        if u.gType=="ULG"
+                            box.set_border_color(u.b, grey_line)
+                        else
+                            box.set_bgcolor(u.b, grey_box)
+                        if not na(u.l)
+                            line.set_color(u.l, grey_line)
+                        if not na(u.lbl)
+                            label.set_textcolor(u.lbl, color.new(gap_lbl_col,70))
+                else
+                    if high>=u.bot and not u.isTouched
+                        u.isTouched  := true
+                        newlyTouched := true
+                    if high>=u.top
+                        isFilled := true
+                    if not u.stoppedExtending and not isSlicedLoop and not na(u.mid) and high>=u.mid
+                        u.stoppedExtending := true
+                        if u.gType=="ULG"
+                            box.set_border_color(u.b, grey_line)
+                        else
+                            box.set_bgcolor(u.b, grey_box)
+                        if not na(u.l)
+                            line.set_color(u.l, grey_line)
+                        if not na(u.lbl)
+                            label.set_textcolor(u.lbl, color.new(gap_lbl_col,70))
+            if newlyTouched and not isSlicedLoop
+                if not u.stoppedExtending
+                    if u.gType=="ULG"
+                        box.set_border_color(u.b, color.new(u.origBorder,80))
+                    else
+                        box.set_bgcolor(u.b, color.new(u.origBg,85))
+                    if not na(u.l)
+                        line.set_color(u.l, color.new(u.origLine,80))
+                    if not na(u.lbl)
+                        label.set_textcolor(u.lbl, color.new(u.origLblText,70))
+                if gapExtMode=="Until First Touch"
+                    u.stoppedExtending := true
+            if isSlicedLoop and not isFilled and u.slices.size()>0
+                for j=0 to u.slices.size()-1
+                    if not u.sliceTouched.get(j)
+                        box sBox = u.slices.get(j)
+                        if high>=box.get_bottom(sBox) and low<=box.get_top(sBox)
+                            box.set_bgcolor(sBox, col_partial)
+                            box.set_border_color(sBox, na)
+                            u.sliceTouched.set(j, true)
+                            box.set_right(sBox, bar_index)
+            if hide_filled and isFilled
+                u.erase()
+                visual_gaps.remove(i)
+            else if not isFilled
+                if isSlicedLoop and u.slices.size()>0
+                    for j=0 to u.slices.size()-1
+                        if not u.sliceTouched.get(j)
+                            box.set_right(u.slices.get(j), bar_index+1)
+                    if not na(u.l)
+                        line.set_x2(u.l, bar_index+1)
+                else if not u.stoppedExtending
+                    box.set_right(u.b, bar_index+1)
+                    if not na(u.l)
+                        line.set_x2(u.l, bar_index+1)
+                    if not na(u.lbl) and gap_lbl_side=="Right"
+                        label.set_x(u.lbl, bar_index+1)
+
+    bool isMini   = gapExtMode=="Minimalistic"
+    bool isSliced = gapExtMode=="Filled & Unfilled (Sliced)"
+    int  upg_right = isMini ? bar_index+mini_len : bar_index+1
+    int  gap_lbl_x = gap_lbl_side=="Right" ? upg_right : bar_index-1
+
+    if show_vi and show_all_gaps and bull_ulg_now
+        int le = bar_index-1
+        label lbl_g = show_gap_labels ? label.new(gap_lbl_x,math.avg(bull_gap_top,bull_gap_bot),"ULG+",color=color.new(color.white,100),textcolor=gap_lbl_col,style=label.style_none,size=size.tiny) : label(na)
+        box bx_g  = isSliced ? box.new(le,bull_gap_top,upg_right,bull_gap_bot,border_color=na,bgcolor=color.new(bull_vi_css,100)) : box.new(le,bull_gap_top,upg_right,bull_gap_bot,border_color=bull_vi_css,bgcolor=na,border_style=line.style_dotted)
+        line ln_g  = show_midlines ? line.new(le,math.avg(bull_gap_top,bull_gap_bot),upg_right,math.avg(bull_gap_top,bull_gap_bot),color=color.new(bull_vi_css,0),style=line.style_dotted,width=1) : line(na)
+        box[] sl_g  = array.new<box>()
+        bool[] tch_g = array.new<bool>()
+        if isSliced
+            [sl_tmp,tch_tmp] = f_buildSlices(bull_gap_top,bull_gap_bot,color.new(bull_vi_css,60),le,upg_right)
+            sl_g  := sl_tmp
+            tch_g  := tch_tmp
+        visual_gaps.push(GapBox.new(b=bx_g, l=ln_g, lbl=lbl_g, top=bull_gap_top, bot=bull_gap_bot, isBull=true, gType="ULG", isTouched=false, stoppedExtending=isMini, origBg=color(na), origBorder=bull_vi_css, origLine=color.new(bull_vi_css,0), origLblText=gap_lbl_col, creationBar=bar_index, mid=math.avg(bull_gap_top,bull_gap_bot), slices=sl_g, sliceTouched=tch_g))
+
+    if show_og and show_all_gaps and bull_uog_now
+        int le = bar_index-1
+        label lbl_g = show_gap_labels ? label.new(gap_lbl_x,math.avg(low,high[1]),"UOG+",color=color.new(color.white,100),textcolor=gap_lbl_col,style=label.style_none,size=size.tiny) : label(na)
+        box bx_g  = isSliced ? box.new(le,low,upg_right,high[1],border_color=na,bgcolor=color.new(bull_og_css,100)) : box.new(le,low,upg_right,high[1],border_color=na,bgcolor=bull_og_css)
+        line ln_g  = show_midlines ? line.new(le,math.avg(low,high[1]),upg_right,math.avg(low,high[1]),color=color.new(bull_og_css,0),style=line.style_dotted,width=1) : line(na)
+        box[] sl_g  = array.new<box>()
+        bool[] tch_g = array.new<bool>()
+        if isSliced
+            [sl_tmp,tch_tmp] = f_buildSlices(low,high[1],bull_og_css,le,upg_right)
+            sl_g  := sl_tmp
+            tch_g  := tch_tmp
+        visual_gaps.push(GapBox.new(b=bx_g, l=ln_g, lbl=lbl_g, top=low, bot=high[1], isBull=true, gType="UOG", isTouched=false, stoppedExtending=isMini, origBg=bull_og_css, origBorder=color(na), origLine=color.new(bull_og_css,0), origLblText=gap_lbl_col, creationBar=bar_index, mid=math.avg(low,high[1]), slices=sl_g, sliceTouched=tch_g))
+
+    if show_upg and show_all_gaps and bullUdg
+        int le = bar_index-2
+        label lbl_g = show_gap_labels ? label.new(gap_lbl_x,math.avg(low,high[2]),"UDG+",color=color.new(color.white,100),textcolor=gap_lbl_col,style=label.style_none,size=size.tiny) : label(na)
+        box bx_g  = isSliced ? box.new(le,low,upg_right,high[2],border_color=na,bgcolor=color.new(bull_upg_css,100)) : box.new(le,low,upg_right,high[2],border_color=na,bgcolor=bull_upg_css)
+        line ln_g  = show_midlines ? line.new(le,math.avg(low,high[2]),upg_right,math.avg(low,high[2]),color=color.new(bull_upg_css,0),style=line.style_dotted,width=1) : line(na)
+        box[] sl_g  = array.new<box>()
+        bool[] tch_g = array.new<bool>()
+        if isSliced
+            [sl_tmp,tch_tmp] = f_buildSlices(low,high[2],bull_upg_css,le,upg_right)
+            sl_g  := sl_tmp
+            tch_g  := tch_tmp
+        visual_gaps.push(GapBox.new(b=bx_g, l=ln_g, lbl=lbl_g, top=low, bot=high[2], isBull=true, gType="UDG", isTouched=false, stoppedExtending=isMini, origBg=bull_upg_css, origBorder=color(na), origLine=color.new(bull_upg_css,0), origLblText=gap_lbl_col, creationBar=bar_index, mid=math.avg(low,high[2]), slices=sl_g, sliceTouched=tch_g))
+
+    if show_vi and show_all_gaps and bear_ulg_now
+        int le = bar_index-1
+        label lbl_g = show_gap_labels ? label.new(gap_lbl_x,math.avg(bear_gap_top,bear_gap_bot),"ULG-",color=color.new(color.white,100),textcolor=gap_lbl_col,style=label.style_none,size=size.tiny) : label(na)
+        box bx_g  = isSliced ? box.new(le,bear_gap_top,upg_right,bear_gap_bot,border_color=na,bgcolor=color.new(bear_vi_css,100)) : box.new(le,bear_gap_top,upg_right,bear_gap_bot,border_color=bear_vi_css,bgcolor=na,border_style=line.style_dotted)
+        line ln_g  = show_midlines ? line.new(le,math.avg(bear_gap_top,bear_gap_bot),upg_right,math.avg(bear_gap_top,bear_gap_bot),color=color.new(bear_vi_css,0),style=line.style_dotted,width=1) : line(na)
+        box[] sl_g  = array.new<box>()
+        bool[] tch_g = array.new<bool>()
+        if isSliced
+            [sl_tmp,tch_tmp] = f_buildSlices(bear_gap_top,bear_gap_bot,color.new(bear_vi_css,60),le,upg_right)
+            sl_g  := sl_tmp
+            tch_g  := tch_tmp
+        visual_gaps.push(GapBox.new(b=bx_g, l=ln_g, lbl=lbl_g, top=bear_gap_top, bot=bear_gap_bot, isBull=false, gType="ULG", isTouched=false, stoppedExtending=isMini, origBg=color(na), origBorder=bear_vi_css, origLine=color.new(bear_vi_css,0), origLblText=gap_lbl_col, creationBar=bar_index, mid=math.avg(bear_gap_top,bear_gap_bot), slices=sl_g, sliceTouched=tch_g))
+
+    if show_og and show_all_gaps and bear_uog_now
+        int le = bar_index-1
+        label lbl_g = show_gap_labels ? label.new(gap_lbl_x,math.avg(low[1],high),"UOG-",color=color.new(color.white,100),textcolor=gap_lbl_col,style=label.style_none,size=size.tiny) : label(na)
+        box bx_g  = isSliced ? box.new(le,low[1],upg_right,high,border_color=na,bgcolor=color.new(bear_og_css,100)) : box.new(le,low[1],upg_right,high,border_color=na,bgcolor=bear_og_css)
+        line ln_g  = show_midlines ? line.new(le,math.avg(low[1],high),upg_right,math.avg(low[1],high),color=color.new(bear_og_css,0),style=line.style_dotted,width=1) : line(na)
+        box[] sl_g  = array.new<box>()
+        bool[] tch_g = array.new<bool>()
+        if isSliced
+            [sl_tmp,tch_tmp] = f_buildSlices(low[1],high,bear_og_css,le,upg_right)
+            sl_g  := sl_tmp
+            tch_g  := tch_tmp
+        visual_gaps.push(GapBox.new(b=bx_g, l=ln_g, lbl=lbl_g, top=low[1], bot=high, isBull=false, gType="UOG", isTouched=false, stoppedExtending=isMini, origBg=bear_og_css, origBorder=color(na), origLine=color.new(bear_og_css,0), origLblText=gap_lbl_col, creationBar=bar_index, mid=math.avg(low[1],high), slices=sl_g, sliceTouched=tch_g))
+
+    if show_upg and show_all_gaps and bearUdg
+        int le = bar_index-2
+        label lbl_g = show_gap_labels ? label.new(gap_lbl_x,math.avg(low[2],high),"UDG-",color=color.new(color.white,100),textcolor=gap_lbl_col,style=label.style_none,size=size.tiny) : label(na)
+        box bx_g  = isSliced ? box.new(le,low[2],upg_right,high,border_color=na,bgcolor=color.new(bear_upg_css,100)) : box.new(le,low[2],upg_right,high,border_color=na,bgcolor=bear_upg_css)
+        line ln_g  = show_midlines ? line.new(le,math.avg(low[2],high),upg_right,math.avg(low[2],high),color=color.new(bear_upg_css,0),style=line.style_dotted,width=1) : line(na)
+        box[] sl_g  = array.new<box>()
+        bool[] tch_g = array.new<bool>()
+        if isSliced
+            [sl_tmp,tch_tmp] = f_buildSlices(low[2],high,bear_upg_css,le,upg_right)
+            sl_g  := sl_tmp
+            tch_g  := tch_tmp
+        visual_gaps.push(GapBox.new(b=bx_g, l=ln_g, lbl=lbl_g, top=low[2], bot=high, isBull=false, gType="UDG", isTouched=false, stoppedExtending=isMini, origBg=bear_upg_css, origBorder=color(na), origLine=color.new(bear_upg_css,0), origLblText=gap_lbl_col, creationBar=bar_index, mid=math.avg(low[2],high), slices=sl_g, sliceTouched=tch_g))
+
+    if limit_gaps
+        while visual_gaps.size() > maxGaps
+            visual_gaps.get(0).erase()
+            visual_gaps.remove(0)
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 1: gap-confirm. STATIC upgrades isGap in place (same entity).
+    // DYNAMIC raw instead SPAWNS the separate gap slot (both must coexist).
+    // Entry prices are computed here, at the moment a gap confirms — this is
+    // the original script's UDG entry logic, re-homed onto the new Nodes.
+    // Only the numbered P# / R# and the trend-phase GMC carry entries now;
+    // internal dynamics never do.
+    // ═══════════════════════════════════════════════════════════════════════
+    float bu_void_mid  = math.avg(low, high[2])
+    bool  bu_is3BeAFP  = high > high[1] and close < (low[1] + (high[1] - low[1]) * 0.25)
+    bool  bu_is3CIBuAF = high <= high[1] and low >= low[1] and close >= math.avg(high[1], low[1])
+    float bu_ent_price = ent_open_only ? (isBuX ? low : open[1]) : isBuX ? low : bu_is3BeAFP ? bu_void_mid : bu_is3CIBuAF ? open[1] : open[1]
+
+    float be_void_mid  = math.avg(high, low[2])
+    bool  be_is3BuAFP  = low < low[1] and close > (high[1] - (high[1] - low[1]) * 0.25)
+    bool  be_is3CIBeAF = high <= high[1] and low >= low[1] and close < math.avg(high[1], low[1])
+    float be_ent_price = ent_open_only ? (isBeX ? high : open[1]) : isBeX ? high : be_is3BuAFP ? be_void_mid : be_is3CIBeAF ? open[1] : open[1]
+
+    // A gap confirms the MIDDLE candle of the three — the previous bar. Only the
+    // node born of THAT candle is upgraded; an older, unrelated MC is never
+    // promoted by a gap that isn't its own.
+    int gapT = nz(time[1], time)
+
+    if bullGapCf
+        if not na(buDynRaw) and buDynRaw.t == gapT and strictP and mainSide == -1 and not primaryPullbackDone
+            // STRICT mode: this raw pullback just gap-confirmed — NOW it becomes
+            // the numbered P# anchor, at its own candle's price and bar.
+            buStatic := Node.new(price=buDynRaw.price, t=buDynRaw.t, isGap=true, isPrimary=true, c_high=buDynRaw.c_high, c_low=buDynRaw.c_low, c_open=buDynRaw.c_open, c_close=buDynRaw.c_close, c_time=buDynRaw.c_time, c_volPct=buDynRaw.c_volPct, sbe_price=buDynRaw.sbe_price)
+            primaryPullbackDone := true
+            firstPShiftDone     := false
+            if not na(ant_bull_price) and math.abs(ant_bull_price - buDynRaw.price) <= f_eps()
+                ant_bull_active := false
+            buDynRaw := na
+            buDynGap := na
+            alert_gmc_bull := true
+            if show_ent and ePbXU
+                f_armEnt(buStatic, bu_ent_price, isBuX ? high : na, open[1], true)
+            if show_ent and ePbO
+                f_armOrg(buStatic, true)
+        else if not na(buDynRaw) and buDynRaw.t == gapT
+            buDynGap := Node.new(price=buDynRaw.price, t=buDynRaw.t, isGap=true, isPrimary=false, isPhase3Internal=buDynRaw.isPhase3Internal, c_high=buDynRaw.c_high, c_low=buDynRaw.c_low, c_open=buDynRaw.c_open, c_close=buDynRaw.c_close, c_time=buDynRaw.c_time, c_volPct=buDynRaw.c_volPct, sbe_price=buDynRaw.sbe_price)
+            // URGENCY -> EXTREME URGENCY is an UPGRADE of the same level, not a
+            // second level. The MC that just became GMC is retired (and so is
+            // its anticipation line at that price), so "MC & GMC" can never
+            // stack. A fresh MC only appears on the next body-close candle.
+            if not na(ant_bull_price) and math.abs(ant_bull_price - buDynRaw.price) <= f_eps()
+                ant_bull_active := false
+            buDynRaw := na
+            alert_gmc_bull := true
+        else if not na(buCtlRaw) and buCtlRaw.t == gapT
+            // Trend-phase MC -> GMC (like replaces like: a newer GMC retires the old one)
+            buCtlGap := Node.new(price=buCtlRaw.price, t=buCtlRaw.t, isGap=true, isPrimary=false, isPhase3Internal=false, c_high=buCtlRaw.c_high, c_low=buCtlRaw.c_low, c_open=buCtlRaw.c_open, c_close=buCtlRaw.c_close, c_time=buCtlRaw.c_time, c_volPct=buCtlRaw.c_volPct, sbe_price=buCtlRaw.sbe_price)
+            if not na(ant_bull_price) and math.abs(ant_bull_price - buCtlRaw.price) <= f_eps()
+                ant_bull_active := false
+            if show_ent and not eTrXU and not na(buCtlRaw.ent_price)
+                f_copyEnt(buCtlRaw, buCtlGap)
+            buCtlRaw := na
+            alert_gmc_bull := true
+            if show_ent and eTrXU
+                f_armEnt(buCtlGap, bu_ent_price, isBuX ? high : na, open[1], true)
+        else if not na(buStatic) and not buStatic.isGap and buStatic.t == gapT
+            buStatic.isGap := true
+            // Static anchor upgraded in place — retire the MC line at its level.
+            if not na(ant_bull_price) and math.abs(ant_bull_price - buStatic.price) <= f_eps()
+                ant_bull_active := false
+            alert_gmc_bull := true
+            // bull static: P# in a bear trend (pullback), R# in a bull trend (continuation)
+            bool buXuOn = mainSide == -1 ? ePbXU : eCtXU
+            if show_ent and buXuOn
+                f_armEnt(buStatic, bu_ent_price, isBuX ? high : na, open[1], true)
+
+    if bearGapCf
+        if not na(beDynRaw) and beDynRaw.t == gapT and strictP and mainSide == 1 and not primaryPullbackDone
+            // Mirror of the bull side.
+            beStatic := Node.new(price=beDynRaw.price, t=beDynRaw.t, isGap=true, isPrimary=true, c_high=beDynRaw.c_high, c_low=beDynRaw.c_low, c_open=beDynRaw.c_open, c_close=beDynRaw.c_close, c_time=beDynRaw.c_time, c_volPct=beDynRaw.c_volPct, sbe_price=beDynRaw.sbe_price)
+            primaryPullbackDone := true
+            firstPShiftDone     := false
+            if not na(ant_bear_price) and math.abs(ant_bear_price - beDynRaw.price) <= f_eps()
+                ant_bear_active := false
+            beDynRaw := na
+            beDynGap := na
+            alert_gmc_bear := true
+            if show_ent and ePbXU
+                f_armEnt(beStatic, be_ent_price, isBeX ? low : na, open[1], false)
+            if show_ent and ePbO
+                f_armOrg(beStatic, false)
+        else if not na(beDynRaw) and beDynRaw.t == gapT
+            beDynGap := Node.new(price=beDynRaw.price, t=beDynRaw.t, isGap=true, isPrimary=false, isPhase3Internal=beDynRaw.isPhase3Internal, c_high=beDynRaw.c_high, c_low=beDynRaw.c_low, c_open=beDynRaw.c_open, c_close=beDynRaw.c_close, c_time=beDynRaw.c_time, c_volPct=beDynRaw.c_volPct, sbe_price=beDynRaw.sbe_price)
+            // Mirror of the bull side: MC upgrades to GMC, never stacks beside it.
+            if not na(ant_bear_price) and math.abs(ant_bear_price - beDynRaw.price) <= f_eps()
+                ant_bear_active := false
+            beDynRaw := na
+            alert_gmc_bear := true
+        else if not na(beCtlRaw) and beCtlRaw.t == gapT
+            beCtlGap := Node.new(price=beCtlRaw.price, t=beCtlRaw.t, isGap=true, isPrimary=false, isPhase3Internal=false, c_high=beCtlRaw.c_high, c_low=beCtlRaw.c_low, c_open=beCtlRaw.c_open, c_close=beCtlRaw.c_close, c_time=beCtlRaw.c_time, c_volPct=beCtlRaw.c_volPct, sbe_price=beCtlRaw.sbe_price)
+            if not na(ant_bear_price) and math.abs(ant_bear_price - beCtlRaw.price) <= f_eps()
+                ant_bear_active := false
+            if show_ent and not eTrXU and not na(beCtlRaw.ent_price)
+                f_copyEnt(beCtlRaw, beCtlGap)
+            beCtlRaw := na
+            alert_gmc_bear := true
+            if show_ent and eTrXU
+                f_armEnt(beCtlGap, be_ent_price, isBeX ? low : na, open[1], false)
+        else if not na(beStatic) and not beStatic.isGap and beStatic.t == gapT
+            beStatic.isGap := true
+            if not na(ant_bear_price) and math.abs(ant_bear_price - beStatic.price) <= f_eps()
+                ant_bear_active := false
+            alert_gmc_bear := true
+            // bear static: P# in a bull trend (pullback), R# in a bear trend (continuation)
+            bool beXuOn = mainSide == 1 ? ePbXU : eCtXU
+            if show_ent and beXuOn
+                f_armEnt(beStatic, be_ent_price, isBeX ? low : na, open[1], false)
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 2: CDL / CDS — breaking ANY active gap-confirmed node.
+    // Capitalization: Phase-1 trend GMC = UPPERCASE.
+    // Pullback-role, Phase-3 internal and R# (resumption) breaks = lowercase.
+    // ═══════════════════════════════════════════════════════════════════════
+    bool beDynPullbackRole = mainSide == 1
+    bool buDynPullbackRole = mainSide == -1
+
+    bool cdlFromStatic   = not na(beStatic) and beStatic.isGap and close > beStatic.price
+    bool cdlFromDynamic  = not na(beDynGap) and close > beDynGap.price
+    bool cdlDynamicUpper = cdlFromDynamic and not beDynPullbackRole and not beDynGap.isPhase3Internal
+    bool cdlFromCtl      = not na(beCtlGap) and close > beCtlGap.price
+    bool cdlFired = cdlFromStatic or cdlFromDynamic or cdlFromCtl
+
+    bool cdsFromStatic   = not na(buStatic) and buStatic.isGap and close < buStatic.price
+    bool cdsFromDynamic  = not na(buDynGap) and close < buDynGap.price
+    bool cdsDynamicUpper = cdsFromDynamic and not buDynPullbackRole and not buDynGap.isPhase3Internal
+    bool cdsFromCtl      = not na(buCtlGap) and close < buCtlGap.price
+    bool cdsFired = cdsFromStatic or cdsFromDynamic or cdsFromCtl
+
+    bool   pendCdl      = false
+    int    pendCdlT     = 0
+    float  pendCdlPrice = na
+    string pendCdlTxt   = ""
+    bool   pendCdlMajor = false
+    bool   pendCdlPb    = false
+    bool   pendCdlSmall = false   // locked to small letters (R# or later internal GMC break)
+
+    bool   pendCds      = false
+    int    pendCdsT     = 0
+    float  pendCdsPrice = na
+    string pendCdsTxt   = ""
+    bool   pendCdsMajor = false
+    bool   pendCdsPb    = false
+    bool   pendCdsSmall = false
+
+    bool clearBeDynGap = false
+    bool clearBuDynGap = false
+    bool clearBeCtlGap = false
+    bool clearBuCtlGap = false
+
+    // A static node broken while holding the PULLBACK role IS the LD/SD event
+    // by definition — its standalone CDL/CDS is suppressed to avoid overlap.
+    bool cdlIsLdEvent = cdlFromStatic and mainSide == 1
+    bool cdsIsSdEvent = cdsFromStatic and mainSide == -1
+
+    // R# (RESUMPTION) BREAK: breaking GMCR# while the trend's PO4 is still
+    // intact is only an INTERNAL small-letter cdl / cds — never a reversal.
+    // If a NEWER with-trend GMC was printed after the R#, that newer (last)
+    // GMC carries the small break, and the R# is just deleted with no marker.
+    bool cdlStaticIsR    = cdlFromStatic and mainSide == -1
+    bool cdlStaticSilent = cdlStaticIsR and not na(beDynGap) and beDynGap.t > beStatic.t
+    bool cdsStaticIsR    = cdsFromStatic and mainSide == 1
+    bool cdsStaticSilent = cdsStaticIsR and not na(buDynGap) and buDynGap.t > buStatic.t
+
+    if cdlFromStatic and not cdlIsLdEvent and not cdlStaticSilent and not beStatic.shiftPrinted
+        beStatic.shiftPrinted := true
+        pendCdl      := true
+        pendCdlT     := beStatic.t
+        pendCdlPrice := beStatic.price
+        pendCdlMajor := not cdlStaticIsR
+        pendCdlTxt   := cdlStaticIsR ? "cdl" : "CDL"
+        pendCdlPb    := false
+        pendCdlSmall := cdlStaticIsR
+    else if cdlFromCtl and not beCtlGap.shiftPrinted
+        // Trend-phase GMC broken — the trend's own shift: CAPITAL.
+        beCtlGap.shiftPrinted := true
+        pendCdl      := true
+        pendCdlT     := beCtlGap.t
+        pendCdlPrice := beCtlGap.price
+        pendCdlMajor := true
+        pendCdlTxt   := "CDL"
+        pendCdlPb    := false
+        clearBeCtlGap := true
+    else if cdlFromDynamic and not beDynGap.shiftPrinted
+        beDynGap.shiftPrinted := true
+        pendCdl      := true
+        pendCdlT     := beDynGap.t
+        pendCdlPrice := beDynGap.price
+        pendCdlMajor := cdlDynamicUpper
+        pendCdlTxt   := pendCdlMajor ? "CDL" : "cdl"
+        pendCdlPb    := beDynPullbackRole
+        pendCdlSmall := not beDynPullbackRole and beDynGap.isPhase3Internal
+        clearBeDynGap := true
+
+    if cdsFromStatic and not cdsIsSdEvent and not cdsStaticSilent and not buStatic.shiftPrinted
+        buStatic.shiftPrinted := true
+        pendCds      := true
+        pendCdsT     := buStatic.t
+        pendCdsPrice := buStatic.price
+        pendCdsMajor := not cdsStaticIsR
+        pendCdsTxt   := cdsStaticIsR ? "cds" : "CDS"
+        pendCdsPb    := false
+        pendCdsSmall := cdsStaticIsR
+    else if cdsFromCtl and not buCtlGap.shiftPrinted
+        buCtlGap.shiftPrinted := true
+        pendCds      := true
+        pendCdsT     := buCtlGap.t
+        pendCdsPrice := buCtlGap.price
+        pendCdsMajor := true
+        pendCdsTxt   := "CDS"
+        pendCdsPb    := false
+        clearBuCtlGap := true
+    else if cdsFromDynamic and not buDynGap.shiftPrinted
+        buDynGap.shiftPrinted := true
+        pendCds      := true
+        pendCdsT     := buDynGap.t
+        pendCdsPrice := buDynGap.price
+        pendCdsMajor := cdsDynamicUpper
+        pendCdsTxt   := pendCdsMajor ? "CDS" : "cds"
+        pendCdsPb    := buDynPullbackRole
+        pendCdsSmall := not buDynPullbackRole and buDynGap.isPhase3Internal
+        clearBuDynGap := true
+
+    // ── P# DELIVERY: did the pullback close past its P# candle's far edge?
+    // (bull trend: a close below the BeX P# candle's low; bear trend: a close
+    // above the BuX P# candle's high). Used by the Absorbed P# Filter. ──
+    if mainSide == 1 and not na(beStatic) and not na(beStatic.c_low) and close < beStatic.c_low
+        beStatic.delivered := true
+    if mainSide == -1 and not na(buStatic) and not na(buStatic.c_high) and close > buStatic.c_high
+        buStatic.delivered := true
+
+    // ── STEP 3: LD / SD — breaking the STATIC pullback (range boundary).
+    // NOTE: p1_validate_mode is purely a DISPLAY filter for pullback levels
+    // (see the render block). It must never gate the state machine — a raw MP
+    // still validates continuation exactly as before, and origins are never
+    // affected by it.
+    // ABSORBED P#: a raw P# taken back before it delivered and before any R#
+    // locked is not a pullback — it is NOT an LD / SD (see the filter input).
+    bool ldRaw = mainSide == 1  and not na(beStatic) and close > beStatic.price
+    bool sdRaw = mainSide == -1 and not na(buStatic) and close < buStatic.price
+    bool ldAbsorbed = ldRaw and pb_absorb_filter and not beStatic.isGap and not beStatic.delivered and not primaryResumptionDone
+    bool sdAbsorbed = sdRaw and pb_absorb_filter and not buStatic.isGap and not buStatic.delivered and not primaryResumptionDone
+    bool ldFired = ldRaw and not ldAbsorbed
+    bool sdFired = sdRaw and not sdAbsorbed
+
+    // ── STEP 4: Tn broken? ──
+    bool tnBroken = not na(tnPrice) and ((mainSide == 1 and close < tnPrice) or (mainSide == -1 and close > tnPrice))
+
+    // ── NBC FORCED PULLBACK detection — measured BEFORE Step 4b clears the
+    // trend-phase MC / GMC. Trend phase only (no P# yet), NBC candle only. ──
+    int  sideBefore  = mainSide
+    bool nbcPbInBull = pb_nbc_forced and not strictP and isNBC and mainSide == 1  and not primaryPullbackDone and ((not na(buCtlRaw) and close < buCtlRaw.price - f_eps()) or (not na(buCtlGap) and close < buCtlGap.price))
+    bool nbcPbInBear = pb_nbc_forced and not strictP and isNBC and mainSide == -1 and not primaryPullbackDone and ((not na(beCtlRaw) and close > beCtlRaw.price + f_eps()) or (not na(beCtlGap) and close > beCtlGap.price))
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // RESOLUTION (Armor Rule 2) — strict priority:
+    // Reversal > Continuation > Invalidation. Internal shifts handled above.
+    // ═══════════════════════════════════════════════════════════════════════
+    if tnBroken
+        bool normalShiftAlso = mainSide == 1 ? cdsFired : cdlFired
+        int  newSide = -mainSide
+        // GATE: a flip is official only if the old leg reached its extreme.
+        bool flipPass = not gateOn or (newSide == 1 ? hitXD : hitXP)
+        legOfficial := flipPass
+        hitXD   := false
+        hitXP   := false
+        bullImp := false
+        bullPb  := false
+        bearImp := false
+        bearPb  := false
+        int  preTierR = curTier
+        Node promoted = newSide == 1 ? buStatic : beStatic
+
+        float newPrice = not na(promoted) ? promoted.price : open
+        int   newTime  = not na(promoted) ? promoted.t     : time
+        float nH = not na(promoted) ? promoted.c_high  : high
+        float nL = not na(promoted) ? promoted.c_low   : low
+        float nO = not na(promoted) ? promoted.c_open  : open
+        float nC = not na(promoted) ? promoted.c_close : close
+        int   nT = not na(promoted) ? promoted.c_time  : time
+        float nV = not na(promoted) ? promoted.c_volPct : curVolPct
+        float nS = not na(promoted) ? promoted.sbe_price : (newSide == 1 ? bzBrkLo : bzBrkHi)
+
+        // LEG EXTREME for the Best Entry Zone: scanned from the OLD trend's
+        // origin (tnTime, before it is reassigned below) to this bar — the
+        // real bottom (bull) / top (bear) the new trend reversed from.
+        int   legStartT = math.min(nz(tnTime, newTime), newTime)
+        float legX      = f_legExtreme(legStartT, newSide == 1)
+
+        // FORCED T1: no P# to promote AND the breaking candle is not a body
+        // close in the new direction (an NBC broke the old Tn) — or the P#
+        // being promoted was itself an NBC Forced P#.
+        bool tForced = na(promoted) ? not (newSide == 1 ? isBuX : isBeX) : promoted.isForced
+
+        // Direct Reversal (9.2): P1 never existed to promote — THIS candle
+        // skipped that state and became the new T1 directly. Lock it out of
+        // Step 5 so it isn't also assigned as the new trend's MC/MCR.
+        if na(promoted)
+            if newSide == 1
+                buLockedThisBar := true
+            else
+                beLockedThisBar := true
+
+        bool   useCdl = mainSide == -1
+        string causeText  = useCdl ? pendCdlTxt   : pendCdsTxt
+        int    causeT     = useCdl ? pendCdlT     : pendCdsT
+        float  causePrice = useCdl ? pendCdlPrice : pendCdsPrice
+        bool   causeMajor = useCdl ? pendCdlMajor : pendCdsMajor
+        bool   consumed   = useCdl ? pendCdl      : pendCds
+        int    causeBreakT = time
+        if useCdl
+            pendCdl := false
+        else
+            pendCds := false
+
+        // Reversal wipes every node of the old range (below). Every small-letter
+        // internal cds / cdl was married to one of those nodes, so it dies with
+        // it — it is NEVER promoted to capital. The break that mattered (the
+        // first, P#-married CDS / CDL) is already capital and is adopted by the
+        // new T1 through the range memory.
+        // Purge ON  -> small letters are cleared with the old range.
+        // Purge OFF -> small letters stay on the chart as history, still in
+        //              small letters (never promoted), each kept alive by its
+        //              own guardian until price closes back through it.
+        if purge_internal and shiftMarkers.size() > 0
+            for smr = shiftMarkers.size() - 1 to 0
+                if shiftMarkers.get(smr).isInternal
+                    shiftMarkers.remove(smr)
+
+        // GUARANTEED CAUSE (blueprint 9.2): if no shift fired on THIS bar, the
+        // physical break of the old Tn level is itself the CDS/CDL. A Tn can
+        // never end up without its married marker. tnPrice/tnTime still hold
+        // the OLD Tn here — reassignment happens below.
+        if not consumed
+            bool hadRangeShift = useCdl ? not na(rngCdlPrice) : not na(rngCdsPrice)
+            if hadRangeShift
+                // A GMC existed and was already broken earlier in this range —
+                // that shift IS this T1's cause. Adopt it; no new label at PO4.
+                causeText   := str.upper(useCdl ? rngCdlTxt : rngCdsTxt)
+                causeT      := useCdl ? rngCdlT      : rngCdsT
+                causePrice  := useCdl ? rngCdlPrice  : rngCdsPrice
+                causeBreakT := useCdl ? rngCdlBreakT : rngCdsBreakT
+                causeMajor  := true
+                // Remove its standalone copy so it's drawn once, on the T1.
+                if shiftMarkers.size() > 0
+                    for ai = shiftMarkers.size() - 1 to 0
+                        ShiftMarker am = shiftMarkers.get(ai)
+                        if am.side == newSide and am.ownerT == causeT and math.abs(am.price - causePrice) <= f_eps()
+                            shiftMarkers.remove(ai)
+            else
+                // No GMC between Pn and Tn (rare 9.2 case): the PO4 break
+                // itself is the CDL/CDS.
+                causeText   := useCdl ? "CDL" : "CDS"
+                causeT      := nz(tnTime, newTime)
+                causePrice  := nz(tnPrice, newPrice)
+                causeMajor  := true
+                causeBreakT := time
+
+        mainSide := newSide
+        curTier  := 1
+        tnPrice  := newPrice
+        tnTime   := newTime
+        primaryPullbackDone   := false
+        primaryResumptionDone := false
+
+        POLine newPl = POLine.new(price=newPrice, t=newTime, side=newSide, tier=1, isDirect=not normalShiftAlso, causeText=causeText, causeT=causeT, causePrice=causePrice, causeMajor=causeMajor, causeBreakT=causeBreakT, isForced=tForced, legExt=legX, c_high=nH, c_low=nL, c_open=nO, c_close=nC, c_time=nT, c_volPct=nV, official=flipPass)
+        if show_ent and eTrO and f_entOk(newSide == 1)
+            newPl.ent_price   := newPrice
+            newPl.ent_str     := f_entStr(newSide == 1)
+            newPl.ent_arm_bar := bar_index
+            newPl.sbe_price   := nS
+            f_armSbe(nS, newPrice, newSide == 1, newTime)
+        poLines.push(newPl)
+        rngCdlT := na
+        rngCdlPrice := na
+        rngCdlTxt := ""
+        rngCdlBreakT := na
+        rngCdsT := na
+        rngCdsPrice := na
+        rngCdsTxt := ""
+        rngCdsBreakT := na
+        firstPShiftDone := false
+        firstRShiftDone := false
+
+        if flipPass
+            if newSide == 1
+                alert_po4_bull := true
+                alert_cdl      := true
+            else
+                alert_po4_bear := true
+                alert_cds      := true
+
+        f_preserveHusbands(-newSide, preTierR)
+        // CARRY-OVER ON REVERSAL: a gap-confirmed level on the NEWLY-WINNING
+        // side is not a pullback any more — it is now the newest level of the
+        // new trend's own direction. Deleting it would lose the last GMC, and a
+        // later break of it (a CDL / CDS) would be missed entirely. So it moves
+        // into the trend-phase slots instead of being wiped. Its raw partner
+        // moves with it as the new MC.
+        Node carryGap = newSide == 1 ? buDynGap : beDynGap
+        Node carryRaw = newSide == 1 ? buDynRaw : beDynRaw
+
+        buStatic := na
+        beStatic := na
+        buDynRaw := na
+        buDynGap := na
+        beDynRaw := na
+        beDynGap := na
+        buCtlRaw := na
+        buCtlGap := na
+        beCtlRaw := na
+        beCtlGap := na
+
+        if newSide == 1
+            buCtlGap := carryGap
+            buCtlRaw := carryRaw
+        else
+            beCtlGap := carryGap
+            beCtlRaw := carryRaw
+
+        // The carried node's ROLE changed: it was a pullback, it is now the new
+        // trend's GMC / MC. Re-arm it from its own candle as a TREND entry —
+        // long at the candle's low, short at its high.
+        if show_ent and eTrXU
+            if newSide == 1 and not na(buCtlGap) and na(buCtlGap.ent_price)
+                f_armEnt(buCtlGap, buCtlGap.c_low, na, buCtlGap.c_open, true)
+            if newSide == -1 and not na(beCtlGap) and na(beCtlGap.ent_price)
+                f_armEnt(beCtlGap, beCtlGap.c_high, na, beCtlGap.c_open, false)
+        if show_ent and eTrU
+            if newSide == 1 and not na(buCtlRaw) and na(buCtlRaw.ent_price)
+                f_armEnt(buCtlRaw, buCtlRaw.c_low, na, buCtlRaw.c_open, true)
+            if newSide == -1 and not na(beCtlRaw) and na(beCtlRaw.ent_price)
+                f_armEnt(beCtlRaw, beCtlRaw.c_high, na, beCtlRaw.c_open, false)
+
+    else if ldFired or sdFired
+        Node promoted       = mainSide == 1 ? buStatic : beStatic
+        Node brokenPullback = mainSide == 1 ? beStatic : buStatic
+        int  oldTier = curTier
+        // GATE: a continuation is official only if the leg reached its own
+        // extreme and THEN the pullback reached the opposite extreme.
+        bool contPass = not gateOn or (mainSide == 1 ? (bullImp and bullPb) : (bearImp and bearPb))
+        legOfficial := contPass
+        bullImp := false
+        bullPb  := false
+        bearImp := false
+        bearPb  := false
+
+        float newPrice = not na(promoted) ? promoted.price : open
+        int   newTime  = not na(promoted) ? promoted.t     : time
+        bool  wasDirect = na(promoted)
+        float nH = not na(promoted) ? promoted.c_high  : high
+        float nL = not na(promoted) ? promoted.c_low   : low
+        float nO = not na(promoted) ? promoted.c_open  : open
+        float nC = not na(promoted) ? promoted.c_close : close
+        int   nT = not na(promoted) ? promoted.c_time  : time
+        float nV = not na(promoted) ? promoted.c_volPct : curVolPct
+        float nS = not na(promoted) ? promoted.sbe_price : (mainSide == 1 ? bzBrkLo : bzBrkHi)
+
+        // FORCED Tn: no R# to promote AND the breaking candle is not a body
+        // close in the trend direction (an NBC delivered the LD / SD).
+        bool tForced2 = wasDirect ? not (mainSide == 1 ? isBuX : isBeX) : promoted.isForced
+
+        // Direct Continuation (9.1): R1 never existed to promote.
+        if wasDirect
+            if mainSide == 1
+                buLockedThisBar := true
+            else
+                beLockedThisBar := true
+
+        // "+" = Strong Break: the broken pullback was gap-confirmed (GMP#), so
+        // this break also carried a structural shift. Raw MP# prints plain.
+        string causeText = (mainSide == 1 ? "LD" : "SD") + str.tostring(oldTier) + (brokenPullback.isGap ? "+" : "")
+
+        curTier += 1
+        tnPrice := newPrice
+        tnTime  := newTime
+        primaryPullbackDone   := false
+        primaryResumptionDone := false
+
+        POLine newPl2 = POLine.new(price=newPrice, t=newTime, side=mainSide, tier=curTier, isDirect=wasDirect, causeText=causeText, causeT=brokenPullback.t, causePrice=brokenPullback.price, causeMajor=true, causeBreakT=time, isForced=tForced2, c_high=nH, c_low=nL, c_open=nO, c_close=nC, c_time=nT, c_volPct=nV, official=contPass)
+        if show_ent and eTrO and f_entOk(mainSide == 1)
+            newPl2.ent_price   := newPrice
+            newPl2.ent_str     := f_entStr(mainSide == 1)
+            newPl2.ent_arm_bar := bar_index
+            newPl2.sbe_price   := nS
+            f_armSbe(nS, newPrice, mainSide == 1, newTime)
+        poLines.push(newPl2)
+        rngCdlT := na
+        rngCdlPrice := na
+        rngCdlTxt := ""
+        rngCdlBreakT := na
+        rngCdsT := na
+        rngCdsPrice := na
+        rngCdsTxt := ""
+        rngCdsBreakT := na
+        firstPShiftDone := false
+        firstRShiftDone := false
+
+        if contPass
+            if mainSide == 1
+                alert_po4_bull := true
+                alert_ld       := true
+            else
+                alert_po4_bear := true
+                alert_sd       := true
+
+        // Tn-Pn range resolved — optionally clear every lowercase internal
+        // marker belonging to the range just closed.
+        if purge_internal and shiftMarkers.size() > 0
+            for smi = shiftMarkers.size() - 1 to 0
+                if shiftMarkers.get(smi).isInternal
+                    shiftMarkers.remove(smi)
+
+        // The R# just became the new Tn (pushed above), so its first CDL / CDS
+        // now stays married to that PO4 — no "BuX GMCR#" copy is kept beside it.
+        f_preserveHusbands(mainSide, oldTier)
+        buStatic := na
+        beStatic := na
+        buDynRaw := na
+        buDynGap := na
+        beDynRaw := na
+        beDynGap := na
+        buCtlRaw := na
+        buCtlGap := na
+        beCtlRaw := na
+        beCtlGap := na
+
+    else
+        // ABSORBED P#: the pullback never delivered — erase P# and go back to
+        // the trend phase. The next opposite BC can become the real P#.
+        if ldAbsorbed
+            beStatic := na
+            primaryPullbackDone := false
+            firstPShiftDone     := false
+        if sdAbsorbed
+            buStatic := na
+            primaryPullbackDone := false
+            firstPShiftDone     := false
+
+        // PRIORITY 3 — MID-TREND INVALIDATION: the static Rn dies on a price
+        // break regardless of gap status, reverting to Phase 2 (Pn survives).
+        // ARMOR RULE 5: the gap-confirmed dynamic tracker is the sole monitor
+        // for CDS/CDL and must NEVER be cleared here — only a real break, a
+        // newer gap node, or a full range reset may clear it.
+        bool rnFailedBull = mainSide == 1  and not na(buStatic) and close < buStatic.price
+        bool rnFailedBear = mainSide == -1 and not na(beStatic) and close > beStatic.price
+
+        // Only the failed Rn anchor dies here. The last active MC / GMC are
+        // left alone: if this same candle actually broke them, Step 4b (MC)
+        // and Step 2 (GMC -> CDS/CDL) already remove them; if it didn't, they
+        // are still valid and must stay on the chart.
+        if rnFailedBull
+            buStatic := na
+            primaryResumptionDone := false
+            firstRShiftDone       := false
+
+        if rnFailedBear
+            beStatic := na
+            primaryResumptionDone := false
+            firstRShiftDone       := false
+
+        // GENESIS — the very first trend this chart establishes.
+        if mainSide == 0 and (cdlFired or cdsFired)
+            int side = cdlFired ? 1 : -1
+            bool gPass = not gateOn or (side == 1 ? hitXD : hitXP)
+            legOfficial := gPass
+            hitXD   := false
+            hitXP   := false
+            bullImp := false
+            bullPb  := false
+            bearImp := false
+            bearPb  := false
+            bool   gUseCdl = side == 1
+            string causeText  = gUseCdl ? pendCdlTxt   : pendCdsTxt
+            int    causeT     = gUseCdl ? pendCdlT     : pendCdsT
+            float  causePrice = gUseCdl ? pendCdlPrice : pendCdsPrice
+            bool   causeMajor = gUseCdl ? pendCdlMajor : pendCdsMajor
+            int    gCauseBreakT = time
+            bool   gConsumed = gUseCdl ? pendCdl : pendCds
+            bool   gForced   = not (side == 1 ? isBuX : isBeX)
+            if gUseCdl
+                pendCdl := false
+            else
+                pendCds := false
+
+            // Same guarantee as the reversal branch — genesis T1 always shows
+            // the shift that established it.
+            if not gConsumed
+                causeText    := side == 1 ? "CDL" : "CDS"
+                causeT       := time
+                causePrice   := open
+                causeMajor   := true
+                gCauseBreakT := time
+
+            // Genesis has no old trend origin: the leg is measured from the
+            // broken GMC's bar to this bar.
+            int   gLegStartT = causeT > 0 ? math.min(causeT, time) : time
+            float gLegX      = f_legExtreme(gLegStartT, side == 1)
+
+            if side == 1
+                buLockedThisBar := true
+            else
+                beLockedThisBar := true
+
+            mainSide := side
+            curTier  := 1
+            tnPrice  := open
+            tnTime   := time
+            primaryPullbackDone   := false
+            primaryResumptionDone := false
+
+            POLine gPl = POLine.new(price=open, t=time, side=side, tier=1, isDirect=false, causeText=causeText, causeT=causeT, causePrice=causePrice, causeMajor=causeMajor, causeBreakT=gCauseBreakT, isForced=gForced, legExt=gLegX, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, official=gPass)
+            if show_ent and eTrO and f_entOk(side == 1)
+                gPl.ent_price   := open
+                gPl.ent_str     := f_entStr(side == 1)
+                gPl.ent_arm_bar := bar_index
+                float gS = side == 1 ? bzBrkLo : bzBrkHi
+                gPl.sbe_price := gS
+                f_armSbe(gS, open, side == 1, time)
+            poLines.push(gPl)
+            rngCdlT := na
+            rngCdlPrice := na
+            rngCdlTxt := ""
+            rngCdlBreakT := na
+            rngCdsT := na
+            rngCdsPrice := na
+            rngCdsTxt := ""
+            rngCdsBreakT := na
+            firstPShiftDone := false
+            firstRShiftDone := false
+
+            if gPass
+                if side == 1
+                    alert_po4_bull := true
+                    alert_cdl      := true
+                else
+                    alert_po4_bear := true
+                    alert_cds      := true
+
+            buStatic := na
+            beStatic := na
+            buDynRaw := na
+            buDynGap := na
+            beDynRaw := na
+            beDynGap := na
+            buCtlRaw := na
+            buCtlGap := na
+            beCtlRaw := na
+            beCtlGap := na
+
+    // ── STEP 4b: DYNAMIC NODE VIOLATION. A tracked MP/MC/MCR (raw or gap) is
+    // deleted the moment price closes through it, replacement or not. Runs
+    // BEFORE Step 5 so a node minted from THIS candle isn't killed by its own
+    // close (e.g. a BuX qualifying on open > high[1] but closing red). ──
+    if not na(buDynRaw) and close < buDynRaw.price - f_eps()
+        buDynRaw := na
+    if not na(buDynGap) and close < buDynGap.price - f_eps()
+        buDynGap := na
+    if not na(beDynRaw) and close > beDynRaw.price + f_eps()
+        beDynRaw := na
+    if not na(beDynGap) and close > beDynGap.price + f_eps()
+        beDynGap := na
+    if not na(buCtlRaw) and close < buCtlRaw.price - f_eps()
+        buCtlRaw := na
+    if not na(buCtlGap) and close < buCtlGap.price - f_eps()
+        buCtlGap := na
+    if not na(beCtlRaw) and close > beCtlRaw.price + f_eps()
+        beCtlRaw := na
+    if not na(beCtlGap) and close > beCtlGap.price + f_eps()
+        beCtlGap := na
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 5 (Armor Rules 1.4 / 4): assign THIS candle to tracking, only after
+    // breaks are resolved. Runs regardless of an ordinary break — except the
+    // direct-break carve-out above.
+    // Entries: P# -> Pullback family, R# -> Continuation family, trend-phase
+    // MC -> Trend family. Internal dynamics get no entry.
+    // ═══════════════════════════════════════════════════════════════════════
+    if isBuX and not buLockedThisBar
+        bool pullbackRole = mainSide == -1
+        if pullbackRole
+            // STRICT mode: a raw MP never anchors P# — it waits in the raw slot
+            // until a gap confirms it (see the gap-confirm step above).
+            if not primaryPullbackDone and not strictP
+                buStatic := Node.new(price=open, t=time, isGap=false, isPrimary=true, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkLo)
+                if show_ent and ePbU
+                    f_armEnt(buStatic, low, na, open, true)
+                if show_ent and ePbO
+                    f_armOrg(buStatic, true)
+                primaryPullbackDone := true
+                firstPShiftDone := false   // new P# — its first shift is still to come
+                // This candle IS the numbered anchor — retire any leftover
+                // unnumbered dynamic so a stale copy can't sit beside it.
+                buDynRaw := na
+                buDynGap := na
+            else
+                buDynRaw := Node.new(price=open, t=time, isGap=false, isPrimary=false, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkLo)
+        else
+            bool canLockStatic = primaryPullbackDone and not primaryResumptionDone
+            if canLockStatic
+                buStatic := Node.new(price=open, t=time, isGap=false, isPrimary=true, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkLo)
+                if show_ent and eCtU
+                    f_armEnt(buStatic, low, na, open, true)
+                if show_ent and eCtO
+                    f_armOrg(buStatic, true)
+                primaryResumptionDone := true
+                firstRShiftDone       := false   // new R# — its first shift is still to come
+                // Do NOT clear buDynRaw / buDynGap here. On the resumption side
+                // those slots hold the LAST ACTIVE trend-phase MC / GMC, which
+                // must stay on the chart until price actually breaks them (CDS)
+                // or a newer one replaces them. Wiping them here is what erased
+                // the last GMC the moment MCR# locked in.
+            else if not primaryPullbackDone
+                // TREND phase (no pullback yet): this is an MC -> its own slot,
+                // so a later MCR / GMCR can never overwrite it.
+                buCtlRaw := Node.new(price=open, t=time, isGap=false, isPrimary=false, isPhase3Internal=false, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkLo)
+                if show_ent and eTrU
+                    f_armEnt(buCtlRaw, low, na, open, true)
+            else
+                buDynRaw := Node.new(price=open, t=time, isGap=false, isPrimary=false, isPhase3Internal=primaryResumptionDone, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkLo)
+
+    if isBeX and not beLockedThisBar
+        bool pullbackRole = mainSide == 1
+        if pullbackRole
+            // STRICT mode: a raw MP never anchors P# — it waits in the raw slot
+            // until a gap confirms it (see the gap-confirm step above).
+            if not primaryPullbackDone and not strictP
+                beStatic := Node.new(price=open, t=time, isGap=false, isPrimary=true, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkHi)
+                if show_ent and ePbU
+                    f_armEnt(beStatic, high, na, open, false)
+                if show_ent and ePbO
+                    f_armOrg(beStatic, false)
+                primaryPullbackDone := true
+                firstPShiftDone := false   // new P# — its first shift is still to come
+                beDynRaw := na
+                beDynGap := na
+            else
+                beDynRaw := Node.new(price=open, t=time, isGap=false, isPrimary=false, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkHi)
+        else
+            bool canLockStatic = primaryPullbackDone and not primaryResumptionDone
+            if canLockStatic
+                beStatic := Node.new(price=open, t=time, isGap=false, isPrimary=true, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkHi)
+                if show_ent and eCtU
+                    f_armEnt(beStatic, high, na, open, false)
+                if show_ent and eCtO
+                    f_armOrg(beStatic, false)
+                primaryResumptionDone := true
+                firstRShiftDone       := false   // new R# — its first shift is still to come
+                // Mirror of the bull side: keep the last active MC / GMC.
+            else if not primaryPullbackDone
+                // TREND phase (no pullback yet): this is an MC -> its own slot,
+                // so a later MCR / GMCR can never overwrite it.
+                beCtlRaw := Node.new(price=open, t=time, isGap=false, isPrimary=false, isPhase3Internal=false, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkHi)
+                if show_ent and eTrU
+                    f_armEnt(beCtlRaw, high, na, open, false)
+            else
+                beDynRaw := Node.new(price=open, t=time, isGap=false, isPrimary=false, isPhase3Internal=primaryResumptionDone, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkHi)
+
+    // ── STEP 5a: NBC FORCED PULLBACK. An NBC closed through the last trend
+    // body close with no opposite BC printed: its open becomes the P#
+    // ("NBC Forced MP#"). Runs before 5b so a CDS / CDL fired by this same
+    // candle is married to this P#. Skipped if the range changed this bar. ──
+    if nbcPbInBull and mainSide == sideBefore and not primaryPullbackDone
+        beStatic := Node.new(price=open, t=time, isGap=false, isPrimary=true, isForced=true, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkHi)
+        if show_ent and ePbU
+            f_armEnt(beStatic, high, na, open, false)
+        if show_ent and ePbO
+            f_armOrg(beStatic, false)
+        primaryPullbackDone := true
+        firstPShiftDone     := false
+        beDynRaw := na
+        beDynGap := na
+    if nbcPbInBear and mainSide == sideBefore and not primaryPullbackDone
+        buStatic := Node.new(price=open, t=time, isGap=false, isPrimary=true, isForced=true, c_high=high, c_low=low, c_open=open, c_close=close, c_time=time, c_volPct=curVolPct, sbe_price=bzBrkLo)
+        if show_ent and ePbU
+            f_armEnt(buStatic, low, na, open, true)
+        if show_ent and ePbO
+            f_armOrg(buStatic, true)
+        primaryPullbackDone := true
+        firstPShiftDone     := false
+        buDynRaw := na
+        buDynGap := na
+
+    // ── STEP 5b: any pending shift marker NOT consumed by a Tn becomes a
+    // standalone ShiftMarker, married to the guardian minted below. ──
+    // PULLBACK-DIRECTION SHIFTS once this range's P# exists (bull trend: CDS
+    // against a BeX P#; bear trend: CDL against a BuX P#):
+    //   - the FIRST one = the pullback forced the break of the last GMC.
+    //     Capital, and married to the P#: it lives as long as the P# lives.
+    //   - every LATER one in the same range = internal. Small letters, and it
+    //     keeps the normal Forced-guardian lifetime.
+    //   - an R# break or a later internal GMC break is ALWAYS small letters —
+    //     it is never promoted to the capital P#-married shift.
+    // RESUMPTION-DIRECTION SHIFTS once this range's R# exists (bull trend: CDL
+    // through the pullback's gmp; bear trend: CDS through the pullback's gmp):
+    //   - the FIRST one = CAPITAL, married to the R# (GMCR# / MCR#). It lives
+    //     as long as the R# does — and, after an LD / SD, as long as the new
+    //     Tn the R# became.
+    //   - every LATER one (made by the unnumbered GMCR / MCR) = small letters,
+    //     internal, cleared when the range closes.
+    bool cdsPMarried = false
+    bool cdlPMarried = false
+    bool cdsRMarried = false
+    bool cdlRMarried = false
+    if pendCds and mainSide == 1 and not na(beStatic)
+        if pendCdsSmall
+            pendCdsTxt   := "cds"
+            pendCdsMajor := false
+        else if not firstPShiftDone
+            cdsPMarried     := true
+            firstPShiftDone := true
+            pendCdsTxt      := "CDS"
+            pendCdsMajor    := true
+        else
+            pendCdsTxt   := "cds"
+            pendCdsMajor := false
+    if pendCdl and mainSide == -1 and not na(buStatic)
+        if pendCdlSmall
+            pendCdlTxt   := "cdl"
+            pendCdlMajor := false
+        else if not firstPShiftDone
+            cdlPMarried     := true
+            firstPShiftDone := true
+            pendCdlTxt      := "CDL"
+            pendCdlMajor    := true
+        else
+            pendCdlTxt   := "cdl"
+            pendCdlMajor := false
+    if pendCdl and mainSide == 1 and pendCdlPb and primaryResumptionDone and not na(buStatic)
+        if not firstRShiftDone
+            cdlRMarried     := true
+            firstRShiftDone := true
+            pendCdlTxt      := "CDL"
+            pendCdlMajor    := true
+        else
+            pendCdlTxt   := "cdl"
+            pendCdlMajor := false
+    if pendCds and mainSide == -1 and pendCdsPb and primaryResumptionDone and not na(beStatic)
+        if not firstRShiftDone
+            cdsRMarried     := true
+            firstRShiftDone := true
+            pendCdsTxt      := "CDS"
+            pendCdsMajor    := true
+        else
+            pendCdsTxt   := "cds"
+            pendCdsMajor := false
+
+    if pendCdl
+        // Range memory keeps the FIRST shift (and always the P#-married one),
+        // so a later reversal adopts the break that actually mattered.
+        if na(rngCdlPrice) or cdlPMarried
+            rngCdlT      := pendCdlT
+            rngCdlPrice  := pendCdlPrice
+            rngCdlTxt    := pendCdlTxt
+            rngCdlBreakT := time
+        int   gT = time
+        float gP = open
+        if cdlPMarried or cdlRMarried
+            gT := buStatic.t
+            gP := buStatic.price
+        shiftMarkers.push(ShiftMarker.new(price=pendCdlPrice, ownerT=pendCdlT, breakT=time, markerTxt=pendCdlTxt, side=1, isInternal=not pendCdlMajor, fromPullback=pendCdlPb, guardianT=gT, guardianPrice=gP, pMarried=cdlPMarried))
+    if pendCds
+        if na(rngCdsPrice) or cdsPMarried
+            rngCdsT      := pendCdsT
+            rngCdsPrice  := pendCdsPrice
+            rngCdsTxt    := pendCdsTxt
+            rngCdsBreakT := time
+        int   gT2 = time
+        float gP2 = open
+        if cdsPMarried or cdsRMarried
+            gT2 := beStatic.t
+            gP2 := beStatic.price
+        shiftMarkers.push(ShiftMarker.new(price=pendCdsPrice, ownerT=pendCdsT, breakT=time, markerTxt=pendCdsTxt, side=-1, isInternal=not pendCdsMajor, fromPullback=pendCdsPb, guardianT=gT2, guardianPrice=gP2, pMarried=cdsPMarried))
+
+    // FORCED GUARDIANS: every break mints its own guardian at the breaking
+    // candle's open. This is what the CDS/CDL is married to — it survives the
+    // churn of the shared slots, and the marker dies only when price closes
+    // back through this break candle's own open.
+    // The label names the candle that actually did the break: an NBC break
+    // prints "NBC Forced ...", never "BuX / BeX Forced ...".
+    // P#-married and R#-married markers already have their husband — no guardian.
+    bool needCdlGuard = pendCdl and not cdlPMarried and not cdlRMarried
+    bool needCdsGuard = pendCds and not cdsPMarried and not cdsRMarried
+    if (needCdlGuard or needCdsGuard) and not f_nodeExistsAt(time, open)
+        int fSide = needCdlGuard ? 1 : -1
+        bool fPullbackRole = fSide == 1 ? (mainSide == -1) : (mainSide == 1)
+        string fType = fPullbackRole ? "MP" : (primaryPullbackDone ? "MCR" : "MC")
+        bool   fInDirBC = fSide == 1 ? isBuX : isBeX
+        string fCandle  = fInDirBC ? (fSide == 1 ? "BuX" : "BeX") : isNBC ? "NBC" : (fSide == 1 ? "BeX" : "BuX")
+        string fLbl = fCandle + " Forced " + fType
+        // LIKE REPLACES LIKE: retire any existing guardian of the same side
+        // and role first; its married marker is swept below.
+        if forcedNodes.size() > 0
+            for fri = forcedNodes.size() - 1 to 0
+                ForcedNode fr = forcedNodes.get(fri)
+                if fr.side == fSide and str.endswith(fr.lbl, " Forced " + fType)
+                    forcedNodes.remove(fri)
+        forcedNodes.push(ForcedNode.new(price=open, t=time, side=fSide, lbl=fLbl))
+
+    // A broken gap node is replaced by its marker — drop it so its own
+    // forward-extending line and label stop rendering.
+    if clearBeDynGap
+        beDynGap := na
+    if clearBuDynGap
+        buDynGap := na
+    if clearBeCtlGap
+        beCtlGap := na
+    if clearBuCtlGap
+        buCtlGap := na
+
+    // ── STEP 5c: MEMORY GUARD. Pine retains every array element for the whole
+    // history; without a cap these grow until "Memory limits exceeded" kills
+    // the script mid-run, which silently stops ALL drawing. Storage cap only —
+    // nothing here reflects a structural violation. ──
+    while poLines.size() > max_history
+        poLines.remove(0)
+    while shiftMarkers.size() > max_history
+        shiftMarkers.remove(0)
+    while forcedNodes.size() > max_history
+        forcedNodes.remove(0)
+    while sbeLines.size() > max_history
+        sbeLines.remove(0)
+
+    // ── STEP 5d: Forced guardians die on violation, like any real node. ──
+    if forcedNodes.size() > 0
+        for fi = forcedNodes.size() - 1 to 0
+            ForcedNode fn = forcedNodes.get(fi)
+            if (fn.side == 1 and close < fn.price - f_eps()) or (fn.side == -1 and close > fn.price + f_eps())
+                forcedNodes.remove(fi)
+
+    // ── STEP 5e: MARKER LIFETIME SWEEP (Husband & Wife for CDS/CDL). Runs
+    // after Step 5 so a marker created this bar always finds its guardian.
+    // Any marker whose guardian is gone dies with it. An R#-married marker's
+    // guardian is the R# itself — and after an LD / SD, the Tn the R# became. ──
+    if shiftMarkers.size() > 0
+        for smi2 = shiftMarkers.size() - 1 to 0
+            ShiftMarker sm2 = shiftMarkers.get(smi2)
+            bool alive = sm2.pMarried ? f_pAnchorAlive(sm2) : (f_nodeExistsAt(sm2.guardianT, sm2.guardianPrice) or f_poLineAt(sm2.guardianT, sm2.guardianPrice))
+            if not alive
+                shiftMarkers.remove(smi2)
+
+    // ── STEP 5f: a Forced guardian exists ONLY to keep its CDS / CDL alive.
+    // Once no marker references it any more, it is an orphan — remove it, so
+    // a husband never stands on the chart without his wife. ──
+    if forcedNodes.size() > 0
+        for fo = forcedNodes.size() - 1 to 0
+            ForcedNode fnO = forcedNodes.get(fo)
+            bool guardsSomething = false
+            if shiftMarkers.size() > 0
+                for smO in shiftMarkers
+                    if not smO.pMarried and smO.guardianT == fnO.t and math.abs(smO.guardianPrice - fnO.price) <= f_eps()
+                        guardsSomething := true
+            if not guardsSomething
+                forcedNodes.remove(fo)
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ENTRY LINE TRIGGERS / VIOLATIONS
+    // A ✓ needs price to come BACK: a touch only counts on a bar AFTER the one
+    // that plotted the entry. A close through the entry still removes it.
+    // ═══════════════════════════════════════════════════════════════════════
+    if show_ent
+        // SBE lifecycle — independent of any node. A close through the line
+        // removes it; a wick on a later candle marks it touched.
+        if sbeLines.size() > 0
+            for si = sbeLines.size() - 1 to 0
+                SbeLine s = sbeLines.get(si)
+                bool closedThrough = (s.side == 1 and close < s.price - f_eps()) or (s.side == -1 and close > s.price + f_eps())
+                if closedThrough or (newsBlock and not s.trig)
+                    sbeLines.remove(si)
+                else if not s.trig and bar_index > nz(s.arm_bar, -1) and ((s.side == 1 and low <= s.price) or (s.side == -1 and high >= s.price))
+                    s.trig     := true
+                    s.freeze_t := time
+                    if s.side == 1
+                        alert_sbe_bull := true
+                    else
+                        alert_sbe_bear := true
+
+        // Node-carried entries (MC / GMC / MP# / GMP# / MCR# / GMCR# + origins)
+        bool hb1 = f_entTick(buStatic, true)
+        bool hb2 = f_entTick(buDynGap, true)
+        bool hb3 = f_entTick(buDynRaw, true)
+        bool hb4 = f_entTick(buCtlGap, true)
+        bool hb5 = f_entTick(buCtlRaw, true)
+        if hb1 or hb2 or hb3 or hb4 or hb5
+            alert_ent_bull := true
+
+        bool hs1 = f_entTick(beStatic, false)
+        bool hs2 = f_entTick(beDynGap, false)
+        bool hs3 = f_entTick(beDynRaw, false)
+        bool hs4 = f_entTick(beCtlGap, false)
+        bool hs5 = f_entTick(beCtlRaw, false)
+        if hs1 or hs2 or hs3 or hs4 or hs5
+            alert_ent_bear := true
+
+        // Tn-carried entries (origins)
+        if poLines.size() > 0
+            int plCount = poLines.size()
+            int entSeen = 0
+            for pi = plCount - 1 to 0
+                POLine pl = poLines.get(pi)
+                if newsBlock and not na(pl.ent_price) and not pl.entry_triggered
+                    pl.ent_price := na
+                    pl.ent_str   := ""
+                if not na(pl.ent_price)
+                    entSeen += 1
+                    bool isNewest = entSeen == 1
+                    bool canTouch = bar_index > nz(pl.ent_arm_bar, -1)
+                    if pl.side == 1
+                        if canTouch and not pl.entry_triggered and low <= pl.ent_price
+                            pl.entry_triggered := true
+                            pl.ent_freeze_t    := time
+                            alert_ent_bull     := true
+                        if close < pl.ent_price or (pl.entry_triggered and ent_trig_mode == "Hide" and not isNewest)
+                            pl.ent_price := na
+                            pl.ent_str   := ""
+                    else
+                        if canTouch and not pl.entry_triggered and high >= pl.ent_price
+                            pl.entry_triggered := true
+                            pl.ent_freeze_t    := time
+                            alert_ent_bear     := true
+                        if close > pl.ent_price or (pl.entry_triggered and ent_trig_mode == "Hide" and not isNewest)
+                            pl.ent_price := na
+                            pl.ent_str   := ""
+                    // NOTE: "Limit Visible" for entries is NOT applied here. Deleting
+                    // an entry for being over the cap was permanent — an old T1
+                    // that later moved back inside the cap (after newer origins
+                    // were violated) came back WITHOUT its entry. The cap is now
+                    // enforced purely at render time, like the origin-line cap.
+
+    // ── STEP 6: Husband & Wife — delete any Tn individually violated. Its
+    // cause marker dies with it automatically (fields on the same record).
+    // A live T1 also extends its leg extreme if a wick went deeper. ──
+    if poLines.size() > 0
+        for i = poLines.size() - 1 to 0
+            POLine pl = poLines.get(i)
+            if (pl.side == 1 and close < pl.price - f_eps()) or (pl.side == -1 and close > pl.price + f_eps())
+                poLines.remove(i)
+            else
+                if pl.tier == 1 and not na(pl.legExt)
+                    pl.legExt := pl.side == 1 ? math.min(pl.legExt, low) : math.max(pl.legExt, high)
+                if not pl.po4_touched
+                    if (pl.side == 1 and low <= pl.price) or (pl.side == -1 and high >= pl.price)
+                        pl.po4_touched  := true
+                        pl.po4_freeze_t := time
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RENDER — runs once on the last bar. Everything is deleted and redrawn from
+// state, so any record removed above vanishes on the very next redraw (this
+// is what makes Husband & Wife deletions automatic).
+// Draw order IS priority order for right-edge overlap protection:
+//   Tn > static anchors > dynamics > forced guardians > MC/urgency.
+// ═══════════════════════════════════════════════════════════════════════════
+if barstate.islast
+    if drawn_lines.size() > 0
+        for ln in drawn_lines
+            line.delete(ln)
+        drawn_lines.clear()
+    if drawn_labels.size() > 0
+        for lb in drawn_labels
+            label.delete(lb)
+        drawn_labels.clear()
+    if drawn_zones.size() > 0
+        for bx in drawn_zones
+            box.delete(bx)
+        drawn_zones.clear()
+    if drawn_z_lines.size() > 0
+        for zl in drawn_z_lines
+            line.delete(zl)
+        drawn_z_lines.clear()
+
+    int futureT   = f_future_time(ext_mc)
+    int futureEnt = f_future_time(ent_ext)
+    int futureAnt = f_future_time(ant_ext)
+    int futureTc  = f_future_time(ext_ant)
+    int futureSbe = f_future_time(ent_ext + 10)   // SBE lines run 10 candles past the others so they stay visible
+    int futureZone = f_future_time(zone_ext)   // right edge shared by ALL eBlocks / iBlocks
+
+    array<RenderZone> temp_zones = array.new<RenderZone>()
+    render_groups.clear()
+
+    // PHASE GATE for the MC anticipation line. "MC" only exists in the TREND
+    // phase: the candle must be in the trend's own direction AND no pullback
+    // may exist yet in this range. In the pullback phase that same candle is
+    // an MP, and in the resumption phase it is an MCR — both already drawn by
+    // their phase-correct nodes. Without this gate the anticipation line kept
+    // its "MC" label and merged onto them as e.g. "bex mp & BeX MC".
+    bool antBullPhaseOk = mainSide != -1 and not primaryPullbackDone
+    bool antBearPhaseOk = mainSide != 1  and not primaryPullbackDone
+
+    // ─── Tn ORIGINS + coupled cause markers ───
+    if show_orig_lines and poLines.size() > 0
+        int plStart = limit_orig_lines ? math.max(0, poLines.size() - max_orig_lines) : 0
+        for plIdx = plStart to poLines.size() - 1
+            POLine pl = poLines.get(plIdx)
+            bool hidden = pl.po4_touched and po4_trig_mode == "Hide"
+            if not hidden
+                color c  = pl.side == 1 ? mc_bull_col : mc_bear_col
+                bool isT1 = show_t1 and pl.tier == 1
+                int  w   = isT1 ? t1_width : tn_label_hdr ? tn_width : 2
+                string st = isT1 ? f_ln_style(t1_line_style) : tn_label_hdr ? f_ln_style(tn_line_style) : line.style_solid
+                string sz = isT1 ? t1_size : tn_label_hdr ? tn_size : orig_size
+                int lineEnd = (pl.po4_touched and po4_trig_mode == "Stop Extending") ? pl.po4_freeze_t : futureT
+                string txt = (pl.side == 1 ? "BuPO4" : "BePO4") + (show_tiers ? " T" + str.tostring(pl.tier) : "") + (pl.isForced ? " Forced" : "") + (pl.official ? "" : " ✗")
+                f_add_level(pl.price, txt, c, w, st, pl.t, lineEnd, 5, sz)
+
+                // Coupled cause marker ("wife") — redrawn from this record, so
+                // it vanishes the moment Husband & Wife removes pl.
+                if str.length(pl.causeText) > 0 and not na(pl.causePrice)
+                    int causeEnd = math.max(pl.causeBreakT, pl.causeT)
+                    bool isLdSd = str.contains(pl.causeText, "LD") or str.contains(pl.causeText, "SD")
+                    color bc = isLdSd ? (pl.side == 1 ? ld_base_col : sd_base_col) : c
+                    color uc = pl.official ? bc : FAIL_COL
+                    string ct = f_eng(pl.official ? pl.causeText : str.lower(pl.causeText))
+                    // CDLc / LDc above the middle of the break line, CDSc / SDc below it.
+                    if (not isLdSd or show_pb) and (pl.official or show_failed)
+                        drawn_lines.push(line.new(pl.causeT, pl.causePrice, causeEnd, pl.causePrice, xloc=xloc.bar_time, color=uc, width=1, style=pl.official ? line.style_solid : line.style_dotted))
+                        drawn_labels.push(label.new(math.round(math.avg(pl.causeT, causeEnd)), pl.causePrice, ct, xloc=xloc.bar_time, style=pl.side == 1 ? label.style_label_down : label.style_label_up, textcolor=uc, color=color(na), size=f_sz(pl.causeMajor ? ld_sd_size : "tiny"), tooltip=ct + (pl.official ? " (official)" : " (failed " + gate_mode + ")")))
+
+                // BEST ENTRY ZONE — T1 only: from the CDL down to the LOWEST LOW
+                // of the leg (bull), or the CDS up to the HIGHEST HIGH of the
+                // leg (bear). Falls back to the origin candle's edge if the leg
+                // extreme is unknown.
+                if show_ent and ent_trend and ent_best_zone and pl.official and pl.tier == 1 and not na(pl.causePrice) and not na(pl.c_high)
+                    float bzEdge = not na(pl.legExt) ? pl.legExt : (pl.side == 1 ? pl.c_low : pl.c_high)
+                    float bzTop  = math.max(pl.causePrice, bzEdge)
+                    float bzBot  = math.min(pl.causePrice, bzEdge)
+                    drawn_zones.push(box.new(pl.t, bzTop, lineEnd, bzBot, xloc=xloc.bar_time, border_color=color.new(c, 60), border_style=line.style_dotted, bgcolor=color.new(c, 90), text="Best Entry Zone", text_color=c, text_size=size.tiny, text_halign=text.align_right, text_valign=text.align_center))
+
+                // BLOCK CLASS: only an origin born of a CDL/CDS shift is an
+                // eBlock. One born of an LD/SD continuation (LD1, SD2, LD1+,
+                // SD3+ ...) is an internal continuation and draws as an
+                // iBlock, gated by the iBlock toggle rather than the eBlock one.
+                bool   plIsLdSd    = str.contains(pl.causeText, "LD") or str.contains(pl.causeText, "SD")
+                bool   plZoneOn    = plIsLdSd ? zone_res : zone_po4
+                string plBlockName = plIsLdSd ? (pl.side == 1 ? "MMM iBlock L" : "MMM iBlock S") : f_eng(pl.side == 1 ? "eBlock CDL" : "eBlock CDS")
+                if show_zones and plZoneOn and pl.official and not na(pl.c_high)
+                    f_pushZone(temp_zones, pl.c_time, lineEnd, pl.c_high, pl.c_low, pl.c_open, pl.c_close, pl.side == 1, pl.side == 1 ? zone_pel_col : zone_pes_col, plBlockName, pl.c_volPct)
+
+    // ─── Standalone CDS/CDL markers (not coupled to a Tn) ───
+    // Small-letter internal markers are skipped when "Internal cds / cdl" is off.
+    if shiftMarkers.size() > 0
+        int smDrawn = 0
+        // newest -> oldest. The draw cap applies only to ordinary markers — a
+        // marker married to a live P# is always drawn, however old it is.
+        for smIdx = shiftMarkers.size() - 1 to 0
+            ShiftMarker sm = shiftMarkers.get(smIdx)
+            if sm.isInternal and not show_int_cd
+                continue
+            bool smCapped = limit_cont_lines and not sm.pMarried and smDrawn >= max_cont_lines
+            if smCapped
+                continue
+            if not sm.pMarried
+                smDrawn += 1
+            color smCol  = sm.side == 1 ? mc_bull_col : mc_bear_col
+            color useCol = sm.isInternal ? color.new(smCol, 40) : smCol
+            drawn_lines.push(line.new(sm.ownerT, sm.price, sm.breakT, sm.price, xloc=xloc.bar_time, color=useCol, width=1, style=line.style_solid))
+            drawn_labels.push(label.new(math.round(math.avg(sm.ownerT, sm.breakT)), sm.price, f_eng(sm.markerTxt), xloc=xloc.bar_time, textcolor=useCol, color=color(na), style=sm.side == 1 ? label.style_label_down : label.style_label_up, size=f_sz(sm.isInternal ? "tiny" : orig_size)))
+
+    // ─── STATIC anchors — Pn dashed, Rn dotted, capitalized + numbered ───
+    // An NBC Forced P# prints as "NBC Forced MP#".
+    if mainSide == 1 and not na(beStatic) and show_gmp_lines and f_pullbackVisible(beStatic)
+        bool isP1 = show_p1 and curTier == 1
+        f_add_level(beStatic.price, f_apply_naming(f_staticText(beStatic, beStatic.isForced ? "NBC Forced" : "BeX", true, curTier)), mc_bear_col, isP1 ? p1_width : pn_label_hdr ? pn_width : 2, isP1 ? f_ln_style(p1_line_style) : pn_label_hdr ? f_ln_style(pn_line_style) : line.style_dashed, beStatic.t, futureT, 4, isP1 ? p1_size : pn_label_hdr ? pn_size : (beStatic.isGap ? gmp_size : mp_size))
+    if mainSide == -1 and not na(buStatic) and show_gmp_lines and f_pullbackVisible(buStatic)
+        bool isP1 = show_p1 and curTier == 1
+        f_add_level(buStatic.price, f_apply_naming(f_staticText(buStatic, buStatic.isForced ? "NBC Forced" : "BuX", true, curTier)), mc_bull_col, isP1 ? p1_width : pn_label_hdr ? pn_width : 2, isP1 ? f_ln_style(p1_line_style) : pn_label_hdr ? f_ln_style(pn_line_style) : line.style_dashed, buStatic.t, futureT, 4, isP1 ? p1_size : pn_label_hdr ? pn_size : (buStatic.isGap ? gmp_size : mp_size))
+    if mainSide == 1 and not na(buStatic) and show_gmc_lines
+        f_add_level(buStatic.price, f_apply_naming(f_staticText(buStatic, "BuX", false, curTier)), mc_bull_col, 2, line.style_dotted, buStatic.t, futureT, 4, gmc_size)
+        // Resumption anchor: gap-confirmed (GMCR) is Extreme Urgency, raw (MCR) is Urgency.
+        if show_zones and (buStatic.isGap ? zone_gmc : zone_mc) and not na(buStatic.c_high)
+            f_pushZone(temp_zones, buStatic.c_time, futureT, buStatic.c_high, buStatic.c_low, buStatic.c_open, buStatic.c_close, true, zone_pel_col, buStatic.isGap ? "MMM XU iBlock L" : "MMM U iBlock L", buStatic.c_volPct)
+    if mainSide == -1 and not na(beStatic) and show_gmc_lines
+        f_add_level(beStatic.price, f_apply_naming(f_staticText(beStatic, "BeX", false, curTier)), mc_bear_col, 2, line.style_dotted, beStatic.t, futureT, 4, gmc_size)
+        if show_zones and (beStatic.isGap ? zone_gmc : zone_mc) and not na(beStatic.c_high)
+            f_pushZone(temp_zones, beStatic.c_time, futureT, beStatic.c_high, beStatic.c_low, beStatic.c_open, beStatic.c_close, false, zone_pes_col, beStatic.isGap ? "MMM XU iBlock S" : "MMM U iBlock S", beStatic.c_volPct)
+
+    // ─── DYNAMIC internal trackers ───
+    if not na(buDynRaw) and show_mp_lines and (not (mainSide == -1) or f_pullbackVisible(buDynRaw))
+        bool pbRole = mainSide == -1
+        color c = color.new(mc_bull_col, 40)
+        f_add_level(buDynRaw.price, f_apply_naming(pbRole ? f_dynPullbackText(buDynRaw, "BuX") : f_dynResumeText(buDynRaw, "BuX")), c, 1, pbRole ? line.style_dashed : line.style_dotted, buDynRaw.t, futureT, 3, lqc_size)
+    if not na(buDynGap) and show_gmp_lines and (not (mainSide == -1) or f_pullbackVisible(buDynGap))
+        bool pbRole = mainSide == -1
+        color c = color.new(mc_bull_col, 15)
+        f_add_level(buDynGap.price, f_apply_naming(pbRole ? f_dynPullbackText(buDynGap, "BuX") : f_dynResumeText(buDynGap, "BuX")), c, 1, pbRole ? line.style_dashed : line.style_dotted, buDynGap.t, futureT, 3, lqc_size)
+        if show_zones and zone_gmc and not pbRole and not na(buDynGap.c_high)
+            f_pushZone(temp_zones, buDynGap.c_time, futureT, buDynGap.c_high, buDynGap.c_low, buDynGap.c_open, buDynGap.c_close, true, zone_pel_col, "MMM XU iBlock L", buDynGap.c_volPct)
+    if not na(beDynRaw) and show_mp_lines and (not (mainSide == 1) or f_pullbackVisible(beDynRaw))
+        bool pbRole = mainSide == 1
+        color c = color.new(mc_bear_col, 40)
+        f_add_level(beDynRaw.price, f_apply_naming(pbRole ? f_dynPullbackText(beDynRaw, "BeX") : f_dynResumeText(beDynRaw, "BeX")), c, 1, pbRole ? line.style_dashed : line.style_dotted, beDynRaw.t, futureT, 3, lqc_size)
+    if not na(beDynGap) and show_gmp_lines and (not (mainSide == 1) or f_pullbackVisible(beDynGap))
+        bool pbRole = mainSide == 1
+        color c = color.new(mc_bear_col, 15)
+        f_add_level(beDynGap.price, f_apply_naming(pbRole ? f_dynPullbackText(beDynGap, "BeX") : f_dynResumeText(beDynGap, "BeX")), c, 1, pbRole ? line.style_dashed : line.style_dotted, beDynGap.t, futureT, 3, lqc_size)
+        if show_zones and zone_gmc and not pbRole and not na(beDynGap.c_high)
+            f_pushZone(temp_zones, beDynGap.c_time, futureT, beDynGap.c_high, beDynGap.c_low, beDynGap.c_open, beDynGap.c_close, false, zone_pes_col, "MMM XU iBlock S", beDynGap.c_volPct)
+
+    // ─── TREND & MOMENTUM MARKERS ───
+    // 🟢 / 🔴 = the START of the leg: its T1 origin. It NEVER moves. It stays until
+    //     that T1 level is itself violated.
+    // 🟩 / 🟥 = the LAST level of the leg: the newest Tn. This is the one that moves,
+    //     stepping forward on every LD / SD — what the old step line measured.
+    // One pair per side, so up to two bull and two bear markers. When only T1
+    // exists the two sit on the same level and print together as "★ ◆".
+    if show_tn_step
+        float starBullP = na    // bull T1  (start)
+        float starBearP = na    // bear T1  (start)
+        float lastBullP = na    // newest bull Tn (last level)
+        float lastBearP = na    // newest bear Tn (last level)
+        if poLines.size() > 0
+            for mIdx = poLines.size() - 1 to 0
+                POLine mp = poLines.get(mIdx)
+                if mp.side == 1
+                    if na(lastBullP)
+                        lastBullP := mp.price
+                    if mp.tier == 1 and na(starBullP)
+                        starBullP := mp.price
+                else
+                    if na(lastBearP)
+                        lastBearP := mp.price
+                    if mp.tier == 1 and na(starBearP)
+                        starBearP := mp.price
+
+        bool bullSame = not na(starBullP) and not na(lastBullP) and math.abs(starBullP - lastBullP) <= f_eps()
+        bool bearSame = not na(starBearP) and not na(lastBearP) and math.abs(starBearP - lastBearP) <= f_eps()
+
+        if not na(starBullP)
+            drawn_labels.push(label.new(futureT, starBullP, bullSame ? "🟢🟩" : "🟢", xloc=xloc.bar_time, style=label.style_label_right, textcolor=tm_bull_col, color=color(na), size=size.small))
+        if not na(lastBullP) and not bullSame
+            drawn_labels.push(label.new(futureT, lastBullP, "🟩", xloc=xloc.bar_time, style=label.style_label_right, textcolor=tm_bull_col, color=color(na), size=size.small))
+        if not na(starBearP)
+            drawn_labels.push(label.new(futureT, starBearP, bearSame ? "🔴🟥" : "🔴", xloc=xloc.bar_time, style=label.style_label_right, textcolor=tm_bear_col, color=color(na), size=size.small))
+        if not na(lastBearP) and not bearSame
+            drawn_labels.push(label.new(futureT, lastBearP, "🟥", xloc=xloc.bar_time, style=label.style_label_right, textcolor=tm_bear_col, color=color(na), size=size.small))
+
+    // ─── TREND-PHASE MC / GMC (own slots — survive the pullback & resumption) ───
+    if not na(buCtlRaw) and show_ant
+        f_add_level(buCtlRaw.price, f_apply_naming(f_dynResumeText(buCtlRaw, "BuX")), color.new(mc_bull_col, 40), 1, line.style_dotted, buCtlRaw.t, futureT, 3, lqc_size)
+    if not na(buCtlGap) and show_gmc_lines
+        f_add_level(buCtlGap.price, f_apply_naming(f_dynResumeText(buCtlGap, "BuX")), color.new(mc_bull_col, 15), 1, line.style_dotted, buCtlGap.t, futureT, 3, lqc_size)
+        if show_zones and zone_gmc and not na(buCtlGap.c_high)
+            f_pushZone(temp_zones, buCtlGap.c_time, futureT, buCtlGap.c_high, buCtlGap.c_low, buCtlGap.c_open, buCtlGap.c_close, true, zone_pel_col, "MMM XU iBlock L", buCtlGap.c_volPct)
+    if not na(beCtlRaw) and show_ant
+        f_add_level(beCtlRaw.price, f_apply_naming(f_dynResumeText(beCtlRaw, "BeX")), color.new(mc_bear_col, 40), 1, line.style_dotted, beCtlRaw.t, futureT, 3, lqc_size)
+    if not na(beCtlGap) and show_gmc_lines
+        f_add_level(beCtlGap.price, f_apply_naming(f_dynResumeText(beCtlGap, "BeX")), color.new(mc_bear_col, 15), 1, line.style_dotted, beCtlGap.t, futureT, 3, lqc_size)
+        if show_zones and zone_gmc and not na(beCtlGap.c_high)
+            f_pushZone(temp_zones, beCtlGap.c_time, futureT, beCtlGap.c_high, beCtlGap.c_low, beCtlGap.c_open, beCtlGap.c_close, false, zone_pes_col, "MMM XU iBlock S", beCtlGap.c_volPct)
+
+    // ─── FORCED guardians (lowest structural priority) ───
+    // A guardian is drawn only if at least one VISIBLE marker is married to it,
+    // so a hidden small cds / cdl never leaves its husband standing alone.
+    if forcedNodes.size() > 0
+        int fnStart = limit_cont_lines ? math.max(0, forcedNodes.size() - max_cont_lines) : 0
+        for fnIdx = fnStart to forcedNodes.size() - 1
+            ForcedNode fn = forcedNodes.get(fnIdx)
+            bool guardsVisible = false
+            if shiftMarkers.size() > 0
+                for smV in shiftMarkers
+                    if not smV.pMarried and smV.guardianT == fn.t and math.abs(smV.guardianPrice - fn.price) <= f_eps() and (not smV.isInternal or show_int_cd)
+                        guardsVisible := true
+            if guardsVisible
+                color fnCol = color.new(fn.side == 1 ? lqc_buy_col : lqc_sell_col, 55)
+                f_add_level(fn.price, fn.lbl, fnCol, 1, line.style_dotted, fn.t, futureT, 2, lqc_size)
+
+    // ─── MC ANTICIPATION LINES (ORIGINAL — untouched behaviour) ───
+    if show_ant
+        if ant_bull_active and antBullPhaseOk
+            f_add_level(ant_bull_price, f_apply_naming("BuX MC"), mc_bull_col, 1, line.style_dotted, ant_bull_t, futureAnt, 2, ant_size)
+        if ant_bear_active and antBearPhaseOk
+            f_add_level(ant_bear_price, f_apply_naming("BeX MC"), mc_bear_col, 1, line.style_dotted, ant_bear_t, futureAnt, 2, ant_size)
+
+    // U iBlock volume uses the value stored when the MC candle printed.
+    if show_zones and zone_mc
+        if ant_bull_active and antBullPhaseOk and not na(ant_bull_h)
+            f_pushZone(temp_zones, ant_bull_t, futureAnt, ant_bull_h, ant_bull_l, ant_bull_o, ant_bull_c, true, zone_pel_col, "MMM U iBlock L", ant_bull_v)
+        if ant_bear_active and antBearPhaseOk and not na(ant_bear_h)
+            f_pushZone(temp_zones, ant_bear_t, futureAnt, ant_bear_h, ant_bear_l, ant_bear_o, ant_bear_c, false, zone_pes_col, "MMM U iBlock S", ant_bear_v)
+
+    // ─── URGENCY GAP ANTICIPATION LINES (ORIGINAL — untouched behaviour) ───
+    if show_tc
+        if not na(tc_bull_lvl)
+            f_add_level(tc_bull_lvl, tc_bull_violated ? "Buy Urgency Gap Anticipation ✕" : "Buy Urgency Gap Anticipation⬀", tc_bull_col, 2, line.style_solid, tc_bull_t, futureTc, 3, tc_size)
+        if not na(tc_bear_lvl)
+            f_add_level(tc_bear_lvl, tc_bear_violated ? "Sell Urgency Gap Anticipation ✕" : "Sell Urgency Gap Anticipation⬂", tc_bear_col, 2, line.style_solid, tc_bear_t, futureTc, 3, tc_size)
+
+    // ─── ENTRY LINES ───
+    // MMM and SBE (Suggested Best Entry) lines are both dotted; SBE lines run
+    // 10 candles further so the two are easy to tell apart.
+    // Entry Mode decides which of the two families is drawn.
+    bool drawMMM = ent_mode != "SBE"
+    bool drawSBE = ent_mode != "MMM Entry"
+    if show_ent
+        if drawMMM
+            f_drawNodeEnt(buStatic, true,  futureEnt)
+            f_drawNodeEnt(buDynGap, true,  futureEnt)
+            f_drawNodeEnt(buDynRaw, true,  futureEnt)
+            f_drawNodeEnt(buCtlGap, true,  futureEnt)
+            f_drawNodeEnt(buCtlRaw, true,  futureEnt)
+            f_drawNodeEnt(beStatic, false, futureEnt)
+            f_drawNodeEnt(beDynGap, false, futureEnt)
+            f_drawNodeEnt(beDynRaw, false, futureEnt)
+            f_drawNodeEnt(beCtlGap, false, futureEnt)
+            f_drawNodeEnt(beCtlRaw, false, futureEnt)
+
+        // SBE lines — drawn from their own array, newest first, capped by
+        // "Max Entries Drawn".
+        if drawSBE and sbeLines.size() > 0
+            int sbeDrawn = 0
+            for sIdx = sbeLines.size() - 1 to 0
+                if limit_ent and sbeDrawn >= max_ent
+                    break
+                SbeLine s = sbeLines.get(sIdx)
+                sbeDrawn += 1
+                bool sLong = s.side == 1
+                int  se    = (s.trig and ent_trig_mode == "Stop Extending") ? s.freeze_t : futureSbe
+                f_add_level(s.price, s.trig ? f_sbeStr(sLong) + " ✓" : f_sbeStr(sLong), sLong ? long_ent_col : short_ent_col, 1, line.style_dotted, s.t, se, 3, ent_size)
+
+        if poLines.size() > 0
+            int pStart = limit_orig_lines ? math.max(0, poLines.size() - max_orig_lines) : 0
+            int entDrawn = 0
+            // newest -> oldest, so the cap keeps the most recent entries
+            for pIdx = poLines.size() - 1 to pStart
+                POLine pl = poLines.get(pIdx)
+                if not na(pl.ent_price) and drawMMM and (not limit_ent or entDrawn < max_ent)
+                    entDrawn += 1
+                    color ec = pl.side == 1 ? long_ent_col : short_ent_col
+                    int ee = (pl.entry_triggered and ent_trig_mode == "Stop Extending") ? pl.ent_freeze_t : futureEnt
+                    f_add_level(pl.ent_price, pl.entry_triggered ? pl.ent_str + " ✓" : pl.ent_str, ec, 1, line.style_dotted, pl.t, ee, 3, ent_size)
+
+    // Flush every merged right-edge level: one line per price, labels joined
+    // with " & " so co-located levels read together instead of overlapping.
+    f_draw_groups()
+
+    // ─── eBLOCK / iBLOCK BOXES (ORIGINAL — shifted to wrap candle bodies) ───
+    if temp_zones.size() > 0
+        array<int> t_vals = array.new<int>()
+        for tz in temp_zones
+            t_vals.push(tz.t)
+        array<int> sorted_idx = array.sort_indices(t_vals)
+        int left_shift = math.round(bar_time_diff / 2)
+        int start_idx  = limit_zones ? math.max(0, sorted_idx.size() - max_zones) : 0
+        string style_50 = line_50_style == "Solid" ? line.style_solid : line_50_style == "Dotted" ? line.style_dotted : line.style_dashed
+
+        for i = start_idx to sorted_idx.size() - 1
+            RenderZone rz = temp_zones.get(sorted_idx.get(i))
+            int left_edge = rz.t - left_shift
+            color txtCol = color.new(rz.isBull ? mc_bull_col : mc_bear_col, 0)
+
+            // The block's own name is drawn STRICTLY INSIDE the box via
+            // box.new(text=...) — never a separate label — pinned right/center
+            // so it can't collide with anything at the right edge.
+            drawn_zones.push(box.new(left_edge, rz.z_top, futureZone, rz.z_bot, xloc=xloc.bar_time, border_color=na, bgcolor=rz.bg_col, text=zone_show_name ? rz.blockName : "", text_color=txtCol, text_size=size.tiny, text_halign=text.align_right, text_valign=text.align_center))
+
+            // Volume strength is the one thing that CANNOT live inside the box
+            // (a box holds a single text), so it gets its own label pinned to
+            // the block's edge — pushed into drawn_labels so it is cleared and
+            // redrawn with everything else, keeping the pairing intact.
+            if zone_show_vol and not na(rz.volPct)
+                string vTier = rz.volPct >= 150 ? "Strong" : rz.volPct >= 80 ? "Normal" : "Weak"
+                string vFire = rz.volPct >= 150 ? " 🔥" : ""
+                string vTxt  = vTier + ": " + str.tostring(math.round(rz.volPct)) + "%" + vFire
+                float  vY    = rz.isBull ? rz.z_bot : rz.z_top
+                drawn_labels.push(label.new(left_edge, vY, vTxt, xloc=xloc.bar_time, yloc=yloc.price, style=rz.isBull ? label.style_label_up : label.style_label_down, textcolor=txtCol, color=color(na), size=size.tiny))
+
+            if show_50_line
+                drawn_z_lines.push(line.new(left_edge, rz.z_mid, futureZone, rz.z_mid, xloc=xloc.bar_time, color=color.new(rz.bg_col, 0), width=line_50_width, style=style_50))
+                float v_target = rz.isBull ? rz.c_bot : rz.c_top
+                drawn_z_lines.push(line.new(futureZone, rz.z_mid, futureZone, v_target, xloc=xloc.bar_time, color=color.new(rz.bg_col, 0), width=line_50_width, style=style_50))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CANDLE COLORING (ORIGINAL — untouched): Structural Delta Bias base with a
+// Volume Intensity override.
+// ═══════════════════════════════════════════════════════════════════════════
+bool candle_is_bull = close > open
+bool candle_is_bear = close < open
+bool candle_is_doji = close == open
+
+f_ccm_zone(float price, float bodyTop, float bodyBot, float hi, float lo) =>
+    int z = price > hi ? 1 : price > bodyTop ? 2 : price >= bodyBot ? 3 : price >= lo ? 4 : 5
+    z
+
+float ccm_bodyTop = math.max(open[1], close[1])
+float ccm_bodyBot = math.min(open[1], close[1])
+float ccm_hi      = high[1]
+float ccm_lo      = low[1]
+
+int ccm_closeZone = f_ccm_zone(close, ccm_bodyTop, ccm_bodyBot, ccm_hi, ccm_lo)
+
+bool ccm_netBullStance = ccm_closeZone < 3
+bool ccm_netBearStance = ccm_closeZone > 3
+int  ccm_magnitude     = math.abs(ccm_closeZone - 3)
+
+bool ccm_gapAbsorbedBull = ccm_netBullStance and candle_is_bear
+bool ccm_gapAbsorbedBear = ccm_netBearStance and candle_is_bull
+
+color ccm_tierColor = na
+if candle_is_doji
+    ccm_tierColor := ccm_doji_col
+else if ccm_gapAbsorbedBull
+    ccm_tierColor := ccm_gap_bull_col
+else if ccm_gapAbsorbedBear
+    ccm_tierColor := ccm_gap_bear_col
+else if ccm_closeZone == 3 and candle_is_bear
+    ccm_tierColor := ccm_pause_col
+else if ccm_netBullStance
+    ccm_tierColor := ccm_magnitude == 2 ? ccm_strongest_bull : ccm_magnitude == 1 ? ccm_strong_bull : ccm_weak_bull
+else if ccm_netBearStance
+    ccm_tierColor := ccm_magnitude == 2 ? ccm_strongest_bear : ccm_magnitude == 1 ? ccm_strong_bear : ccm_weak_bear
+else
+    ccm_tierColor := ccm_weak_bull
+
+float hvc_avgVolume = ta.sma(volume, hvc_length)
+float hvc_rVol      = hvc_avgVolume != 0 ? volume / hvc_avgVolume : na
+bool  hvc_isUltra   = hvc_rVol >= hvc_ultra_mult
+bool  hvc_isHigh    = hvc_rVol >= hvc_high_mult and not hvc_isUltra
+
+float hvc_pocMidPrice = na
+float hvc_vahUpper    = na
+float hvc_valLower    = na
+if hvc_enable and barstate.isconfirmed and (bar_index >= last_bar_index - hvc_max_bars)
+    footprint hvc_fp = request.footprint(hvc_ticks_per_row, hvc_va_percent)
+    if not na(hvc_fp)
+        volume_row hvc_pocRow = hvc_fp.poc()
+        volume_row hvc_vahRow = hvc_fp.vah()
+        volume_row hvc_valRow = hvc_fp.val()
+
+        float hvc_pocUpper = math.min(hvc_pocRow.up_price(), high)
+        float hvc_pocLower = math.max(hvc_pocRow.down_price(), low)
+        hvc_pocMidPrice := (hvc_pocUpper + hvc_pocLower) / 2.0
+        hvc_vahUpper    := math.min(hvc_vahRow.up_price(), high)
+        hvc_valLower    := math.max(hvc_valRow.down_price(), low)
+
+bool hvc_bullPassesFilter = not hvc_filter_poc_va or (not na(hvc_pocMidPrice) and not na(hvc_vahUpper) and close > hvc_pocMidPrice and close > hvc_vahUpper)
+bool hvc_bearPassesFilter = not hvc_filter_poc_va or (not na(hvc_pocMidPrice) and not na(hvc_valLower) and close < hvc_pocMidPrice and close < hvc_valLower)
+
+bool hvc_validBullUltra = hvc_enable and hvc_show_ultra and candle_is_bull     and hvc_isUltra and hvc_bullPassesFilter
+bool hvc_validBullHigh  = hvc_enable and hvc_show_high  and candle_is_bull     and hvc_isHigh  and hvc_bullPassesFilter
+bool hvc_validBearUltra = hvc_enable and hvc_show_ultra and not candle_is_bull and hvc_isUltra and hvc_bearPassesFilter
+bool hvc_validBearHigh  = hvc_enable and hvc_show_high  and not candle_is_bull and hvc_isHigh  and hvc_bearPassesFilter
+
+color final_bar_color = show_ccm_color ? ccm_tierColor : na
+if hvc_validBullUltra
+    final_bar_color := hvc_bull_ultra_col
+else if hvc_validBullHigh
+    final_bar_color := hvc_bull_high_col
+else if hvc_validBearUltra
+    final_bar_color := hvc_bear_ultra_col
+else if hvc_validBearHigh
+    final_bar_color := hvc_bear_high_col
+
+// NBC (Non-Body-Close) — neither a BuX (close or open above the prior high)
+// nor a BeX (close or open below the prior low). Applied last so it overrides
+// both conviction and volume coloring: every NBC gets the one flat color.
+bool candle_is_nbc = not (close > high[1] or open > high[1]) and not (close < low[1] or open < low[1])
+if show_nbc_color and candle_is_nbc
+    final_bar_color := nbc_col
+
+// CLOSED CANDLES ONLY — the live (still forming) candle is never colored.
+// Its color is applied on its closing tick and then stays.
+if not barstate.isconfirmed
+    final_bar_color := na
+
+barcolor(final_bar_color)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════════
+alertcondition(alert_ent_bull, title="Long Entry Triggered", message="Long entry touched on {{ticker}} at {{close}}")
+alertcondition(alert_ent_bear, title="Short Entry Triggered", message="Short entry touched on {{ticker}} at {{close}}")
+alertcondition(alert_sbe_bull, title="SBE Long Touched", message="Suggested Best Entry (long) touched on {{ticker}} at {{close}}")
+alertcondition(alert_sbe_bear, title="SBE Short Touched", message="Suggested Best Entry (short) touched on {{ticker}} at {{close}}")
+alertcondition(alert_po4_bull, title="New BuPO4", message="New BuPO4 (bullish origin) confirmed on {{ticker}} at {{close}}")
+alertcondition(alert_po4_bear, title="New BePO4", message="New BePO4 (bearish origin) confirmed on {{ticker}} at {{close}}")
+alertcondition(alert_gmc_bull, title="New BuX GMC", message="New BuX GMC (bullish momentum) confirmed on {{ticker}} at {{close}}")
+alertcondition(alert_gmc_bear, title="New BeX GMC", message="New BeX GMC (bearish momentum) confirmed on {{ticker}} at {{close}}")
+alertcondition(alert_cdl, title="CDLc Flip (official)", message="CDLc - bullish flip (candle engine) on {{ticker}} at {{close}}")
+alertcondition(alert_cds, title="CDSc Flip (official)", message="CDSc - bearish flip (candle engine) on {{ticker}} at {{close}}")
+alertcondition(alert_ld, title="LDc Continuation (official)", message="LDc - bullish continuation (candle engine) on {{ticker}} at {{close}}")
+alertcondition(alert_sd, title="SDc Continuation (official)", message="SDc - bearish continuation (candle engine) on {{ticker}} at {{close}}")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HTF BIAS BOX
+// ═══════════════════════════════════════════════════════════════════════════
+f_htfPos(string p) =>
+    switch p
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        "Bottom Right"  => position.bottom_right
+        => position.top_right
+
+var table biasTbl = table.new(f_htfPos(htf_tbl_pos), 1, 1, bgcolor=#000000, border_width=1, frame_color=color.new(color.white, 70), frame_width=1)
+if barstate.islast
+    if htf_table and (htf_mode != "Off" or gateOn)
+        string bSrc = htf_mode == "Last Flip (CDLc/CDSc)" ? "Flip" : htf_mode == "Last Continuation (LDc/SDc)" ? "Cont" : htf_mode == "Last BC" ? "BC" : "off"
+        string bDir = htf_mode == "Off" ? "" : htfBias == 1 ? " · BULL" : htfBias == -1 ? " · BEAR" : " · NONE"
+        color  bCol = htfBias == 1 ? bull_col : htfBias == -1 ? bear_col : color.silver
+        table.cell(biasTbl, 0, 0, "HTF " + htf_tf + " · " + bSrc + bDir + " | Gate: " + gate_mode + (legOfficial ? "" : " ✗") + (newsBlock ? " · NEWS" : ""), text_color=bCol, text_size=size.small)
+    else
+        table.clear(biasTbl, 0, 0)

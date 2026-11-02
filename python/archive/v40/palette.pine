@@ -1,0 +1,59 @@
+// ═══════════════════════════════════════════════════════════════
+// MMM EDGE LAB PALETTE — every table of this indicator uses it
+// ═══════════════════════════════════════════════════════════════
+color EL_BG   = #0B1220
+color EL_SEC  = #131D33
+color EL_ROW  = #0E1628
+color EL_ALT  = #111A2E
+color EL_LBL  = #8A97B1
+color EL_VAL  = #E6EBF5
+color EL_GOLD = #C9A227
+color EL_POS  = #26A69A
+color EL_NEG  = #EF5350
+color EL_WARN = #FFB300
+color EL_MUTE = #5C6B89
+color EL_FRM  = #24304A
+color EL_BRD  = #1A2440
+
+f_elC(float v) =>
+    v > 0 ? EL_POS : v < 0 ? EL_NEG : EL_VAL
+
+f_elSz(string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+
+f_elPos(string p) =>
+    switch p
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Top Right"     => position.top_right
+        "Middle Left"   => position.middle_left
+        "Middle Right"  => position.middle_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        => position.bottom_right
+
+f_elSgn(float v, string fmt) =>
+    na(v) ? "-" : (v > 0 ? "+" : "") + str.tostring(v, fmt)
+
+f_elCell(table tb, int c, int r, string txt, color tc, color bg, string al, string sz) =>
+    table.cell(tb, c, r, txt, text_color=tc, bgcolor=bg, text_size=sz, text_halign=al, text_font_family=font.family_monospace)
+    true
+
+f_elRowBg(int r) =>
+    r % 2 == 0 ? EL_ROW : EL_ALT
+
+// ─── one size switch for every label / panel: "per item" = each item's own size below ───
+f_lsz(string item) =>
+    lbl_all == "per item" ? item : lbl_all
+
+// ─── Sessions (New York) · tested window = Asia + NY AM ───
+string ED_TZ   = "America/New_York"
+int    ed_md   = hour(time, ED_TZ) * 60 + minute(time, ED_TZ)
+bool   ed_inAsia = ed_md >= 1080 or ed_md < 120
+bool   ed_inAM   = ed_md >= 570 and ed_md < 810
+bool   ed_win    = ed_inAsia or ed_inAM
+string ed_sName  = ed_inAsia ? "ASIA" : ed_md < 480 ? "LONDON" : ed_md < 570 ? "PRE-MARKET" : ed_inAM ? "NY AM" : ed_md < 950 ? "NY PM" : "CLOSE"
+bgcolor(ed_shade and timeframe.isintraday and ed_win ? color.new(EL_GOLD, 94) : na, title="Tested session window")
+
+// yesterday's daily ATR(14), for the S7 stop in the BC Flow table
+float ed_datr = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead=barmerge.lookahead_on)

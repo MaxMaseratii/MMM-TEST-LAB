@@ -1,0 +1,603 @@
+//@version=6
+indicator("Gamma Walls @MaxMaserati", shorttitle="Gamma Walls @MaxMaserati", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+// Free version (Oct 30 2026): options gamma walls only · no signals, no arrows, no bias.
+// 90D walls · today's 0DTE walls, flip and magnets · gamma histogram · level map · market type (calm / fast).
+
+// ─── 90-DAY WALLS ───
+grp_g = "1. 90-Day Walls (Big Picture)"
+callWallIn = input.price(0.0, "90D Call Wall (0 = auto)", group=grp_g, tooltip="From your options gamma data: today to +3 months, net view. The longest positive (call) bar. 0 = the indicator estimates it.")
+putWallIn  = input.price(0.0, "90D Put Wall (0 = auto)", group=grp_g, tooltip="The longest negative (put) bar on the 3-month view. Use a split view if the put bars are tiny. 0 = the indicator estimates it.")
+zeroIn     = input.price(0.0, "90D Zero Gamma (0 = auto)", group=grp_g, tooltip="The Zero Gamma level from the 3-month view. 0 = the indicator estimates it.")
+oiDays     = input.int(90, "Auto Estimate Lookback (Days)", minval=20, maxval=250, group=grp_g, tooltip="Only used when a box above is 0. Built from DAILY bars, so it is the same on every timeframe.")
+stepIn     = input.float(0.0, "Auto Estimate Strike Step (0 = Auto)", minval=0.0, group=grp_g)
+roundBoost = input.bool(true, "Auto Estimate: Boost Round Strikes", group=grp_g)
+histDays   = input.int(10, "History Days With Walls", minval=1, maxval=60, group=grp_g)
+
+// ─── TODAY'S LEVELS ───
+grp_d = "2. Today's Levels (0DTE Paste)"
+strikeData = input.text_area("", "Paste Daily Block / 0DTE Strikes", group=grp_d, tooltip="Paste the daily block, one item per line:\nCW90=, PW90=, ZG90=, FLIP=, INDEX=NDX or SPX\nthen today's strikes as strike:value\n30850:192\n30700:21.5\n30475:-17.3\nMinus sign on put (negative) bars.\nThe number boxes above still win when they are not 0.")
+flipIn     = input.price(0.0, "Today GEX Flip (0 = auto)", group=grp_d, tooltip="The GEX Flip level on the same-day (0DTE) view. 0 = estimated from your paste.")
+magnetsN   = input.int(2, "Magnets To Show", minval=0, maxval=5, group=grp_d, tooltip="The next biggest BLUE bars after today's call wall. Price is pulled toward them.")
+
+// ─── INDEX TO FUTURES ───
+grp_x = "3. Index -> Futures"
+idxIn       = input.string("Auto", "Index", options=["Auto", "NDX", "SPX"], group=grp_x, tooltip="Auto = NDX on NQ / MNQ charts, SPX on ES / MES charts.")
+levelType   = input.string("Index Levels (convert to futures)", "Levels Are In", options=["Index Levels (convert to futures)", "Futures Levels (no convert)"], group=grp_x, tooltip="Index levels (NDX / SPX) are moved onto the futures chart with the live futures − index gap.")
+string targetIndex = idxIn == "Auto" ? (str.contains(syminfo.root, "ES") ? "SPX" : "NDX") : idxIn
+
+// ─── LEVEL MAP ───
+grp_m = "4. Level Map"
+showLadder     = input.bool(true, "Show Level Map", group=grp_m)
+show90dLvls    = input.bool(true, "90-Day Levels", inline="lm1", group=grp_m)
+showTodayLvls  = input.bool(true, "Today's Levels", inline="lm1", group=grp_m)
+showRoles      = input.bool(true, "Explain Each Level", group=grp_m, tooltip="Adds a short note: ceiling, floor, magnet, calm / fast line.")
+lineStart      = input.string("Current Price", "Lines Start At", options=["Source", "Current Price", "Histogram"], group=grp_m, tooltip="Source = where the level was born: today's 18:00 open for pasted / typed levels, the day the estimate last changed for estimated walls.\nCurrent Price = the last candle.\nHistogram = the right edge of the histogram.")
+lineExt        = input.int(46, "Line Length (Candles)", minval=1, maxval=300, group=grp_m, tooltip="Counted from where the lines start: Source and Current Price = candles past the last candle · Histogram = candles past the histogram.\nThe labels always sit to the right of the histogram, so the histogram stays between price and the labels.")
+showPx         = input.bool(false, "Show Prices (labels, price scale, table)", group=grp_m, tooltip="OFF: levels show their distance from price in points (+120 = 120 points above). ON: the price is added too.")
+lvlLabelSizeIn = input.string("Tiny", "Level Label Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_m)
+mergePts       = input.float(0.0, "Merge Levels Closer Than (Points, 0 = auto)", minval=0.0, group=grp_m, tooltip="0 = 40% of the strike step (NQ about 10, ES about 2).")
+showWallLines  = input.bool(true, "90D Wall Lines On History", group=grp_m, tooltip="Estimated walls are drawn for every day they were computed. Typed walls only from today's 18:00 open (that is when you know them).")
+zonePts        = input.float(0.0, "Wall Zone (Points, 0 = auto)", minval=0.0, group=grp_m, tooltip="How close price must be to count as AT a 90D wall (HUD location). NQ: 10-20. ES: 2-5. 0 = half a strike step.")
+
+// ─── HISTOGRAM ───
+grp_v = "5. Histogram"
+histSrc         = input.string("Today (0DTE)", "Histogram Shows", options=["Today (0DTE)", "90D Estimate", "Off"], group=grp_v, tooltip="Today = the gamma by strike you pasted. With no paste it shows the 90D volume estimate instead.")
+profileGap      = input.int(3, "Gap From Price (Candles)", minval=0, maxval=150, group=grp_v, tooltip="Where the histogram starts: this many candles to the right of the last candle. Move it with this number.")
+profileWidth    = input.int(20, "Max Bar Length (Bars)", minval=5, maxval=150, group=grp_v)
+thickPct        = input.int(80, "Bar Thickness %", minval=10, maxval=100, group=grp_v)
+pocketPct       = input.int(25, "Pocket Threshold (% of Max)", minval=5, maxval=60, group=grp_v)
+showValueLabels = input.bool(false, "Show Bar Values", inline="hv", group=grp_v)
+labelTopN       = input.int(5, "Top", minval=1, maxval=30, inline="hv", group=grp_v)
+valueLabelSzIn  = input.string("Tiny", "Value Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_v)
+
+// ─── COLORS ───
+grp_ls = "6. Lines · Color · Width · Style"
+todayCallC = input.color(#2962FF, "Call Wall Today", inline="l1", group=grp_ls)
+wTC        = input.int(3, "", minval=1, maxval=6, inline="l1", group=grp_ls)
+sTC        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l1", group=grp_ls)
+todayPutC  = input.color(#FF6D00, "Put Wall Today", inline="l2", group=grp_ls)
+wTP        = input.int(3, "", minval=1, maxval=6, inline="l2", group=grp_ls)
+sTP        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l2", group=grp_ls)
+flipC      = input.color(#7E57C2, "Flip Today", inline="l3", group=grp_ls)
+wFL        = input.int(1, "", minval=1, maxval=6, inline="l3", group=grp_ls)
+sFL        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l3", group=grp_ls)
+callWallC  = input.color(#089981, "Call Wall 90D", inline="l4", group=grp_ls)
+wC9        = input.int(2, "", minval=1, maxval=6, inline="l4", group=grp_ls)
+sC9        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l4", group=grp_ls)
+putWallC   = input.color(#F23645, "Put Wall 90D", inline="l5", group=grp_ls)
+wP9        = input.int(2, "", minval=1, maxval=6, inline="l5", group=grp_ls)
+sP9        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l5", group=grp_ls)
+zeroC      = input.color(#000000, "Zero Γ 90D", inline="l6", group=grp_ls)
+wZ9        = input.int(1, "", minval=1, maxval=6, inline="l6", group=grp_ls)
+sZ9        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l6", group=grp_ls)
+magnetC    = input.color(#787B86, "Magnet", inline="l7", group=grp_ls)
+wMG        = input.int(1, "", minval=1, maxval=6, inline="l7", group=grp_ls)
+sMG        = input.string("Dotted", "", options=["Solid", "Dotted", "Dashed"], inline="l7", group=grp_ls)
+
+grp_col = "7. Histogram Colors"
+posColor   = input.color(color.new(#00E676, 35), "Hist Call", inline="c3", group=grp_col)
+negColor   = input.color(color.new(#FF5252, 35), "Hist Put", inline="c3", group=grp_col)
+pocketC    = input.color(color.new(#787B86, 60), "Pocket", group=grp_col)
+
+// ─── HUD ───
+grp_h = "8. HUD"
+showHud      = input.bool(true, "Show HUD", group=grp_h)
+hudMode      = input.string("Compact", "HUD Mode", options=["Compact", "Detailed"], group=grp_h, tooltip="Compact = market type and the nearest level above and below.\nDetailed = the same, plus every level.")
+hudPosIn     = input.string("Top Right", "Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grp_h)
+hudSizeIn    = input.string("Small", "Text Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_h)
+
+// ─── HELPERS ───
+sizeOf(string s) =>
+    switch s
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+        "Large" => size.large
+        => size.small
+
+string hudPosition = switch hudPosIn
+    "Top Left" => position.top_left
+    "Bottom Right" => position.bottom_right
+    "Bottom Left" => position.bottom_left
+    => position.top_right
+
+string hudSize      = sizeOf(hudSizeIn)
+string lvlLblSize   = sizeOf(lvlLabelSizeIn)
+
+lsOf(string s) =>
+    s == "Dotted" ? line.style_dotted : s == "Dashed" ? line.style_dashed : line.style_solid
+string valueLblSize = sizeOf(valueLabelSzIn)
+fmtP(float x) =>
+    na(x) ? "—" : str.tostring(x, format.mintick)
+
+dateTZ = "America/New_York"
+
+niceStep(float raw) =>
+    float p10 = math.pow(10, math.floor(math.log10(raw)))
+    float m = raw / p10
+    float s = m <= 1 ? 1.0 : m <= 2 ? 2.0 : m <= 2.5 ? 2.5 : m <= 5 ? 5.0 : 10.0
+    s * p10
+
+numStr(float x) =>
+    na(x) ? "" : str.tostring(x)
+
+parseStrikes(string raw) =>
+    array<float> pk = array.new<float>()
+    array<float> pv = array.new<float>()
+    string clean = str.replace_all(raw, "\r", "")
+    clean := str.replace_all(clean, ";", "\n")
+    clean := str.replace_all(clean, ":", ",")
+    clean := str.replace_all(clean, " ", "")
+    for ln in str.split(clean, "\n")
+        array<string> bits = str.split(ln, ",")
+        int nBits = array.size(bits)
+        if nBits >= 2
+            for p = 0 to nBits - 2 by 2
+                float pKey = str.tonumber(array.get(bits, p))
+                float pVal = str.tonumber(array.get(bits, p + 1))
+                if not na(pKey) and not na(pVal) and array.size(pk) < 400
+                    array.push(pk, pKey)
+                    array.push(pv, pVal)
+    [pk, pv]
+
+hudRow(table t, int r, string k, string v, color vc, string ts, string tip = "") =>
+    table.cell(t, 0, r, k, text_color=color.silver, text_size=ts, bgcolor=color.black, text_halign=text.align_left, tooltip=tip)
+    table.cell(t, 1, r, v, text_color=vc, text_size=ts, bgcolor=color.black, text_halign=text.align_left, tooltip=tip)
+
+hudHead(table t, int r, string txt, string ts) =>
+    table.cell(t, 0, r, txt, text_color=color.white, text_size=ts, bgcolor=color.rgb(35, 35, 35), text_halign=text.align_center)
+    table.merge_cells(t, 0, r, 1, r)
+
+// a short note on what each level is (no direction, no advice)
+roleOf(string kind, float p, float px) =>
+    bool above = p > px
+    switch kind
+        "C90" => above ? "ceiling" : "below price"
+        "P90" => above ? "above price" : "floor"
+        "CT" => above ? "ceiling" : "below price"
+        "PT" => above ? "above price" : "floor"
+        "Z90" => "calm above · fast below"
+        "FT" => "calm above · fast below"
+        "MG" => "magnet"
+        => ""
+
+// distance from price in points: +120 = 120 points above
+dist(float p) =>
+    na(p) ? "—" : (p - close >= 0 ? "+" : "−") + str.tostring(math.abs(p - close), "#.#")
+// price + distance, the price only when Show Prices is on
+pxd(float p) =>
+    na(p) ? "—" : (showPx ? fmtP(p) + " " : "") + dist(p)
+
+// zone = a wall or a magnet · false = a calm / fast line
+addLvl(array<float> ps, array<string> ts, array<string> ns, array<color> cs, array<int> prs, array<string> sts, array<int> ws, array<bool> zs, array<int> bs, float p, string nm, string role, color c, int pr, string st, int w, float mergeD, bool zone, int sb) =>
+    if not na(p)
+        string piece = nm + (str.length(role) > 0 ? " · " + role : "")
+        int found = -1
+        if array.size(ps) > 0
+            for i = 0 to array.size(ps) - 1
+                if found == -1 and math.abs(array.get(ps, i) - p) <= mergeD
+                    found := i
+        if found >= 0
+            if zone
+                array.set(zs, found, true)
+            if not na(sb) and (na(array.get(bs, found)) or sb < array.get(bs, found))
+                array.set(bs, found, sb)
+            array.set(ts, found, array.get(ts, found) + "  &  " + piece)
+            array.set(ns, found, array.get(ns, found) + " & " + nm)
+            if pr > array.get(prs, found)
+                array.set(cs, found, c)
+                array.set(prs, found, pr)
+                array.set(sts, found, st)
+                array.set(ws, found, w)
+        else
+            array.push(ps, p)
+            array.push(ts, piece)
+            array.push(ns, nm)
+            array.push(cs, c)
+            array.push(prs, pr)
+            array.push(sts, st)
+            array.push(ws, w)
+            array.push(zs, zone)
+            array.push(bs, sb)
+
+gexProxy(int days, float stepUser, bool rBoost, int hDays) =>
+    string res = ""
+    if bar_index > days and time >= timenow - hDays * 86400000
+        float hiP = high[1]
+        float loP = low[1]
+        for i = 1 to days
+            hiP := math.max(hiP, high[i])
+            loP := math.min(loP, low[i])
+        float rngP = math.max(hiP - loP, syminfo.mintick * 10)
+        float stp = stepUser > 0 ? stepUser : niceStep(rngP / 60.0)
+        stp := math.max(stp, syminfo.mintick)
+        if rngP / stp > 150
+            stp := niceStep(rngP / 150.0)
+        float base = math.floor(loP / stp) * stp
+        int nb = math.min(152, math.ceil((hiP - base) / stp) + 1)
+
+        array<float> wts = array.new<float>(nb, 0.0)
+        float pvSum = 0.0
+        float wSum = 0.0
+        for i = 1 to days
+            float bh = high[i]
+            float bl = low[i]
+            float bVol = nz(volume[i], 1.0)
+            bVol := bVol <= 0 ? 1.0 : bVol
+            pvSum += hlc3[i] * bVol
+            wSum += bVol
+            int iS = math.max(0, math.min(nb - 1, math.floor((bl - base + stp / 2) / stp)))
+            int iE = math.max(0, math.min(nb - 1, math.floor((bh - base + stp / 2) / stp)))
+            float bRng = bh - bl
+            if bRng <= 0 or iS == iE
+                array.set(wts, iS, array.get(wts, iS) + bVol)
+            else
+                for bi = iS to iE
+                    float binLo = base + bi * stp - stp / 2
+                    float ov = math.max(0.0, math.min(bh, binLo + stp) - math.max(bl, binLo))
+                    if ov > 0
+                        array.set(wts, bi, array.get(wts, bi) + bVol * ov / bRng)
+
+        float piv = wSum > 0 ? pvSum / wSum : close[1]
+        float spot = close[1]
+        float cwP = na
+        float pwP = na
+        float bestUp = 0.0
+        float bestDn = 0.0
+        float maxW = 0.0
+        for bj = 0 to nb - 1
+            float kk = base + bj * stp
+            float wt = array.get(wts, bj)
+            if rBoost
+                float r4 = kk / (stp * 4)
+                float r2 = kk / (stp * 2)
+                if math.abs(r4 - math.round(r4)) < 1e-6
+                    wt *= 1.5
+                else if math.abs(r2 - math.round(r2)) < 1e-6
+                    wt *= 1.2
+            array.set(wts, bj, wt)
+            maxW := math.max(maxW, wt)
+            if kk > spot and wt > bestUp
+                bestUp := wt
+                cwP := kk
+            if kk < spot and wt > bestDn
+                bestDn := wt
+                pwP := kk
+
+        string lst = ""
+        if maxW > 0
+            for bk = 0 to nb - 1
+                float wv = array.get(wts, bk)
+                if wv > 0
+                    float kk2 = base + bk * stp
+                    int sc = math.round(wv / maxW * 1000)
+                    lst += (str.length(lst) > 0 ? "," : "") + str.tostring(kk2) + ":" + str.tostring(kk2 >= piv ? sc : -sc)
+        res := numStr(cwP) + "|" + numStr(pwP) + "|" + numStr(piv) + "|" + str.tostring(stp) + "|" + lst
+    res
+
+// ─── 90-DAY WALLS ENGINE ───
+string enc = request.security(syminfo.tickerid, "D", gexProxy(oiDays, stepIn, roundBoost, histDays), lookahead=barmerge.lookahead_on)
+array<string> parts = str.split(enc, "|")
+bool hasProxy = array.size(parts) >= 5
+
+string idxSym = targetIndex == "NDX" ? "NASDAQ:NDX" : "SP:SPX"
+string futSym = targetIndex == "NDX" ? "CME_MINI:NQ1!" : "CME_MINI:ES1!"
+float idxC = request.security(idxSym, timeframe.period, close, gaps=barmerge.gaps_on, ignore_invalid_symbol=true)
+float futC = request.security(futSym, timeframe.period, close, gaps=barmerge.gaps_on, ignore_invalid_symbol=true)
+bool doConvert = levelType == "Index Levels (convert to futures)" and syminfo.type != "index"
+var float liveSpread = na
+if not na(idxC) and not na(futC)
+    float sNow = futC - idxC
+    liveSpread := na(liveSpread) ? sNow : liveSpread + (sNow - liveSpread) * 0.1
+float spread = doConvert ? nz(liveSpread) : 0.0
+
+// today's session (18:00 New York open of the last bar's trading day): typed / pasted walls only exist from here
+int  lbt        = last_bar_time
+int  day18      = timestamp(dateTZ, year(lbt, dateTZ), month(lbt, dateTZ), dayofmonth(lbt, dateTZ), 18, 0)
+int  todayStart = lbt >= day18 ? day18 : day18 - 86400000
+bool isToday    = time >= todayStart
+
+var float txtCW90 = na
+var float txtPW90 = na
+var float txtZG90 = na
+var float txtFlip = na
+var string txtIndex = ""
+if barstate.isfirst
+    string rawTxt = str.replace_all(str.replace_all(strikeData, "\r", ""), " ", "")
+    for ln in str.split(rawTxt, "\n")
+        if str.contains(ln, "=")
+            array<string> kv = str.split(ln, "=")
+            if array.size(kv) == 2
+                string k = str.upper(array.get(kv, 0))
+                string vs = str.upper(array.get(kv, 1))
+                float v = str.tonumber(vs)
+                if k == "INDEX"
+                    txtIndex := vs
+                if not na(v) and v > 0
+                    if k == "90DCALLWALL" or k == "CW90"
+                        txtCW90 := v
+                    else if k == "90DPUTWALL" or k == "PW90"
+                        txtPW90 := v
+                    else if k == "90DZEROGAMMA" or k == "ZG90"
+                        txtZG90 := v
+                    else if k == "TODAYGEXFLIP" or k == "FLIP"
+                        txtFlip := v
+
+float cwIdx = callWallIn > 0 ? callWallIn : txtCW90
+float pwIdx = putWallIn > 0 ? putWallIn : txtPW90
+float zgIdx = zeroIn > 0 ? zeroIn : txtZG90
+bool cwManual = not na(cwIdx)
+bool pwManual = not na(pwIdx)
+bool zgManual = not na(zgIdx)
+float cw = cwManual ? cwIdx + spread : hasProxy ? str.tonumber(array.get(parts, 0)) : na
+float pw = pwManual ? pwIdx + spread : hasProxy ? str.tonumber(array.get(parts, 1)) : na
+float zg = zgManual ? zgIdx + spread : hasProxy ? str.tonumber(array.get(parts, 2)) : na
+float stpNow = hasProxy ? str.tonumber(array.get(parts, 3)) : na
+bool manual90 = cwManual or pwManual or zgManual
+var int tsBar = na
+if isToday and not isToday[1]
+    tsBar := bar_index
+float cwEst = hasProxy ? str.tonumber(array.get(parts, 0)) : na
+float pwEst = hasProxy ? str.tonumber(array.get(parts, 1)) : na
+float zgEst = hasProxy ? str.tonumber(array.get(parts, 2)) : na
+var int cwEstBar = na
+var int pwEstBar = na
+var int zgEstBar = na
+if nz(cwEst, -1) != nz(cwEst[1], -1)
+    cwEstBar := bar_index
+if nz(pwEst, -1) != nz(pwEst[1], -1)
+    pwEstBar := bar_index
+if nz(zgEst, -1) != nz(zgEst[1], -1)
+    zgEstBar := bar_index
+int cwSrc = cwManual ? tsBar : cwEstBar
+int pwSrc = pwManual ? tsBar : pwEstBar
+int zgSrc = zgManual ? tsBar : zgEstBar
+float zoneBuf90 = zonePts > 0 ? zonePts : (na(stpNow) ? na : stpNow * 0.5)
+
+plot(showWallLines and (not cwManual or isToday) ? cw : na, "90D Call Wall", color=callWallC, linewidth=wC9, style=plot.style_stepline, display=showPx ? display.all : display.all - display.price_scale)
+plot(showWallLines and (not pwManual or isToday) ? pw : na, "90D Put Wall", color=putWallC, linewidth=wP9, style=plot.style_stepline, display=showPx ? display.all : display.all - display.price_scale)
+plot(showWallLines and (not zgManual or isToday) ? zg : na, "90D Zero Gamma", color=zeroC, linewidth=wZ9, style=plot.style_stepline, display=showPx ? display.all : display.all - display.price_scale)
+
+// ─── TODAY'S LEVELS ENGINE ───
+var array<float> mK = array.new<float>()
+var array<float> mV = array.new<float>()
+var float tCWraw = na
+var float tPWraw = na
+var float tFlipRaw = na
+var float tStep = na
+if barstate.isfirst
+    [pk, pv] = parseStrikes(strikeData)
+    if array.size(pk) > 0
+        for j in array.sort_indices(pk, order.ascending)
+            array.push(mK, array.get(pk, j))
+            array.push(mV, array.get(pv, j))
+        float bp = 0.0
+        float bn = 0.0
+        float cumV = 0.0
+        float minG = na
+        for i = 0 to array.size(mK) - 1
+            float mv = array.get(mV, i)
+            if mv > bp
+                bp := mv
+                tCWraw := array.get(mK, i)
+            if mv < bn
+                bn := mv
+                tPWraw := array.get(mK, i)
+            float prevC = cumV
+            cumV += mv
+            if i > 0 and prevC < 0 and cumV >= 0 and na(tFlipRaw)
+                tFlipRaw := array.get(mK, i)
+            if i > 0
+                float dg = array.get(mK, i) - array.get(mK, i - 1)
+                if dg > 0
+                    minG := na(minG) ? dg : math.min(minG, dg)
+        tStep := nz(minG, syminfo.mintick * 40)
+bool hasToday = array.size(mK) > 0
+
+float tCW   = hasToday ? tCWraw + spread : na
+float tPW   = hasToday ? tPWraw + spread : na
+float tFlip = flipIn > 0 ? flipIn + spread : not na(txtFlip) ? txtFlip + spread : hasToday ? tFlipRaw + spread : na
+
+// ─── MARKET TYPE: today's flip when pasted, else the 90D zero gamma ───
+float  regLvl  = not na(tFlip) ? tFlip : zg
+string regName = not na(tFlip) ? "today's flip" : zgManual ? "90D zero γ" : "90D VWAP (est. zero γ)"
+bool   longGamma = not na(regLvl) and close >= regLvl
+
+// ─── LEVEL MAP, HISTOGRAM, HUD ───
+var array<box>   gBoxes  = array.new<box>()
+var array<line>  gLines  = array.new<line>()
+var array<label> gLabels = array.new<label>()
+var table hud = table.new(hudPosition, 2, 16, bgcolor=color.black, border_color=color.rgb(60, 60, 60), border_width=1)
+
+if barstate.islast
+    for bx in gBoxes
+        box.delete(bx)
+    array.clear(gBoxes)
+    for ln in gLines
+        line.delete(ln)
+    array.clear(gLines)
+    for lb in gLabels
+        label.delete(lb)
+    array.clear(gLabels)
+
+    bool histOn = histSrc != "Off"
+    int histLeft  = bar_index + profileGap
+    int anchorX   = histLeft + profileWidth
+    int histRight = anchorX + profileWidth
+    float mergeD = mergePts > 0 ? mergePts : nz(nz(tStep, stpNow) * 0.4, 5.0)
+
+    // ─── BUILD LEVEL MAP ───
+    array<float>  lvP  = array.new<float>()
+    array<string> lvT  = array.new<string>()
+    array<string> lvN  = array.new<string>()
+    array<color>  lvC  = array.new<color>()
+    array<int>    lvPr = array.new<int>()
+    array<string> lvS  = array.new<string>()
+    array<int>    lvW  = array.new<int>()
+    array<int>    lvB  = array.new<int>()
+    array<bool>   lvZ  = array.new<bool>()
+
+    if showTodayLvls and hasToday
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, tCW, "Call wall today", showRoles ? roleOf("CT", tCW, close) : "", todayCallC, 6, lsOf(sTC), wTC, mergeD, true, tsBar)
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, tPW, "Put wall today", showRoles ? roleOf("PT", tPW, close) : "", todayPutC, 6, lsOf(sTP), wTP, mergeD, true, tsBar)
+    if showTodayLvls and not na(tFlip)
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, tFlip, "Flip today", showRoles ? roleOf("FT", tFlip, close) : "", flipC, 4, lsOf(sFL), wFL, mergeD, false, tsBar)
+    if show90dLvls
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, cw, "Call wall 90D" + (cwManual ? "" : " est."), showRoles ? roleOf("C90", cw, close) : "", callWallC, 5, lsOf(sC9), wC9, mergeD, true, cwSrc)
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, pw, "Put wall 90D" + (pwManual ? "" : " est."), showRoles ? roleOf("P90", pw, close) : "", putWallC, 5, lsOf(sP9), wP9, mergeD, true, pwSrc)
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, zg, zgManual ? "Zero γ 90D" : "VWAP 90D (est. zero γ)", showRoles ? roleOf("Z90", zg, close) : "", zeroC, 3, lsOf(sZ9), wZ9, mergeD, false, zgSrc)
+
+    if showTodayLvls and hasToday and magnetsN > 0
+        array<float> posVals = array.new<float>()
+        array<int>   posIdx  = array.new<int>()
+        for i = 0 to array.size(mK) - 1
+            float vv = array.get(mV, i)
+            float kF = array.get(mK, i) + spread
+            if vv > 0 and math.abs(kF - tCW) > mergeD
+                array.push(posVals, vv)
+                array.push(posIdx, i)
+        if array.size(posVals) > 0
+            array<int> ord2 = array.sort_indices(posVals, order.descending)
+            for r = 0 to math.min(magnetsN, array.size(ord2)) - 1
+                float mP = array.get(mK, array.get(posIdx, array.get(ord2, r))) + spread
+                addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, mP, "Magnet", showRoles ? roleOf("MG", mP, close) : "", magnetC, 2, lsOf(sMG), wMG, mergeD, true, tsBar)
+
+    // nearest wall / magnet above and below price (the calm / fast lines are not counted)
+    float belowP = na
+    float aboveP = na
+    string belowN = ""
+    string aboveN = ""
+    if array.size(lvP) > 0
+        for i = 0 to array.size(lvP) - 1
+            float lp = array.get(lvP, i)
+            if array.get(lvZ, i)
+                if lp < close and (na(belowP) or lp > belowP)
+                    belowP := lp
+                    belowN := array.get(lvN, i)
+                if lp > close and (na(aboveP) or lp < aboveP)
+                    aboveP := lp
+                    aboveN := array.get(lvN, i)
+
+    // ─── HISTOGRAM (between price and the level labels) ───
+    bool histDrawn = false
+    if histOn
+        bool useT = histSrc == "Today (0DTE)" and hasToday
+        array<float> hk = array.new<float>()
+        array<float> hv = array.new<float>()
+        if useT
+            for i = 0 to array.size(mK) - 1
+                array.push(hk, array.get(mK, i) + spread)
+                array.push(hv, array.get(mV, i))
+        else if hasProxy
+            [dk, dv] = parseStrikes(array.get(parts, 4))
+            hk := dk
+            hv := dv
+
+        int n = array.size(hk)
+        float hCW = useT ? tCW : cw
+        float hPW = useT ? tPW : pw
+        float gapH = useT ? nz(tStep, syminfo.mintick * 40) : nz(stpNow, syminfo.mintick * 40)
+        if n > 0
+            float maxAbs = 0.0
+            for x in hv
+                maxAbs := math.max(maxAbs, math.abs(x))
+            float halfH = gapH * thickPct / 200.0
+            if maxAbs > 0
+                histDrawn := true
+                array.push(gLines, line.new(anchorX, array.first(hk) - gapH, anchorX, array.last(hk) + gapH, color=color.new(color.gray, 60), style=line.style_dashed))
+                array.push(gLabels, label.new(anchorX, array.last(hk) + gapH, useT ? "Gamma by strike · today" : histSrc == "Today (0DTE)" ? "No paste · 90D volume est." : "90D volume by price (est.)", style=label.style_label_down, color=color.new(color.black, 100), textcolor=color.gray, size=valueLblSize))
+                for i = 0 to n - 1
+                    float dk2 = array.get(hk, i)
+                    float dv2 = array.get(hv, i)
+                    if dv2 != 0
+                        float pct = math.abs(dv2) / maxAbs * 100
+                        int len = math.max(1, math.round(pct / 100 * profileWidth))
+                        bool isPos = dv2 > 0
+                        bool inPocket = not na(hCW) and not na(hPW) and dk2 < math.max(hCW, hPW) and dk2 > math.min(hCW, hPW) and pct < pocketPct
+                        bool isCW = not na(hCW) and math.abs(dk2 - hCW) < gapH / 2
+                        bool isPW = not na(hPW) and math.abs(dk2 - hPW) < gapH / 2
+                        color c = isCW ? (useT ? todayCallC : callWallC) : isPW ? (useT ? todayPutC : putWallC) : inPocket ? pocketC : isPos ? posColor : negColor
+                        int lft = isPos ? anchorX : anchorX - len
+                        int rgt = isPos ? anchorX + len : anchorX
+                        array.push(gBoxes, box.new(lft, dk2 + halfH, rgt, dk2 - halfH, border_color=color.new(c, 100), bgcolor=c))
+
+                if showValueLabels
+                    array<float> absV = array.new<float>()
+                    for av in hv
+                        array.push(absV, math.abs(av))
+                    array<int> rankIdx = array.sort_indices(absV, order.descending)
+                    for r = 0 to math.min(labelTopN, n) - 1
+                        int j = array.get(rankIdx, r)
+                        float lv = array.get(hv, j)
+                        int lLen = math.max(1, math.round(math.abs(lv) / maxAbs * profileWidth))
+                        int lx = lv > 0 ? anchorX + lLen : anchorX - lLen
+                        string lTxt = useT ? str.tostring(lv) : str.tostring(math.abs(lv) / maxAbs * 100, "#") + "%"
+                        array.push(gLabels, label.new(lx, array.get(hk, j), lTxt, style=lv > 0 ? label.style_label_left : label.style_label_right, color=color.new(color.black, 100), textcolor=lv > 0 ? posColor : negColor, size=valueLblSize))
+
+    // ─── DRAW LEVEL MAP: name · what it means · distance (price only with Show Prices) ───
+    // start: Source / Current Price / Histogram · length counted from that start · labels right of the histogram
+    int fromX = lineStart == "Histogram" and histDrawn ? histRight + 1 : bar_index
+    int endX  = math.min(fromX + lineExt, bar_index + 490)
+    int lblX  = histDrawn ? math.min(math.max(endX, histRight + 2), bar_index + 495) : endX
+    if showLadder and array.size(lvP) > 0
+        for i = 0 to array.size(lvP) - 1
+            float lp = array.get(lvP, i)
+            color lc = array.get(lvC, i)
+            int   sb = array.get(lvB, i)
+            int   x1 = lineStart == "Source" ? math.max(nz(sb, bar_index), bar_index - 4999) : fromX
+            array.push(gLines, line.new(x1, lp, endX, lp, color=lc, width=array.get(lvW, i), style=array.get(lvS, i)))
+            array.push(gLabels, label.new(lblX, lp, (showPx ? fmtP(lp) + " · " : "") + array.get(lvT, i) + " · " + dist(lp), style=label.style_label_left, color=color.new(color.black, 100), textcolor=lc, size=lvlLblSize))
+
+    // ─── HUD ───
+    string locTxt = "type your 90D walls"
+    if not na(cw) and not na(pw) and not na(zoneBuf90)
+        if close > cw + zoneBuf90
+            locTxt := "above the 90D call wall"
+        else if close >= cw - zoneBuf90
+            locTxt := "at the 90D call wall"
+        else if close < pw - zoneBuf90
+            locTxt := "below the 90D put wall"
+        else if close <= pw + zoneBuf90
+            locTxt := "at the 90D put wall"
+        else
+            locTxt := "between the 90D walls"
+    string locS = locTxt == "above the 90D call wall" ? "above call wall" : locTxt == "at the 90D call wall" ? "at call wall" : locTxt == "below the 90D put wall" ? "below put wall" : locTxt == "at the 90D put wall" ? "at put wall" : locTxt == "between the 90D walls" ? "between walls" : "no 90D walls"
+
+    string regS    = not na(tFlip) ? "flip" : zgManual ? "zero γ" : "VWAP est."
+    string cMarket = na(regLvl) ? "—" : (longGamma ? "CALM · above " : "FAST · below ") + regS + " · " + locS
+    string cMktTip = na(regLvl) ? "" : (longGamma ? "CALM: price is above " : "FAST: price is below ") + regName + " " + fmtP(regLvl) + ". " + (longGamma ? "Dealers tend to slow price down: walls tend to hold." : "Dealers tend to speed price up: moves tend to stretch.") + " Location vs the 90D walls: " + locTxt + "."
+    string cAbove  = na(aboveP) ? "—" : pxd(aboveP) + " · " + aboveN
+    string cBelow  = na(belowP) ? "—" : pxd(belowP) + " · " + belowN
+    string srcS    = "today " + (hasToday ? "✓" : "✕") + " · 90D " + (manual90 ? "✓" : "est.")
+    bool   idxMismatch = str.length(txtIndex) > 0 and txtIndex != targetIndex
+
+    if showHud
+        table.clear(hud, 0, 0, 1, 15)
+        int row = 0
+        table.cell(hud, 0, row, "GAMMA · " + syminfo.ticker, text_color=color.white, text_size=hudSize, bgcolor=color.rgb(35, 35, 35), text_halign=text.align_left)
+        table.cell(hud, 1, row, srcS, text_color=hasToday and manual90 ? color.aqua : color.yellow, text_size=hudSize, bgcolor=color.rgb(35, 35, 35), text_halign=text.align_left, tooltip="Data: today = 0DTE strikes pasted · 90D ✓ = walls typed (est. = estimated from volume).")
+        row += 1
+        hudRow(hud, row, "MARKET", cMarket, na(regLvl) ? color.gray : longGamma ? color.aqua : color.orange, hudSize, cMktTip)
+        row += 1
+        hudRow(hud, row, "ABOVE", cAbove, color.silver, hudSize, "The nearest wall or magnet ABOVE price, in points from price" + (na(aboveP) ? "." : ": " + fmtP(aboveP) + "."))
+        row += 1
+        hudRow(hud, row, "BELOW", cBelow, color.silver, hudSize, "The nearest wall or magnet BELOW price, in points from price" + (na(belowP) ? "." : ": " + fmtP(belowP) + "."))
+        row += 1
+
+        if hudMode == "Detailed"
+            hudHead(hud, row, "LEVELS (points from price)", hudSize)
+            row += 1
+            hudRow(hud, row, "Call wall 90D" + (cwManual ? "" : " (est.)"), pxd(cw), callWallC, hudSize)
+            row += 1
+            hudRow(hud, row, "Put wall 90D" + (pwManual ? "" : " (est.)"), pxd(pw), putWallC, hudSize)
+            row += 1
+            hudRow(hud, row, zgManual ? "Zero γ 90D" : "90D VWAP (est. zero γ)", pxd(zg), color.silver, hudSize)
+            row += 1
+            hudRow(hud, row, "Today (0DTE)", hasToday ? "call " + pxd(tCW) + " · put " + pxd(tPW) + " · flip " + pxd(tFlip) : "paste today's levels", hasToday ? todayCallC : color.gray, hudSize)
+            row += 1
+
+        string note = idxMismatch ? "! Pasted " + txtIndex + " levels, but this chart uses " + targetIndex : not hasToday ? "Paste today's levels for the full map" : ""
+        if note != ""
+            table.cell(hud, 0, row, note, text_color=idxMismatch ? color.orange : color.gray, text_size=idxMismatch ? hudSize : size.tiny, bgcolor=color.black)
+            table.merge_cells(hud, 0, row, 1, row)

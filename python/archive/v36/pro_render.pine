@@ -1,0 +1,364 @@
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RENDER — runs once on the last bar. Everything is deleted and redrawn from
+// state, so any record removed above vanishes on the very next redraw (this
+// is what makes Husband & Wife deletions automatic).
+// Draw order IS priority order for right-edge overlap protection:
+//   Tn > static anchors > dynamics > forced guardians > MC/urgency.
+// ═══════════════════════════════════════════════════════════════════════════
+f_inRange(float p, float hi, float lo) =>
+    not na(hi) and not na(lo) and p <= hi + f_eps() and p >= lo - f_eps()
+
+// Is the real node at this bar + price DRAWN right now? (same rules as below)
+f_slotDrawn(int gT, float gP) =>
+    bool d = false
+    if not na(buStatic) and buStatic.t == gT and math.abs(buStatic.price - gP) <= f_eps()
+        d := d or (mainSide == -1 ? (show_gmp_lines and f_pullbackVisible(buStatic)) : mainSide == 1 ? show_gmc_lines : false)
+    if not na(beStatic) and beStatic.t == gT and math.abs(beStatic.price - gP) <= f_eps()
+        d := d or (mainSide == 1 ? (show_gmp_lines and f_pullbackVisible(beStatic)) : mainSide == -1 ? show_gmc_lines : false)
+    if not na(buDynRaw) and buDynRaw.t == gT and math.abs(buDynRaw.price - gP) <= f_eps()
+        d := d or (show_mp_lines and (mainSide != -1 or f_pullbackVisible(buDynRaw)))
+    if not na(buDynGap) and buDynGap.t == gT and math.abs(buDynGap.price - gP) <= f_eps()
+        d := d or (show_gmp_lines and (mainSide != -1 or f_pullbackVisible(buDynGap)))
+    if not na(beDynRaw) and beDynRaw.t == gT and math.abs(beDynRaw.price - gP) <= f_eps()
+        d := d or (show_mp_lines and (mainSide != 1 or f_pullbackVisible(beDynRaw)))
+    if not na(beDynGap) and beDynGap.t == gT and math.abs(beDynGap.price - gP) <= f_eps()
+        d := d or (show_gmp_lines and (mainSide != 1 or f_pullbackVisible(beDynGap)))
+    if not na(buCtlRaw) and buCtlRaw.t == gT and math.abs(buCtlRaw.price - gP) <= f_eps()
+        d := d or show_ant
+    if not na(buCtlGap) and buCtlGap.t == gT and math.abs(buCtlGap.price - gP) <= f_eps()
+        d := d or show_gmc_lines
+    if not na(beCtlRaw) and beCtlRaw.t == gT and math.abs(beCtlRaw.price - gP) <= f_eps()
+        d := d or show_ant
+    if not na(beCtlGap) and beCtlGap.t == gT and math.abs(beCtlGap.price - gP) <= f_eps()
+        d := d or show_gmc_lines
+    d
+
+// Is a P#-married marker's husband (the P# itself) drawn?
+f_pDrawn(ShiftMarker sm) =>
+    Node a = sm.side == -1 ? beStatic : buStatic
+    bool pRole = (sm.side == -1 and mainSide == 1) or (sm.side == 1 and mainSide == -1)
+    f_pAnchorAlive(sm) and pRole and show_gmp_lines and f_pullbackVisible(a)
+
+f_inList(array<int> ts, array<float> ps, int gT, float gP) =>
+    bool f = false
+    if ts.size() > 0
+        for k = 0 to ts.size() - 1
+            if ts.get(k) == gT and math.abs(ps.get(k) - gP) <= f_eps()
+                f := true
+                break
+    f
+
+if barstate.islast
+    if drawn_lines.size() > 0
+        for ln in drawn_lines
+            line.delete(ln)
+        drawn_lines.clear()
+    if drawn_labels.size() > 0
+        for lb in drawn_labels
+            label.delete(lb)
+        drawn_labels.clear()
+    if drawn_zones.size() > 0
+        for bx in drawn_zones
+            box.delete(bx)
+        drawn_zones.clear()
+    if drawn_z_lines.size() > 0
+        for zl in drawn_z_lines
+            line.delete(zl)
+        drawn_z_lines.clear()
+
+    int futureT    = f_future_time(ext_mc)
+    int futureAnt  = f_future_time(ant_ext)
+    int futureTc   = f_future_time(ext_ant)
+    int futureZone = f_future_time(zone_ext)   // right edge shared by ALL eBlocks / iBlocks
+
+    array<RenderZone> temp_zones = array.new<RenderZone>()
+    render_groups.clear()
+
+    // PHASE GATE for the MC anticipation line (MC only exists in the trend phase).
+    bool antBullPhaseOk = mainSide != -1 and not primaryPullbackDone
+    bool antBearPhaseOk = mainSide != 1  and not primaryPullbackDone
+
+    // ─── TREND & MOMENTUM MARKERS — computed FIRST: they set the always-drawn range ───
+    // 🟢 / 🔴 = the START of the leg (its T1). 🟩 / 🟥 = the newest Tn.
+    float starBullP = na
+    float starBearP = na
+    float lastBullP = na
+    float lastBearP = na
+    if poLines.size() > 0
+        for mIdx = poLines.size() - 1 to 0
+            POLine mp = poLines.get(mIdx)
+            if mp.side == 1
+                if na(lastBullP)
+                    lastBullP := mp.price
+                if mp.tier == 1 and na(starBullP)
+                    starBullP := mp.price
+            else
+                if na(lastBearP)
+                    lastBearP := mp.price
+                if mp.tier == 1 and na(starBearP)
+                    starBearP := mp.price
+    float rHi = na
+    float rLo = na
+    for pv in array.from(starBullP, lastBullP, starBearP, lastBearP)
+        if not na(pv)
+            rHi := na(rHi) ? pv : math.max(rHi, pv)
+            rLo := na(rLo) ? pv : math.min(rLo, pv)
+
+    // ─── Tn ORIGINS + coupled cause markers + eBlock / iBlock ───
+    // Inside the marker range: always drawn. Outside: newest first, up to the max.
+    array<int>   poT = array.new<int>()
+    array<float> poP = array.new<float>()
+    if show_orig_lines and poLines.size() > 0
+        int outN = 0
+        for plIdx = poLines.size() - 1 to 0
+            POLine pl = poLines.get(plIdx)
+            bool inR  = f_inRange(pl.price, rHi, rLo)
+            bool take = inR or outN < max_orig_lines
+            if take and not inR
+                outN += 1
+            bool hidden = pl.po4_touched and po4_trig_mode == "Hide"
+            if take and not hidden
+                poT.push(pl.t)
+                poP.push(pl.price)
+                color c  = pl.side == 1 ? mc_bull_col : mc_bear_col
+                bool isT1 = show_t1 and pl.tier == 1
+                int  w   = isT1 ? t1_width : tn_label_hdr ? tn_width : 2
+                string st = isT1 ? f_ln_style(t1_line_style) : tn_label_hdr ? f_ln_style(tn_line_style) : line.style_solid
+                string sz = isT1 ? t1_size : tn_label_hdr ? tn_size : orig_size
+                int lineEnd = (pl.po4_touched and po4_trig_mode == "Stop Extending") ? pl.po4_freeze_t : futureT
+                string txt = (pl.side == 1 ? "BuPO4" : "BePO4") + ENGT + (show_tiers ? " T" + str.tostring(pl.tier) : "") + (pl.isForced ? " Forced" : "") + (pl.official ? "" : " ✗")
+                f_add_level(pl.price, txt, c, w, st, pl.t, lineEnd, 5, sz)
+
+                // Coupled cause marker ("wife") — redrawn from this record.
+                // CDLc / LDc above the middle of the break line, CDSc / SDc below it.
+                if str.length(pl.causeText) > 0 and not na(pl.causePrice)
+                    int    causeEnd = math.max(pl.causeBreakT, pl.causeT)
+                    bool   isLdSd   = str.contains(pl.causeText, "LD") or str.contains(pl.causeText, "SD")
+                    color  bc       = isLdSd ? (pl.side == 1 ? ld_base_col : sd_base_col) : c
+                    color  uc       = not pl.official ? FAIL_COL : htf_dim and pl.against ? color.new(FAIL_COL, 30) : bc
+                    string ct       = f_eng(pl.official ? pl.causeText : str.lower(pl.causeText))
+                    if (not isLdSd or show_pb) and (pl.official or show_failed)
+                        drawn_lines.push(line.new(pl.causeT, pl.causePrice, causeEnd, pl.causePrice, xloc=xloc.bar_time, color=uc, width=1, style=pl.official ? line.style_solid : line.style_dotted))
+                        drawn_labels.push(label.new(math.round(math.avg(pl.causeT, causeEnd)), pl.causePrice, ct, xloc=xloc.bar_time, style=pl.side == 1 ? label.style_label_down : label.style_label_up, textcolor=uc, color=color(na), size=f_sz(pl.causeMajor ? ld_sd_size : "tiny"), tooltip=ct + (pl.official ? " (official)" : " (failed " + gate_mode + ")") + (pl.against ? "\nAgainst the HTF bias" : "")))
+
+                // BLOCK CLASS: a T1 born of a CDL/CDS flip = eBlock; a T2+ born of an
+                // LD/SD continuation = iBlock. Lives exactly as long as its PO4.
+                bool plIsLdSd = str.contains(pl.causeText, "LD") or str.contains(pl.causeText, "SD")
+                bool plZoneOn = plIsLdSd ? show_iblk : show_eblk
+                if show_zones and plZoneOn and pl.official and not na(pl.c_high)
+                    f_pushZone(temp_zones, pl.c_time, lineEnd, pl.c_high, pl.c_low, pl.c_open, pl.c_close, pl.side == 1, pl.side == 1 ? zone_pel_col : zone_pes_col, f_zoneName(not plIsLdSd, pl.side == 1, ENGT), pl.c_volPct)
+
+    // ─── Standalone CDS/CDL markers — drawn ONLY with their husband ───
+    // Husband = the P# (P#-married), a Forced guardian, a live PO4 or a real node.
+    array<int>   gVisT = array.new<int>()
+    array<float> gVisP = array.new<float>()
+    if shiftMarkers.size() > 0
+        int smOut = 0
+        for smIdx = shiftMarkers.size() - 1 to 0
+            ShiftMarker sm = shiftMarkers.get(smIdx)
+            if sm.isInternal and not show_int_cd
+                continue
+            bool isGuard = not sm.pMarried and f_guardianExists(sm.guardianT, sm.guardianPrice)
+            bool husband = sm.pMarried ? f_pDrawn(sm) : isGuard ? true : (f_inList(poT, poP, sm.guardianT, sm.guardianPrice) or f_slotDrawn(sm.guardianT, sm.guardianPrice))
+            if not husband
+                continue
+            if not f_inRange(sm.price, rHi, rLo)
+                if smOut >= max_cont_lines
+                    continue
+                smOut += 1
+            if isGuard
+                gVisT.push(sm.guardianT)
+                gVisP.push(sm.guardianPrice)
+            color smCol  = sm.side == 1 ? mc_bull_col : mc_bear_col
+            color useCol = sm.isInternal ? color.new(smCol, 40) : smCol
+            drawn_lines.push(line.new(sm.ownerT, sm.price, sm.breakT, sm.price, xloc=xloc.bar_time, color=useCol, width=1, style=line.style_solid))
+            drawn_labels.push(label.new(math.round(math.avg(sm.ownerT, sm.breakT)), sm.price, f_eng(sm.markerTxt), xloc=xloc.bar_time, textcolor=useCol, color=color(na), style=sm.side == 1 ? label.style_label_down : label.style_label_up, size=f_sz(sm.isInternal ? "tiny" : orig_size)))
+
+    // ─── STATIC anchors — Pn dashed, Rn dotted, capitalized + numbered ───
+    if mainSide == 1 and not na(beStatic) and show_gmp_lines and f_pullbackVisible(beStatic)
+        bool isP1 = show_p1 and curTier == 1
+        f_add_level(beStatic.price, f_apply_naming(f_staticText(beStatic, beStatic.isForced ? "NBC Forced" : "BeX", true, curTier)), mc_bear_col, isP1 ? p1_width : pn_label_hdr ? pn_width : 2, isP1 ? f_ln_style(p1_line_style) : pn_label_hdr ? f_ln_style(pn_line_style) : line.style_dashed, beStatic.t, futureT, 4, isP1 ? p1_size : pn_label_hdr ? pn_size : (beStatic.isGap ? gmp_size : mp_size))
+    if mainSide == -1 and not na(buStatic) and show_gmp_lines and f_pullbackVisible(buStatic)
+        bool isP1 = show_p1 and curTier == 1
+        f_add_level(buStatic.price, f_apply_naming(f_staticText(buStatic, buStatic.isForced ? "NBC Forced" : "BuX", true, curTier)), mc_bull_col, isP1 ? p1_width : pn_label_hdr ? pn_width : 2, isP1 ? f_ln_style(p1_line_style) : pn_label_hdr ? f_ln_style(pn_line_style) : line.style_dashed, buStatic.t, futureT, 4, isP1 ? p1_size : pn_label_hdr ? pn_size : (buStatic.isGap ? gmp_size : mp_size))
+    if mainSide == 1 and not na(buStatic) and show_gmc_lines
+        f_add_level(buStatic.price, f_apply_naming(f_staticText(buStatic, "BuX", false, curTier)), mc_bull_col, 2, line.style_dotted, buStatic.t, futureT, 4, gmc_size)
+        if show_zones and (buStatic.isGap ? zone_gmc : zone_mc) and not na(buStatic.c_high)
+            f_pushZone(temp_zones, buStatic.c_time, futureT, buStatic.c_high, buStatic.c_low, buStatic.c_open, buStatic.c_close, true, zone_pel_col, f_xuName(buStatic.isGap, true), buStatic.c_volPct)
+    if mainSide == -1 and not na(beStatic) and show_gmc_lines
+        f_add_level(beStatic.price, f_apply_naming(f_staticText(beStatic, "BeX", false, curTier)), mc_bear_col, 2, line.style_dotted, beStatic.t, futureT, 4, gmc_size)
+        if show_zones and (beStatic.isGap ? zone_gmc : zone_mc) and not na(beStatic.c_high)
+            f_pushZone(temp_zones, beStatic.c_time, futureT, beStatic.c_high, beStatic.c_low, beStatic.c_open, beStatic.c_close, false, zone_pes_col, f_xuName(beStatic.isGap, false), beStatic.c_volPct)
+
+    // ─── DYNAMIC internal trackers ───
+    if not na(buDynRaw) and show_mp_lines and (not (mainSide == -1) or f_pullbackVisible(buDynRaw))
+        bool pbRole = mainSide == -1
+        f_add_level(buDynRaw.price, f_apply_naming(pbRole ? f_dynPullbackText(buDynRaw, "BuX") : f_dynResumeText(buDynRaw, "BuX")), color.new(mc_bull_col, 40), 1, pbRole ? line.style_dashed : line.style_dotted, buDynRaw.t, futureT, 3, lqc_size)
+    if not na(buDynGap) and show_gmp_lines and (not (mainSide == -1) or f_pullbackVisible(buDynGap))
+        bool pbRole = mainSide == -1
+        f_add_level(buDynGap.price, f_apply_naming(pbRole ? f_dynPullbackText(buDynGap, "BuX") : f_dynResumeText(buDynGap, "BuX")), color.new(mc_bull_col, 15), 1, pbRole ? line.style_dashed : line.style_dotted, buDynGap.t, futureT, 3, lqc_size)
+        if show_zones and zone_gmc and not pbRole and not na(buDynGap.c_high)
+            f_pushZone(temp_zones, buDynGap.c_time, futureT, buDynGap.c_high, buDynGap.c_low, buDynGap.c_open, buDynGap.c_close, true, zone_pel_col, f_xuName(true, true), buDynGap.c_volPct)
+    if not na(beDynRaw) and show_mp_lines and (not (mainSide == 1) or f_pullbackVisible(beDynRaw))
+        bool pbRole = mainSide == 1
+        f_add_level(beDynRaw.price, f_apply_naming(pbRole ? f_dynPullbackText(beDynRaw, "BeX") : f_dynResumeText(beDynRaw, "BeX")), color.new(mc_bear_col, 40), 1, pbRole ? line.style_dashed : line.style_dotted, beDynRaw.t, futureT, 3, lqc_size)
+    if not na(beDynGap) and show_gmp_lines and (not (mainSide == 1) or f_pullbackVisible(beDynGap))
+        bool pbRole = mainSide == 1
+        f_add_level(beDynGap.price, f_apply_naming(pbRole ? f_dynPullbackText(beDynGap, "BeX") : f_dynResumeText(beDynGap, "BeX")), color.new(mc_bear_col, 15), 1, pbRole ? line.style_dashed : line.style_dotted, beDynGap.t, futureT, 3, lqc_size)
+        if show_zones and zone_gmc and not pbRole and not na(beDynGap.c_high)
+            f_pushZone(temp_zones, beDynGap.c_time, futureT, beDynGap.c_high, beDynGap.c_low, beDynGap.c_open, beDynGap.c_close, false, zone_pes_col, f_xuName(true, false), beDynGap.c_volPct)
+
+    // ─── TREND & MOMENTUM MARKERS (drawn) ───
+    if show_tn_step
+        bool bullSame = not na(starBullP) and not na(lastBullP) and math.abs(starBullP - lastBullP) <= f_eps()
+        bool bearSame = not na(starBearP) and not na(lastBearP) and math.abs(starBearP - lastBearP) <= f_eps()
+        if not na(starBullP)
+            drawn_labels.push(label.new(futureT, starBullP, bullSame ? "🟢🟩" : "🟢", xloc=xloc.bar_time, style=label.style_label_right, textcolor=tm_bull_col, color=color(na), size=size.small))
+        if not na(lastBullP) and not bullSame
+            drawn_labels.push(label.new(futureT, lastBullP, "🟩", xloc=xloc.bar_time, style=label.style_label_right, textcolor=tm_bull_col, color=color(na), size=size.small))
+        if not na(starBearP)
+            drawn_labels.push(label.new(futureT, starBearP, bearSame ? "🔴🟥" : "🔴", xloc=xloc.bar_time, style=label.style_label_right, textcolor=tm_bear_col, color=color(na), size=size.small))
+        if not na(lastBearP) and not bearSame
+            drawn_labels.push(label.new(futureT, lastBearP, "🟥", xloc=xloc.bar_time, style=label.style_label_right, textcolor=tm_bear_col, color=color(na), size=size.small))
+
+    // ─── TREND-PHASE MC / GMC (own slots — survive the pullback & resumption) ───
+    if not na(buCtlRaw) and show_ant
+        f_add_level(buCtlRaw.price, f_apply_naming(f_dynResumeText(buCtlRaw, "BuX")), color.new(mc_bull_col, 40), 1, line.style_dotted, buCtlRaw.t, futureT, 3, lqc_size)
+    if not na(buCtlGap) and show_gmc_lines
+        f_add_level(buCtlGap.price, f_apply_naming(f_dynResumeText(buCtlGap, "BuX")), color.new(mc_bull_col, 15), 1, line.style_dotted, buCtlGap.t, futureT, 3, lqc_size)
+        if show_zones and zone_gmc and not na(buCtlGap.c_high)
+            f_pushZone(temp_zones, buCtlGap.c_time, futureT, buCtlGap.c_high, buCtlGap.c_low, buCtlGap.c_open, buCtlGap.c_close, true, zone_pel_col, f_xuName(true, true), buCtlGap.c_volPct)
+    if not na(beCtlRaw) and show_ant
+        f_add_level(beCtlRaw.price, f_apply_naming(f_dynResumeText(beCtlRaw, "BeX")), color.new(mc_bear_col, 40), 1, line.style_dotted, beCtlRaw.t, futureT, 3, lqc_size)
+    if not na(beCtlGap) and show_gmc_lines
+        f_add_level(beCtlGap.price, f_apply_naming(f_dynResumeText(beCtlGap, "BeX")), color.new(mc_bear_col, 15), 1, line.style_dotted, beCtlGap.t, futureT, 3, lqc_size)
+        if show_zones and zone_gmc and not na(beCtlGap.c_high)
+            f_pushZone(temp_zones, beCtlGap.c_time, futureT, beCtlGap.c_high, beCtlGap.c_low, beCtlGap.c_open, beCtlGap.c_close, false, zone_pes_col, f_xuName(true, false), beCtlGap.c_volPct)
+
+    // ─── FORCED guardians — drawn only when one of their markers is drawn ───
+    if forcedNodes.size() > 0
+        for fn in forcedNodes
+            if f_inList(gVisT, gVisP, fn.t, fn.price)
+                color fnCol = color.new(fn.side == 1 ? lqc_buy_col : lqc_sell_col, 55)
+                f_add_level(fn.price, fn.lbl, fnCol, 1, line.style_dotted, fn.t, futureT, 2, lqc_size)
+
+    // ─── MC ANTICIPATION LINES ───
+    if show_ant
+        if ant_bull_active and antBullPhaseOk
+            f_add_level(ant_bull_price, f_apply_naming("BuX MC"), mc_bull_col, 1, line.style_dotted, ant_bull_t, futureAnt, 2, ant_size)
+        if ant_bear_active and antBearPhaseOk
+            f_add_level(ant_bear_price, f_apply_naming("BeX MC"), mc_bear_col, 1, line.style_dotted, ant_bear_t, futureAnt, 2, ant_size)
+
+    // U iBlock volume uses the value stored when the MC candle printed.
+    if show_zones and zone_mc
+        if ant_bull_active and antBullPhaseOk and not na(ant_bull_h)
+            f_pushZone(temp_zones, ant_bull_t, futureAnt, ant_bull_h, ant_bull_l, ant_bull_o, ant_bull_c, true, zone_pel_col, f_xuName(false, true), ant_bull_v)
+        if ant_bear_active and antBearPhaseOk and not na(ant_bear_h)
+            f_pushZone(temp_zones, ant_bear_t, futureAnt, ant_bear_h, ant_bear_l, ant_bear_o, ant_bear_c, false, zone_pes_col, f_xuName(false, false), ant_bear_v)
+
+    // ─── URGENCY GAP ANTICIPATION LINES ───
+    if show_tc
+        if not na(tc_bull_lvl)
+            f_add_level(tc_bull_lvl, tc_bull_violated ? "Buy Urgency Gap Anticipation ✕" : "Buy Urgency Gap Anticipation⬀", tc_bull_col, 2, line.style_solid, tc_bull_t, futureTc, 3, tc_size)
+        if not na(tc_bear_lvl)
+            f_add_level(tc_bear_lvl, tc_bear_violated ? "Sell Urgency Gap Anticipation ✕" : "Sell Urgency Gap Anticipation⬂", tc_bear_col, 2, line.style_solid, tc_bear_t, futureTc, 3, tc_size)
+
+    // Flush every merged right-edge level: one line per price, labels joined
+    // with " & " so co-located levels read together instead of overlapping.
+    f_draw_groups()
+
+    // ─── eBLOCK / iBLOCK BOXES ───
+    if temp_zones.size() > 0
+        array<int> t_vals = array.new<int>()
+        for tz in temp_zones
+            t_vals.push(tz.t)
+        array<int> sorted_idx = array.sort_indices(t_vals)
+        int left_shift = math.round(bar_time_diff / 2)
+        int start_idx  = limit_zones ? math.max(0, sorted_idx.size() - max_zones) : 0
+        string style_50 = line_50_style == "Solid" ? line.style_solid : line_50_style == "Dotted" ? line.style_dotted : line.style_dashed
+        for i = start_idx to sorted_idx.size() - 1
+            RenderZone rz = temp_zones.get(sorted_idx.get(i))
+            int left_edge = rz.t - left_shift
+            color txtCol = color.new(rz.isBull ? mc_bull_col : mc_bear_col, 0)
+            drawn_zones.push(box.new(left_edge, rz.z_top, futureZone, rz.z_bot, xloc=xloc.bar_time, border_color=na, bgcolor=rz.bg_col, text=zone_show_name ? rz.blockName : "", text_color=txtCol, text_size=size.tiny, text_halign=text.align_right, text_valign=text.align_center))
+            if zone_show_vol and not na(rz.volPct)
+                string vTier = rz.volPct >= 150 ? "Strong" : rz.volPct >= 80 ? "Normal" : "Weak"
+                string vFire = rz.volPct >= 150 ? " 🔥" : ""
+                string vTxt  = vTier + ": " + str.tostring(math.round(rz.volPct)) + "%" + vFire
+                float  vY    = rz.isBull ? rz.z_bot : rz.z_top
+                drawn_labels.push(label.new(left_edge, vY, vTxt, xloc=xloc.bar_time, yloc=yloc.price, style=rz.isBull ? label.style_label_up : label.style_label_down, textcolor=txtCol, color=color(na), size=size.tiny))
+            if show_50_line
+                drawn_z_lines.push(line.new(left_edge, rz.z_mid, futureZone, rz.z_mid, xloc=xloc.bar_time, color=color.new(rz.bg_col, 0), width=line_50_width, style=style_50))
+                float v_target = rz.isBull ? rz.c_bot : rz.c_top
+                drawn_z_lines.push(line.new(futureZone, rz.z_mid, futureZone, v_target, xloc=xloc.bar_time, color=color.new(rz.bg_col, 0), width=line_50_width, style=style_50))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CANDLE COLORING: Structural Delta Bias (conviction) + NBC override.
+// ═══════════════════════════════════════════════════════════════════════════
+bool candle_is_bull = close > open
+bool candle_is_bear = close < open
+bool candle_is_doji = close == open
+
+f_ccm_zone(float price, float bodyTop, float bodyBot, float hi, float lo) =>
+    int z = price > hi ? 1 : price > bodyTop ? 2 : price >= bodyBot ? 3 : price >= lo ? 4 : 5
+    z
+
+float ccm_bodyTop = math.max(open[1], close[1])
+float ccm_bodyBot = math.min(open[1], close[1])
+float ccm_hi      = high[1]
+float ccm_lo      = low[1]
+
+int ccm_closeZone = f_ccm_zone(close, ccm_bodyTop, ccm_bodyBot, ccm_hi, ccm_lo)
+
+bool ccm_netBullStance = ccm_closeZone < 3
+bool ccm_netBearStance = ccm_closeZone > 3
+int  ccm_magnitude     = math.abs(ccm_closeZone - 3)
+
+bool ccm_gapAbsorbedBull = ccm_netBullStance and candle_is_bear
+bool ccm_gapAbsorbedBear = ccm_netBearStance and candle_is_bull
+
+color ccm_tierColor = na
+if candle_is_doji
+    ccm_tierColor := ccm_doji_col
+else if ccm_gapAbsorbedBull
+    ccm_tierColor := ccm_gap_bull_col
+else if ccm_gapAbsorbedBear
+    ccm_tierColor := ccm_gap_bear_col
+else if ccm_closeZone == 3 and candle_is_bear
+    ccm_tierColor := ccm_pause_col
+else if ccm_netBullStance
+    ccm_tierColor := ccm_magnitude == 2 ? ccm_strongest_bull : ccm_magnitude == 1 ? ccm_strong_bull : ccm_weak_bull
+else if ccm_netBearStance
+    ccm_tierColor := ccm_magnitude == 2 ? ccm_strongest_bear : ccm_magnitude == 1 ? ccm_strong_bear : ccm_weak_bear
+else
+    ccm_tierColor := ccm_weak_bull
+
+color final_bar_color = show_ccm_color ? ccm_tierColor : na
+
+// NBC (Non-Body-Close) — neither a BuX nor a BeX. Applied last: every NBC
+// gets the one flat color.
+bool candle_is_nbc = not (close > high[1] or open > high[1]) and not (close < low[1] or open < low[1])
+if show_nbc_color and candle_is_nbc
+    final_bar_color := nbc_col
+
+// CLOSED CANDLES ONLY — the live (still forming) candle is never colored.
+if not barstate.isconfirmed
+    final_bar_color := na
+
+barcolor(final_bar_color)
+
+//@@HTF_TABLE@@
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALERTS (official breaks only, closed bars)
+// ═══════════════════════════════════════════════════════════════════════════
+alertcondition(alert_po4_bull, title="New BuPO4", message="New BuPO4 (bullish origin) confirmed on {{ticker}} at {{close}}")
+alertcondition(alert_po4_bear, title="New BePO4", message="New BePO4 (bearish origin) confirmed on {{ticker}} at {{close}}")
+alertcondition(alert_cdl, title="CDLc Flip (official)", message="CDLc - bullish flip (candle engine) on {{ticker}} at {{close}}")
+alertcondition(alert_cds, title="CDSc Flip (official)", message="CDSc - bearish flip (candle engine) on {{ticker}} at {{close}}")
+alertcondition(alert_ld, title="LDc Continuation (official)", message="LDc - bullish continuation (candle engine) on {{ticker}} at {{close}}")
+alertcondition(alert_sd, title="SDc Continuation (official)", message="SDc - bearish continuation (candle engine) on {{ticker}} at {{close}}")
+alertcondition(alert_gmc_bull, title="New BuX GMC", message="New BuX GMC (bullish momentum) confirmed on {{ticker}} at {{close}}")
+alertcondition(alert_gmc_bear, title="New BeX GMC", message="New BeX GMC (bearish momentum) confirmed on {{ticker}} at {{close}}")
+alertcondition(newsWarn and barstate.isconfirmed, title="News Warning", message="News coming in 15 / 30 minutes on {{ticker}}")

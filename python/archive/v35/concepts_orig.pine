@@ -1,0 +1,2697 @@
+//@version=6
+indicator("MMM Concepts Pro+ @MaxMaserati", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// =====================================================
+// ESSENTIAL GLOBAL CONTROLS
+// =====================================================
+group_global = "⚡ Global Performance & Spacing"
+use_hist_limit = input.bool(true, "Limit Historical Bars (Faster Load)", group=group_global)
+max_bars_back  = input.int(500, "Max History Bars", minval=100, maxval=20000, group=group_global)
+offsetGap      = input.int(2, "Offset Gap (Bars)", minval=0, maxval=20, group=group_global, tooltip="Horizontally offsets labels and signals to prevent overlap with candle bodies.")
+
+in_calc_range = not use_hist_limit or (last_bar_index - bar_index <= max_bars_back)
+
+// =====================================================
+// SMART "A&B" OVERLAP HANDLING ENGINE & TIME HELPER
+// =====================================================
+type RenderGroup
+    float         price
+    array<string> labels
+    color         ln_col
+    int           ln_width
+    string        ln_style
+    int           b_time
+    int           e_time
+    int           priority
+    bool          draw_dot
+    color         dot_col
+    string        dot_sz
+    string        lbl_pos
+
+var array<RenderGroup> render_groups = array.new<RenderGroup>()
+var array<line>        drawn_lines   = array.new<line>()
+var array<label>       drawn_labels  = array.new<label>()
+var array<label>       drawn_dots    = array.new<label>()
+
+f_sz(string s) =>
+    s == "Huge" ? size.huge : s == "Extra Large" ? size.huge : s == "Large" ? size.large : s == "Normal" ? size.normal : size.small
+
+var int bar_time_diff = timeframe.in_seconds() * 1000
+f_future_time(int ext) =>
+    int diff = time - nz(time[1], time)
+    if diff <= 0
+        diff := bar_time_diff
+    if diff <= 0
+        diff := 60000
+    time + math.round(diff * ext)
+
+f_add_level(float p_price, string p_text, color p_col, int p_width, string p_style, int p_start_t, int p_end_t, int p_prio, bool p_draw_dot, color p_dot_col, string p_dot_sz, string p_lbl_pos) =>
+    bool found = false
+    float eps = math.max(syminfo.mintick * 0.51, 1e-5)
+    int safe_start = nz(p_start_t, time)
+    int safe_end   = nz(p_end_t, time)
+    int final_b    = math.min(safe_start, safe_end)
+    int final_e    = math.max(safe_start, safe_end)
+
+    if render_groups.size() > 0
+        for grp in render_groups
+            if math.abs(grp.price - p_price) <= eps
+                found := true
+                if str.length(p_text) > 0 and array.indexof(grp.labels, p_text) == -1
+                    grp.labels.push(p_text)
+                grp.b_time := math.min(grp.b_time, final_b)
+                grp.e_time := math.max(grp.e_time, final_e)
+                if p_prio > grp.priority
+                    grp.ln_col   := p_col
+                    grp.ln_width := p_width
+                    grp.ln_style := p_style
+                    grp.priority := p_prio
+                    grp.lbl_pos  := p_lbl_pos
+                break
+
+    if not found
+        array<string> new_labels = array.new<string>()
+        if str.length(p_text) > 0
+            new_labels.push(p_text)
+        render_groups.push(RenderGroup.new(
+            price    = p_price,
+            labels   = new_labels,
+            ln_col   = p_col,
+            ln_width = p_width,
+            ln_style = p_style,
+            b_time   = final_b,
+            e_time   = final_e,
+            priority = p_prio,
+            draw_dot = p_draw_dot,
+            dot_col  = p_dot_col,
+            dot_sz   = p_dot_sz,
+            lbl_pos  = p_lbl_pos
+        ))
+
+f_draw_groups() =>
+    if drawn_lines.size() > 0
+        for ln in drawn_lines
+            line.delete(ln)
+        drawn_lines.clear()
+    if drawn_labels.size() > 0
+        for lb in drawn_labels
+            label.delete(lb)
+        drawn_labels.clear()
+
+    if render_groups.size() > 0
+        for grp in render_groups
+            string combined_txt = array.join(grp.labels, " & ")
+            drawn_lines.push(line.new(grp.b_time, grp.price, grp.e_time, grp.price, xloc=xloc.bar_time, color=grp.ln_col, width=grp.ln_width, style=grp.ln_style))
+            int lbl_x = grp.e_time
+            string lbl_style_val = label.style_label_left
+            if grp.lbl_pos == "down"
+                lbl_x := math.round(math.avg(grp.b_time, grp.e_time))
+                lbl_style_val := label.style_label_down
+            else if grp.lbl_pos == "up"
+                lbl_x := math.round(math.avg(grp.b_time, grp.e_time))
+                lbl_style_val := label.style_label_up
+
+            drawn_labels.push(label.new(lbl_x, grp.price, combined_txt, xloc=xloc.bar_time, textcolor=grp.ln_col, color=color(na), style=lbl_style_val, size=size.small))
+    render_groups.clear()
+
+// =====================================================
+// TIMEFRAME SETTINGS
+// =====================================================
+tfMode = input.string("Manual", "Timeframe Mode", options=["Manual", "Auto Combination"], group="🕐 Timeframe Settings")
+autoMultiplier = input.string("4x", "Auto Multiplier", options=["4x", "6x"], tooltip="Applies when Mode is 'Auto Combination'", group="🕐 Timeframe Settings")
+blockTimeframe = input.timeframe('', "Block Timeframe", group="🕐 Timeframe Settings")
+ltfExecutionTF = input.timeframe('', "LTF Execution Timeframe", group="🕐 Timeframe Settings")
+
+// =====================================================
+// PRIMARY CONTROLS
+// =====================================================
+enableNeutralCandleBoxes = input.bool(true, "Enable MMM Expander & Contraction Block", group="⚡ PRIMARY CONTROLS")
+blockMode = input.string("MMM Expander Block", "Block Mode", options=["MMM Contraction Block", "MMM Expander Block"], group="⚡ PRIMARY CONTROLS")
+showBlockMidlines = input.bool(true, "Show Block Midlines", group="⚡ PRIMARY CONTROLS")
+showCDLabels = input.bool(true, "Show CDLx/CDSx Reversal Labels", group="⚡ PRIMARY CONTROLS")
+CDLabelSize = input.string("Small", "CDEx Label Size", options=["Small", "Normal", "Large", "Extra Large", "Huge"], group="⚡ PRIMARY CONTROLS")
+CDLongColor = input.color(color.new(#0f7c0f, 0), "CDLx Color", inline='cdex1', group="⚡ PRIMARY CONTROLS")
+CDShortColor = input.color(color.new(#ff0000, 0), "CDSx Color", inline='cdex1', group="⚡ PRIMARY CONTROLS")
+showBiasLine = input.bool(false, 'Enable MMCB', inline='mmcb1', group='⚡ PRIMARY CONTROLS')
+custom_timeframe = input.timeframe('240', 'TF', inline='mmcb1', group='⚡ PRIMARY CONTROLS')
+showBiasLabels = input.bool(true, 'MMM Bias Candle', inline='mmcb1', group='⚡ PRIMARY CONTROLS')
+showContractionBoxes = input.bool(true, "Show Contraction Boxes", inline='univ1', group='⚡ PRIMARY CONTROLS')
+showContractionLines = input.bool(true, "Show Contraction Lines", inline='univ1', group='⚡ PRIMARY CONTROLS')
+showOnlyCDLPlus = input.bool(false, "Show Only CDLx+/CDSx+", inline='univ2', group='⚡ PRIMARY CONTROLS')
+showOnlyCDLxCDSx = input.bool(false, "Show Only CDLx/CDSx", inline='univ2', group='⚡ PRIMARY CONTROLS')
+
+// =====================================================
+// 🔔 ALERTS
+// =====================================================
+enableAlerts = input.bool(true, "Enable Dynamic Alerts", tooltip="Sends an alert when a signal is created, activated, or closed (TP/SL). Make sure to create an alert in TradingView using 'Any alert() function call' condition.", group="🔔 ALERTS")
+
+// =====================================================
+// 🕯️ CANDLE ENTRIES & SETTINGS
+// =====================================================
+enableCandleCDLPlus  = input.bool(false, "1️⃣ PO4 CDLx+/CDSx+ (Violent Break)", tooltip="Triggers a momentum entry when a CDLx+/CDSx+ (BuBC immediately following BeBC or vice versa) breaks out. Best for catching immediate, high-momentum moves.", group="🕯️ CANDLE ENTRIES")
+enableCandleCDL      = input.bool(false, "2️⃣ PO4 CDLx/CDSx (Reversal Break)", tooltip="Triggers a momentum entry the moment price breaks out of a forming box to confirm a Reversal (CDLx/CDSx).", group="🕯️ CANDLE ENTRIES")
+enableCandleLD       = input.bool(false, "3️⃣ PO4 LDx/SDx (Continuation Break)", tooltip="Triggers a momentum entry the moment price breaks out of a previously confirmed box in the direction of the current trend (LDx/SDx).", group="🕯️ CANDLE ENTRIES")
+
+candleEntryMode = input.string("Close", "Candle Entry Mode", options=["Open", "Close", "50% High-Low", "50% Close-Open"], tooltip="Determines your exact entry price for Candle momentum setups.\n\nOpen: Enters on the open of the very next candle.\nClose: Enters the millisecond the breakout candle closes.\n50% High-Low: Enters at the exact midpoint of the breakout candle's wick-to-wick range.\n50% Close-Open: Enters at the midpoint of the breakout candle's body.", group="🕯️ CANDLE ENTRY SETTINGS")
+slTicksCandle = input.int(2, "SL Ticks Beyond Candle/Block", minval=0, tooltip="Buffer ticks added to your Stop Loss. If your Global SL Mode is 'Candles', this adds padding below/above the signal candle wick. If 'Block Extremes', it adds padding beyond the structural block edge.", group="🕯️ CANDLE ENTRY SETTINGS")
+
+// =====================================================
+// 📦 BLOCK ENTRIES & SETTINGS
+// =====================================================
+enableBlockCDLPlus = input.bool(true, "4️⃣ CDLx+/CDSx+ Block (Violent Limit)", tooltip="Places a resting limit order at your designated zone inside a confirmed CDLx+/CDSx+ structure. Waits patiently for price to pull back and touch it.", group="📦 BLOCK ENTRIES")
+enableBlockCDL     = input.bool(true, "5️⃣ CDLx/CDSx Block (Reversal Limit)", tooltip="Places a resting limit order at your designated zone inside a confirmed Reversal block (CDLx/CDSx). Waits patiently for price to pull back and touch it.", group="📦 BLOCK ENTRIES")
+enableBlockLD      = input.bool(false, "6️⃣ LDx/SDx Block (Continuation Limit)", tooltip="Places a resting limit order at your designated zone inside a confirmed Continuation block (LDx/SDx). Waits patiently for price to pull back and touch it.", group="📦 BLOCK ENTRIES")
+
+grp_blk_set = "📦 BLOCK ENTRY SETTINGS"
+blockEnterPremDisc = input.bool(false, "Long in PREMIUM / Short in DISCOUNT", tooltip="AGGRESSIVE ENTRY (Shallow Pullback): Limits trigger early.\n\nLONGS: Enter in the upper Premium half (75% mark, halfway between Box High and Midline).\nSHORTS: Enter in the lower Discount half (25% mark, halfway between Box Low and Midline).", group=grp_blk_set)
+blockEnterDiscPrem = input.bool(true, "Long in DISCOUNT / Short in PREMIUM", tooltip="OPTIMAL SMC ENTRY (Deep Pullback): Filters weak setups for better R:R.\n\nLONGS: Enter deep in the lower Discount half (25% mark, halfway between Box Low and Midline).\nSHORTS: Enter high in the upper Premium half (75% mark, halfway between Box High and Midline).", group=grp_blk_set)
+blockEnterMidline  = input.bool(false, "Enter at 50% midline", tooltip="EQUILIBRIUM ENTRY: Places the limit order exactly at the dead center 50% midline of the block for both longs and shorts.", group=grp_blk_set)
+blockEnterEdge     = input.bool(false, "Enter at breakout edge", tooltip="BREAKOUT EDGE ENTRY: Most aggressive limit. Longs enter exactly at the top Box High (100% mark). Shorts enter exactly at the bottom Box Low (0% mark). Triggers on the very first kiss of the block.", group=grp_blk_set)
+slTicksBox = input.int(2, "SL Ticks Beyond Block", minval=0, tooltip="Buffer ticks placed outside the absolute invalidation edge (low of demand / high of supply) of the resting Block.", group=grp_blk_set)
+
+blockEntryMode = blockEnterPremDisc ? "Long in PREMIUM / Short in DISCOUNT" : blockEnterMidline ? "Enter at 50% midline" : blockEnterEdge ? "Enter at breakout edge" : "Long in DISCOUNT / Short in PREMIUM"
+
+showTimeframeLabel = input.bool(true, "Show Timeframe (M15)", group="🏷️ Label Display")
+
+// =====================================================
+// SWEEP SETTINGS
+// =====================================================
+showSweepLines = input.bool(true, "Show Sweep Lines", group="📍 Sweep Settings")
+swingLength = input.int(1, "Swing Lookback", minval=1, group="📍 Sweep Settings")
+sweepLabelMode = input.string("Full Mode", "Sweep Label Mode", options=["Full Mode", "X Mode"], group="📍 Sweep Settings")
+sweepLineColor = input.color(color.red, "Sweep Line Color", group="📍 Sweep Settings")
+sweepLineWidth = input.int(2, "Sweep Line Width", minval=1, maxval=10, group="📍 Sweep Settings")
+sweepLabelSize = input.string("Small", "Sweep Label Size", options=["Small", "Normal", "Large", "Extra Large", "Huge"], group="📍 Sweep Settings")
+exitOnWeakSweep = input.bool(false, "Exit on Weak Sweep (W.Sw/X)", tooltip="EARLY EXIT: Instantly closes any active trade if a Weak Sweep occurs in the opposite direction of your position.", group="📍 Sweep Settings")
+exitOnStrongSweep = input.bool(false, "Exit on Strong Sweep (S.Sw/X+)", tooltip="EARLY EXIT: Instantly closes any active trade if a Strong Sweep occurs in the opposite direction of your position.", group="📍 Sweep Settings")
+exitOnSuperStrongSweep = input.bool(false, "Exit on Super Strong Sweep (SS.Sw/X++)", tooltip="EARLY EXIT: Instantly closes any active trade if a Super Strong Sweep occurs in the opposite direction of your position.", group="📍 Sweep Settings")
+
+// =====================================================
+// EXIT CONDITIONS
+// =====================================================
+exitBoxReentry = input.bool(false, "Exit on Reversal Box Re-entry", tooltip="EMERGENCY EXIT: If a trade is active and price violently reverses back INSIDE the structural block that triggered the trade, it will close the trade early to prevent a full Stop Loss.", group="🚪 Exits")
+boxReentryMode = input.string("Box Edge", "Reversal Box Exit At", options=["Box Edge", "Midline"], tooltip="Determines how deep price must re-enter the block to trigger the Emergency Exit.\n\nBox Edge: Exits when price completely fails and touches the far opposite edge of the block.\nMidline: Exits aggressively the moment price crosses back over the 50% equilibrium line.", group="🚪 Exits")
+
+// =====================================================
+// RISK MANAGEMENT
+// =====================================================
+grp_risk = "⚖️ RISK MANAGEMENT"
+capitalDrawdown    = input.float(2000.0,  "Capital Drawdown ($)",          minval=0.1, step=100.0, group=grp_risk)
+profitTarget       = input.float(2500.0, "Profit Target ($)",              minval=0.1, step=100.0, group=grp_risk)
+challengeDays      = input.int(10,       "Challenge Days",                 minval=1,               group=grp_risk)
+cycleType          = input.string("Evaluation", "Cycle Type", options=["Evaluation","Pay-out"],   group=grp_risk)
+payoutRiskPct      = input.float(1.0,    "Pay-out Risk % of Drawdown",   minval=0.1, maxval=10.0, step=0.1, group=grp_risk)
+overrideRiskPerTrade = input.bool(false, "Override Auto Risk per Trade", group=grp_risk, tooltip="If ON, overrides the Cycle type (Days or Percent) and uses the manual Risk per Trade Input.")
+riskPerTrade_input = input.float(25.0,   "Risk per Trade ($)",             minval=0.1,               group=grp_risk)
+rrRatio            = input.float(2.0,    "Risk Reward Target",           minval=0.1,               group=grp_risk)
+expectedConsecLoss = input.int(14,       "Expected Consecutive Loss",    minval=0,               group=grp_risk)
+positionSize       = input.int(1, "Position Size (Contracts)", inline="ps", minval=1, group=grp_risk)
+pointValue = input.float(20.0, "Point Value ($)", inline="ps", minval=0.1, group=grp_risk, tooltip="Multiplier per 1 full point of price movement.")
+masterSLMode       = input.string("Block Extremes (HH/LL)", "Global Stop Loss Mode", options=["Candle High/Low", "Block Extremes (HH/LL)"], group=grp_risk, tooltip="Candle High/Low: Places your stop loss tightly behind the signal candle's wick.\n\nBlock Extremes (Safest): Automatically anchors all stop losses to the protected structural HTF Block.")
+enforceMaxRisk     = input.bool(true,    "⛔ Skip if $ Risk Exceeds Limit", group=grp_risk)
+
+maxEntries_CandleCDLPlus = input.int(2, "Max CDLx+/CDSx+ Candle Entries", minval=1, maxval=10, group=grp_risk)
+maxEntries_CandleCDL     = input.int(2, "Max PO4 CDLx/CDSx Entries",       minval=1, maxval=10, group=grp_risk)
+maxEntries_CandleLD      = input.int(2, "Max PO4 LDx/SDx Entries",         minval=1, maxval=10, group=grp_risk)
+
+maxEntries_BlockCDLPlus  = input.int(2, "Max CDLx+/CDSx+ Block Entries",  minval=1, maxval=10, group=grp_risk)
+maxEntries_BlockCDL      = input.int(2, "Max CDLx/CDSx Block Entries",    minval=1, maxval=10, group=grp_risk)
+maxEntries_BlockLD       = input.int(2, "Max LDx/SDx Block Entries",      minval=1, maxval=10, group=grp_risk)
+
+// =====================================================
+// TRADE LINE STYLES
+// =====================================================
+tradeLabelSize  = input.string("Normal", "Trade Label Size", options=["Small", "Normal", "Large", "Extra Large", "Huge"], group="📊 Trade Line Styles", tooltip="Controls the font size of Entry, SL, and TP labels.")
+lineExtension   = input.int(30,        "Line Extension (Bars)", minval=5, group="📊 Trade Line Styles")
+tradeLineWidth  = input.int(2,         "Trade Line Width",      minval=1, maxval=10, group="📊 Trade Line Styles", tooltip="Controls the thickness of active trade Entry, SL, and TP lines.")
+entryLineColor  = input.color(color.white, "Entry Line Color",    group="📊 Trade Line Styles")
+entryTextColor  = input.color(color.white, "Entry Text Color",    group="📊 Trade Line Styles", tooltip="Controls the text color of the LONG/SHORT entry labels.")
+slLineColor     = input.color(color.red,   "Stop Loss Line Color",group="📊 Trade Line Styles")
+slTextColor     = input.color(color.red,   "Stop Loss Text Color",group="📊 Trade Line Styles")
+tpLineColor     = input.color(#00e200,     "Target Line Color",   group="📊 Trade Line Styles")
+tpTextColor     = input.color(#00e200,     "Target Text Color",   group="📊 Trade Line Styles")
+universalTextColor = input.bool(false, "Universal Black Text", group="📊 Trade Line Styles", tooltip="Overrides all trade label text colors to black if checked.")
+
+// =====================================================
+// 📊 MMM HIGHEST VOLUME CANDLE (HVC) - RESTORED ARROWS
+// =====================================================
+showIVC = input.bool(true, 'Show HVC (Highest Volume Candle)', inline='hvc1', group='📊 MMM Highest Volume Candle (HVC)', tooltip='Enable HVC (Highest Volume Candle) label and arrow detection')
+showIVCColoring = input.bool(false, 'Color Candles', inline='hvc1', group='📊 MMM Highest Volume Candle (HVC)', tooltip='HVC candles override expander coloring when enabled')
+colorIVCBull = input.color(#056656, 'Bullish', inline='hvc1', group='📊 MMM Highest Volume Candle (HVC)')
+colorIVCBear = input.color(#f06292, 'Bearish', inline='hvc1', group='📊 MMM Highest Volume Candle (HVC)')
+
+showHvcLabels = input.bool(false, "Labels", inline="hvc2", group='📊 MMM Highest Volume Candle (HVC)')
+showHvcArrowSymbol = input.bool(true, "Arrows (↑/↓)", inline="hvc2", group='📊 MMM Highest Volume Candle (HVC)')
+showHvcText = input.bool(false, "HBu/HBe Text", inline="hvc2", group='📊 MMM Highest Volume Candle (HVC)')
+showHvcVolumeValue = input.bool(false, "Volume Value", inline="hvc2", group='📊 MMM Highest Volume Candle (HVC)')
+
+hvcLabelSize = input.string("Normal", "Label Size", options=["Tiny", "Small", "Normal", "Large", "Huge"], inline="hvc3", group='📊 MMM Highest Volume Candle (HVC)')
+hvcArrowSize = input.string("Normal", "Arrow Size", options=["Tiny", "Small", "Normal", "Large", "Huge", "Auto"], inline="hvc3", group='📊 MMM Highest Volume Candle (HVC)')
+hvcArrowStyle = input.string("Bold (⬆/⬇)", "Arrow Style", options=["Thin (↑/↓)", "Bold (⬆/⬇)", "Triangle (▲/▼)", "Pointer (➔/➔)"], inline="hvc3", group='📊 MMM Highest Volume Candle (HVC)')
+hvcLabelOffsetPercent = input.float(5, "Offset (%)", minval=0, maxval=100, step=1, inline="hvc4", group='📊 MMM Highest Volume Candle (HVC)')
+maxHvcLabels = input.int(20, "Max Labels", minval=1, maxval=200, inline="hvc4", group='📊 MMM Highest Volume Candle (HVC)')
+hvcLookbackPeriod = input.int(20, "HVC Lookback Period", minval=1, group='📊 MMM Highest Volume Candle (HVC)')
+
+// =====================================================
+// CDLx+/CDSx+ (POWER CLOSE EXPANDER)
+// =====================================================
+showCDLPlus    = input.bool(true, "Show CDLx+/CDSx+", group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+cdlPlusMode    = input.string("All CDLx+", "Detection Mode", options=["All CDLx+", "Outside Boxes Only"], group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+showCDLxPlus   = input.bool(true, "CDLx+", inline='cdlplus1', group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+cdlxPlusColor  = input.color(#00ffb8, "Color", inline='cdlplus1', group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+cdlxPlusWidth  = input.int(2, "Width", minval=1, maxval=10, inline='cdlplus1', group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+showCDSxPlus   = input.bool(true, "CDSx+", inline='cdsplus1', group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+cdsxPlusColor  = input.color(#ba68c8, "Color", inline='cdsplus1', group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+cdsxPlusWidth  = input.int(2, "Width", minval=1, maxval=10, inline='cdsplus1', group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+cdlPlusLblSize = input.string("Small", "Label Size", options=["Small", "Normal", "Large", "Extra Large", "Huge"], group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+cdlPlusLblFmt  = input.string('CDLx+ + TF', 'Label Format', options=['CDLx+ + TF', 'TF Only', 'CDLx+ Only', 'None'], group="🔥 CDLx+/CDSx+ (Violent Reversal)")
+
+// =====================================================
+// MMM CANDLE CLASSIFICATION
+// =====================================================
+showBodyCloseColoring = input.bool(true, 'MMM Expanders (BC)', group='🎨 MMM Candle Classification')
+bullishBodyCloseColor = input.color(#27ffc3, 'Bullish (BuBC)', inline='expanders', group='🎨 MMM Candle Classification')
+bearishBodyCloseColor = input.color(#9c27b0, 'Bearish (BeBC)', inline='expanders', group='🎨 MMM Candle Classification')
+showNeutralCandleColoring = input.bool(true, 'MMM Contraction (NBC)', group='🎨 MMM Candle Classification')
+neutralCandleColor = input.color(color.white, 'NBC', inline='nbc1', group='🎨 MMM Candle Classification')
+colorCurrentCandle = input.bool(false, 'Color Live', inline='nbc1', group='🎨 MMM Candle Classification')
+
+// =====================================================
+// BLOCK SETTINGS
+// =====================================================
+neutralBoxTransparency = input.int(90, "Transp", minval=0, maxval=100, inline='cb1', group="⬜ Block Settings")
+neutralLineWidth       = input.int(1,  "Width",  minval=1, maxval=10,                inline='cb1', group="⬜ Block Settings")
+boxLineWidth           = input.int(2,  "Lines Width", minval=1, maxval=10, inline='cb2', group="⬜ Block Settings")
+boxLineStyle           = input.string("Solid", "Style", options=["Solid","Dotted","Dashed"], inline='cb2', group="⬜ Block Settings")
+midlineWidth           = input.int(1,  "Midline Width", minval=1, maxval=10, inline='cb2', group="⬜ Block Settings", tooltip="Controls the thickness of the dotted 50% midline in contraction blocks.")
+extendLinesAfterBreak  = input.bool(true, "Extend After Break", inline='cb3', group="⬜ Block Settings")
+extendedLineWidth      = input.int(1, "Width", minval=1, maxval=10, inline='cb3', group="⬜ Block Settings")
+extendedLineStyle      = input.string("Dotted", "Style", options=["Solid","Dotted","Dashed"], inline='cb3', group="⬜ Block Settings")
+extendCDLxCDSxBoxes    = input.bool(false, "Extend CDLx/CDSx Boxes", group="⬜ Block Settings")
+showBidAskLabels       = input.bool(false, "Show Bid/Ask Prefix",  inline='lblctrl1', group="⬜ Block Settings")
+showLDSDLabels         = input.bool(true,  "Show LD/SD Labels",    inline='lblctrl1', group="⬜ Block Settings")
+blockLabelFormat       = input.string('TF+LD/SDx', 'Label Format', options=['Block+TF+LD/SDx','TF+LD/SDx','Block+LD/SDx','LD/SDx only','None'], group="⬜ Block Settings")
+blockLabelSize         = input.string("Small", "Label Size", options=["Small", "Normal", "Large", "Extra Large", "Huge"], group="⬜ Block Settings")
+
+// =====================================================
+// MMCB SETTINGS
+// =====================================================
+showLiveOpen    = input.bool(true, 'Live Open', inline='mmcb2', group='📈 MMCB')
+liveOpenColor   = input.color(#c1840c, '', inline='mmcb2', group='📈 MMCB')
+liveOpenWidth   = input.int(1, 'W', minval=1, maxval=10, inline='mmcb2', group='📈 MMCB')
+showOpenLine    = input.bool(false, 'O', inline='mmcb3', group='📈 MMCB')
+line_color_open = input.color(color.black, '', inline='mmcb3', group='📈 MMCB')
+showOpenLabel   = input.bool(true, 'Lbl', inline='mmcb3', group='📈 MMCB')
+showHighLine    = input.bool(true, 'H', inline='mmcb4', group='📈 MMCB')
+line_color_high = input.color(color.black, '', inline='mmcb4', group='📈 MMCB')
+showHighLabel   = input.bool(true, 'Lbl', inline='mmcb4', group='📈 MMCB')
+showLowLine     = input.bool(true, 'L', inline='mmcb5', group='📈 MMCB')
+line_color_low  = input.color(color.black, '', inline='mmcb5', group='📈 MMCB')
+showLowLabel    = input.bool(true, 'Lbl', inline='mmcb5', group='📈 MMCB')
+showCloseLine   = input.bool(false, 'C', inline='mmcb6', group='📈 MMCB')
+line_color_close = input.color(color.black, '', inline='mmcb6', group='📈 MMCB')
+showCloseLabel  = input.bool(true, 'Lbl', inline='mmcb6', group='📈 MMCB')
+extendLines     = input.bool(true, 'Extend', inline='mmcb7', group='📈 MMCB')
+extensionLength = input.int(5, 'Length', minval=0, maxval=1000, inline='mmcb7', group='📈 MMCB')
+biasLineWidth   = input.int(2, 'Width', minval=1, maxval=10, inline='mmcb8', group='📈 MMCB')
+biasLabelSize   = input.string("Small", "Size", options=["Small", "Normal", "Large", "Extra Large", "Huge"], inline='mmcb8', group='📈 MMCB')
+maxBiasLines    = input.int(1, 'Max Lines', minval=1, maxval=10, group='📈 MMCB')
+
+// =====================================================
+// DISPLAY — Table Controls
+// =====================================================
+grp_disp = "📋 Display"
+show_risk_table  = input.bool(false, "Show Risk Table",    inline="rt",  group=grp_disp)
+riskTablePos     = input.string("Bottom Right", "Pos",    inline="rt",  options=["Top Left","Top Right","Bottom Left","Bottom Right","Middle Left","Middle Right"], group=grp_disp)
+riskTableSz      = input.string("Small", "Size",          inline="rt2", options=["Small", "Normal", "Large", "Extra Large", "Huge"], group=grp_disp)
+show_stats_table = input.bool(true, "Show Stats Table",   inline="st",  group=grp_disp)
+statsTablePos    = input.string("Middle Right", "Pos",    inline="st",  options=["Top Left","Top Right","Bottom Left","Bottom Right","Middle Left","Middle Right"], group=grp_disp)
+statsTableSz     = input.string("Normal", "Size",         inline="st2", options=["Small", "Normal", "Large", "Extra Large", "Huge"], group=grp_disp)
+show_mmm_table   = input.bool(false, "Show Signals Table", inline="sg",  group=grp_disp)
+table_size_input = input.string("Small", "Size", options=["Small", "Normal", "Large", "Extra Large", "Huge"], inline="sg", group=grp_disp)
+table_position   = input.string('Top Right', 'Pos', options=['Top Left','Top Right','Middle Left','Middle Right','Bottom Left','Bottom Right'], inline="sg2", group=grp_disp)
+showBiasSection  = input.bool(true, "Show Bias Section",   group=grp_disp)
+showSignalSection = input.bool(true, "Show Signal Section", group=grp_disp)
+
+// =====================================================
+// DERIVED RISK METRICS
+// =====================================================
+float autoCalculatedRisk = cycleType == "Pay-out" ? (capitalDrawdown * payoutRiskPct / 100.0) : (capitalDrawdown / challengeDays)
+float riskPerTrade = overrideRiskPerTrade ? riskPerTrade_input : autoCalculatedRisk
+
+float totalRNeeded        = profitTarget / riskPerTrade
+float minDailyR           = totalRNeeded / challengeDays
+float idealDailyRR        = totalRNeeded / challengeDays
+int   totalWinsNeeded     = math.round(totalRNeeded / rrRatio)
+int   idealTradesPerDay   = math.round(idealDailyRR / 2.0)
+int   totalTrades         = totalWinsNeeded + expectedConsecLoss
+float expectedTotalLoss   = expectedConsecLoss * riskPerTrade
+
+// =====================================================
+// STATISTICS TRACKING VARS
+// =====================================================
+var int   totalWins_all        = 0
+var int   totalLosses_all      = 0
+var float totalProfitDollars   = 0.0
+var float totalLossDollars     = 0.0
+var float totalPosRR           = 0.0
+var float totalNegRR           = 0.0
+
+var int[] firstTradeTime_arr   = array.new<int>(0)
+
+var float peakEquity           = 0.0
+var float maxDrawdownStat      = 0.0
+var int   maxConsecWins        = 0
+var int   maxConsecLosses      = 0
+var int   consecWins           = 0
+var int   consecLosses         = 0
+var string lastOutcome         = ""
+var float totalUnrealizedPL    = 0.0
+
+var int w_CandleCDLPlus = 0
+var int l_CandleCDLPlus = 0
+var int w_CandleCDL     = 0
+var int l_CandleCDL     = 0
+var int w_CandleLD      = 0
+var int l_CandleLD      = 0
+var int w_BlockCDLPlus  = 0
+var int l_BlockCDLPlus  = 0
+var int w_BlockCDL      = 0
+var int l_BlockCDL      = 0
+var int w_BlockLD       = 0
+var int l_BlockLD       = 0
+
+// =====================================================
+// MARKET STATE TRACKING
+// =====================================================
+var string marketDirection  = "FLAT"
+var string lastSignalType   = "None"
+var float  lastSignalPrice  = na
+var string lastAction       = "Waiting for Signal"
+var bool   lastWasReversal  = false
+var float  lastRevBoxHigh   = na
+var float  lastRevBoxLow    = na
+var int    ldCount          = 0
+var int    sdCount          = 0
+var string currentBias      = "NONE"
+var manualExitWarningFlag   = array.new_bool(1, false)
+
+// =====================================================
+// CONSTANTS
+// =====================================================
+int   minNeutralCandles     = 1
+float vcrThreshold          = 0.75
+float atrCThreshold         = 0.80
+float ndbThreshold          = 0.05
+int   neutralVolumeLookback = 20
+
+// =====================================================
+// AUTO TIMEFRAME FUNCTION
+// =====================================================
+f_get_auto_tf(string _tf, string _multStr) =>
+    int mult = _multStr == "4x" ? 4 : 6
+    int tf_sec = timeframe.in_seconds(_tf)
+
+    string res = _tf
+    if not na(tf_sec)
+        int tf_mins = math.round(tf_sec / 60)
+        if tf_mins < 1440
+            res := str.tostring(tf_mins * mult)
+        else if tf_mins == 1440
+            res := str.tostring(mult) + "D"
+        else if tf_mins == 10080
+            res := str.tostring(mult) + "W"
+        else
+            res := str.tostring(mult) + "M"
+    res
+
+// =====================================================
+// STRICT BODY CLOSE LOGIC
+// =====================================================
+BullishBodyClose = close > high[1]
+BearishBodyClose = close < low[1]
+isNeutralCandle  = not BullishBodyClose and not BearishBodyClose
+
+// =====================================================
+// HTF DATA
+// =====================================================
+blockTF = tfMode == "Auto Combination" ? f_get_auto_tf(timeframe.period, autoMultiplier) : (blockTimeframe == '' ? timeframe.period : blockTimeframe)
+
+[htf_time, htf_time_close, htf_high, htf_low, htf_close, htf_volume, htf_open] =
+     request.security(syminfo.tickerid, blockTF, [time, time_close, high, low, close, volume, open], lookahead=barmerge.lookahead_off)
+
+var prev_htf_block_time = 0
+newHTFBlockCandle = htf_time != prev_htf_block_time
+prev_htf_block_time := htf_time
+
+htf_prev_high = request.security(syminfo.tickerid, blockTF, high[1], lookahead=barmerge.lookahead_off)
+htf_prev_low  = request.security(syminfo.tickerid, blockTF, low[1],  lookahead=barmerge.lookahead_off)
+htf_prev_time = request.security(syminfo.tickerid, blockTF, time[1], lookahead=barmerge.lookahead_off)
+
+htf_isBullishBodyClose = htf_close > htf_prev_high
+htf_isBearishBodyClose = htf_close < htf_prev_low
+htf_isNeutralCandle    = not htf_isBullishBodyClose and not htf_isBearishBodyClose
+
+// =====================================================
+// LTF DATA
+// =====================================================
+ltfTF = ltfExecutionTF == '' ? timeframe.period : ltfExecutionTF
+
+[ltf_time, ltf_time_close, ltf_high, ltf_low, ltf_close, ltf_open] =
+     request.security(syminfo.tickerid, ltfTF, [time, time_close, high, low, close, open], lookahead=barmerge.lookahead_off)
+
+var prev_ltf_time = 0
+newLTFCandle = ltf_time != prev_ltf_time
+prev_ltf_time := ltf_time
+
+ltf_prev_high = request.security(syminfo.tickerid, ltfTF, high[1], lookahead=barmerge.lookahead_off)
+ltf_prev_low  = request.security(syminfo.tickerid, ltfTF, low[1],  lookahead=barmerge.lookahead_off)
+
+ltf_isBullishBodyClose = ltf_close > ltf_prev_high
+ltf_isBearishBodyClose = ltf_close < ltf_prev_low
+
+// =====================================================
+// HVC DETECTION FUNCTIONS
+// =====================================================
+f_isHighestBullishVolume() =>
+    isBullish = close > open
+    if not isBullish
+        false
+    else
+        highest_bull_vol = 0.0
+        for i = 0 to math.min(hvcLookbackPeriod - 1, bar_index)
+            if close[i] > open[i] and not na(volume[i])
+                if volume[i] > highest_bull_vol
+                    highest_bull_vol := volume[i]
+        volume >= highest_bull_vol and not na(volume)
+
+f_isHighestBearishVolume() =>
+    isBearish = close < open
+    if not isBearish
+        false
+    else
+        highest_bear_vol = 0.0
+        for i = 0 to math.min(hvcLookbackPeriod - 1, bar_index)
+            if close[i] < open[i] and not na(volume[i])
+                if volume[i] > highest_bear_vol
+                    highest_bear_vol := volume[i]
+        volume >= highest_bear_vol and not na(volume)
+
+getHvcLabelSize(sizeStr) =>
+    switch sizeStr
+        "Tiny"   => size.tiny
+        "Small"  => size.small
+        "Normal" => size.normal
+        "Large"  => size.large
+        "Huge"   => size.huge
+        "Auto"   => size.auto
+        => size.normal
+
+getArrowSymbol(isBullish, styleStr) =>
+    if isBullish
+        switch styleStr
+            "Thin (↑/↓)"     => "↑"
+            "Bold (⬆/⬇)"     => "⬆"
+            "Triangle (▲/▼)" => "▲"
+            "Pointer (➔/➔)"  => "➔"
+            => "⬆"
+    else
+        switch styleStr
+            "Thin (↑/↓)"     => "↓"
+            "Bold (⬆/⬇)"     => "⬇"
+            "Triangle (▲/▼)" => "▼"
+            "Pointer (➔/➔)"  => "➔"
+            => "⬇"
+
+isCurrentHighestBullish = f_isHighestBullishVolume()
+isCurrentHighestBearish = f_isHighestBearishVolume()
+
+var bullishHvcLabels = array.new<label>()
+var bearishHvcLabels = array.new<label>()
+
+if showIVC and (showHvcLabels or showHvcArrowSymbol or showHvcText or showHvcVolumeValue) and in_calc_range
+    if isCurrentHighestBullish
+        bullishParts = array.new_string()
+        if showHvcArrowSymbol
+            array.push(bullishParts, getArrowSymbol(true, hvcArrowStyle))
+        if showHvcVolumeValue
+            array.push(bullishParts, str.tostring(volume, format.volume))
+        if showHvcText
+            array.push(bullishParts, "HBuV")
+        bullishText = array.join(bullishParts, "\n")
+
+        if array.size(bullishParts) > 0
+            offset = (high - low) * (hvcLabelOffsetPercent / 100.0)
+            useSize = showHvcArrowSymbol and not showHvcText and not showHvcVolumeValue ? getHvcLabelSize(hvcArrowSize) : getHvcLabelSize(hvcLabelSize)
+            newBullLabel = label.new(x=bar_index, y=low - offset, text=bullishText, style=label.style_label_up, color=color.new(color.white, 100), textcolor=colorIVCBull, size=useSize)
+            array.push(bullishHvcLabels, newBullLabel)
+            if array.size(bullishHvcLabels) > maxHvcLabels
+                label.delete(array.shift(bullishHvcLabels))
+
+    if isCurrentHighestBearish
+        bearishParts = array.new_string()
+        if showHvcText
+            array.push(bearishParts, "HBeV")
+        if showHvcVolumeValue
+            array.push(bearishParts, str.tostring(volume, format.volume))
+        if showHvcArrowSymbol
+            array.push(bearishParts, getArrowSymbol(false, hvcArrowStyle))
+        bearishText = array.join(bearishParts, "\n")
+
+        if array.size(bearishParts) > 0
+            offset = (high - low) * (hvcLabelOffsetPercent / 100.0)
+            useSize = showHvcArrowSymbol and not showHvcText and not showHvcVolumeValue ? getHvcLabelSize(hvcArrowSize) : getHvcLabelSize(hvcLabelSize)
+            newBearLabel = label.new(x=bar_index, y=high + offset, text=bearishText, style=label.style_label_down, color=color.new(color.white, 100), textcolor=colorIVCBear, size=useSize)
+            array.push(bearishHvcLabels, newBearLabel)
+            if array.size(bearishHvcLabels) > maxHvcLabels
+                label.delete(array.shift(bearishHvcLabels))
+
+// =====================================================
+// CANDLE COLORING
+// =====================================================
+shouldColorCandle = colorCurrentCandle or barstate.isconfirmed
+
+color candleColor = na
+if shouldColorCandle
+    if showIVC and showIVCColoring and (isCurrentHighestBullish or isCurrentHighestBearish)
+        if isCurrentHighestBullish
+            candleColor := colorIVCBull
+        else if isCurrentHighestBearish
+            candleColor := colorIVCBear
+    else if showBodyCloseColoring and BullishBodyClose
+        candleColor := bullishBodyCloseColor
+    else if showBodyCloseColoring and BearishBodyClose
+        candleColor := bearishBodyCloseColor
+    else if showNeutralCandleColoring and isNeutralCandle
+        candleColor := neutralCandleColor
+
+barcolor(candleColor)
+
+// =====================================================
+// HELPER FUNCTIONS
+// =====================================================
+getSizeFromString(sizeStr) =>
+    switch sizeStr
+        "Small"       => size.small
+        "Normal"      => size.normal
+        "Large"       => size.large
+        "Extra Large" => size.huge
+        "Huge"        => size.huge
+        => size.small
+
+getLineStyle(styleStr) =>
+    switch styleStr
+        "Solid"  => line.style_solid
+        "Dotted" => line.style_dotted
+        "Dashed" => line.style_dashed
+        => line.style_dotted
+
+f_timeframeToString(t) =>
+    s = str.length(t) == 0 ? timeframe.period : t
+    switch s
+        '1'   => 'M1'
+        '3'   => 'M3'
+        '5'   => 'M5'
+        '15'  => 'M15'
+        '30'  => 'M30'
+        '45'  => 'M45'
+        '60'  => 'H1'
+        '120' => 'H2'
+        '180' => 'H3'
+        '240' => 'H4'
+        '360' => 'H6'
+        '480' => 'H8'
+        '720' => 'H12'
+        'D'   => 'D'
+        'W'   => 'W'
+        'M'   => 'M'
+        => s
+
+getTablePosition(string pos) =>
+    switch pos
+        "Top Left"     => position.top_left
+        "Top Right"    => position.top_right
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        "Middle Left"  => position.middle_left
+        "Middle Right" => position.middle_right
+        => position.top_right
+
+getTableTextSize(string sz) =>
+    switch sz
+        "Small"       => size.small
+        "Normal"      => size.normal
+        "Large"       => size.large
+        "Extra Large" => size.huge
+        "Huge"        => size.huge
+        => size.small
+
+getBlockLabelText(bool isBullish, string tfString, string labelFormat, string ldsdLabel) =>
+    basePrefix = showBidAskLabels ? (isBullish ? "Bid" : "Ask") : ""
+    labelTxt = ""
+    switch labelFormat
+        'Block+TF+LD/SDx' =>
+            labelTxt := (basePrefix != "" ? basePrefix + " " : "") + (tfString != "" ? tfString + " " : "") + ldsdLabel
+        'TF+LD/SDx' =>
+            labelTxt := (tfString != "" ? tfString + " " : "") + ldsdLabel
+        'Block+LD/SDx' =>
+            labelTxt := (basePrefix != "" ? basePrefix + " " : "") + ldsdLabel
+        'LD/SDx only' =>
+            labelTxt := ldsdLabel
+        'None' =>
+            labelTxt := ""
+    labelTxt
+
+getCDLPlusLabelText(bool isBullish, string tfString, string labelFormat) =>
+    prefix = isBullish ? "CDLx+" : "CDSx+"
+    switch labelFormat
+        'CDLx+ + TF' => prefix + " " + tfString
+        'CDLx+ Only' => prefix
+        'TF Only'    => tfString
+        'None'       => ""
+        => ""
+
+getExtendedTime(int baseTime, int bars) =>
+    int(baseTime + bars * (time_close - time))
+
+f_wl(int w, int l) =>
+    int tot = w + l
+    string wr = tot > 0 ? str.tostring(w * 100.0 / tot, "#") + "%" : "—"
+    str.tostring(w) + "/" + str.tostring(l) + " (" + wr + ")"
+
+// =====================================================
+// TRADE TYPE
+// =====================================================
+type Trade
+    line   eLine
+    line   sLine
+    line   tLine
+    label  eLbl
+    label  sLbl
+    label  tLbl
+    float  entry
+    float  sl
+    float  tp
+    bool   isLong
+    bool   triggered
+    bool   activated
+    int    creationBar
+    string entryType
+    string entryCategory
+    float  boxHigh
+    float  boxLow
+    float  boxMid
+    int    creationTime
+    label  ldsdLabel
+    bool   fromCDLPlus
+    float  riskDollars
+    float  riskPoints
+    bool   forceExit       // Flags a trade for premature exit
+    string forceExitReason // Logs reason for premature exit
+
+// SEPARATE ARRAYS FOR EACH ENTRY TYPE
+var Trade[] trades_BlockCDLPlus  = array.new<Trade>(0)
+var Trade[] trades_BlockCDL      = array.new<Trade>(0)
+var Trade[] trades_BlockLD       = array.new<Trade>(0)
+var Trade[] trades_CandleCDLPlus = array.new<Trade>(0)
+var Trade[] trades_CandleCDL     = array.new<Trade>(0)
+var Trade[] trades_CandleLD      = array.new<Trade>(0)
+
+// =====================================================
+// SWEEP LINE TYPE
+// =====================================================
+type SweepLine
+    line   theLine
+    label  theLabel
+    float  price
+    int    startTime
+    int    endTime
+    string sweepType
+    bool   isBullish
+
+var SweepLine lastBullishSweep = na
+var SweepLine lastBearishSweep = na
+
+deleteSweepLine(SweepLine sweep) =>
+    if not na(sweep)
+        line.delete(sweep.theLine)
+        label.delete(sweep.theLabel)
+
+// =====================================================
+// SWEEP DETECTION
+// =====================================================
+pivotH = ta.pivothigh(high, swingLength, swingLength)
+pivotL = ta.pivotlow(low,  swingLength, swingLength)
+
+var float swH = na
+var float swHC = na
+var float swHM = na
+var int   swHTime = na
+var float swL = na
+var float swLC = na
+var float swLM = na
+var int   swLTime = na
+
+if not na(pivotH)
+    swH  := high[swingLength]
+    swHC := close[swingLength]
+    swHM := (high[swingLength] + low[swingLength]) / 2
+    swHTime := int(time[swingLength])
+
+if not na(pivotL)
+    swL  := low[swingLength]
+    swLC := close[swingLength]
+    swLM := (high[swingLength] + low[swingLength]) / 2
+    swLTime := int(time[swingLength])
+
+// =====================================================
+// BIAS FUNCTIONS
+// =====================================================
+candleBiasHTF() =>
+    bullishStrength = close - low
+    bearishStrength = high - close
+    totalRange = bullishStrength + bearishStrength
+    bullPercent = totalRange > 0 ? bullishStrength / totalRange * 100 : na
+    bearPercent = totalRange > 0 ? bearishStrength / totalRange * 100 : na
+    bullishBodyClose  = close > high[1]
+    bearishBodyClose  = close < low[1]
+    bullishAffinity   = high <= high[1] and low <= low[1] and close <= high[1] and close >= low[1] and high >= low[1]
+    bearishAffinity   = low >= low[1] and high >= high[1] and close <= high[1] and close >= low[1] and low <= high[1]
+    seekDestroy       = high > high[1] and low < low[1] and close <= high[1] and close >= low[1]
+    insideCandle      = high < high[1] and low > low[1]
+    string txt = ''
+    color biasColor = na
+    int biasDirection = 0
+    if bullishBodyClose
+        txt := 'Bullish Body Close ' + (bullishStrength > bearishStrength ? 'Plus' : 'Minus')
+        biasColor := color.green
+        biasDirection := 1
+    else if bearishBodyClose
+        txt := 'Bearish Body Close ' + (bearishStrength > bullishStrength ? 'Plus' : 'Minus')
+        biasColor := color.red
+        biasDirection := -1
+    else if bullishAffinity
+        txt := 'Bullish Affinity ' + (bullishStrength > bearishStrength ? 'Plus' : 'Minus')
+        biasColor := color.green
+        biasDirection := 1
+    else if bearishAffinity
+        txt := 'Bearish Affinity ' + (bearishStrength > bullishStrength ? 'Plus' : 'Minus')
+        biasColor := color.red
+        biasDirection := -1
+    else if seekDestroy
+        txt := 'Seek & Destroy'
+        biasColor := bullishStrength > bearishStrength ? color.green : color.red
+        biasDirection := bullishStrength > bearishStrength ? 1 : -1
+    else if insideCandle
+        txt := 'Close Inside'
+        biasColor := bullishStrength > bearishStrength ? color.green : color.red
+        biasDirection := bullishStrength > bearishStrength ? 1 : -1
+    [txt, biasColor, bullPercent, bearPercent, biasDirection]
+
+calculateModifiedDelta(idx) =>
+    vol = volume[idx]
+    float buyVol = 0.0
+    float sellVol = 0.0
+    float candleRange = high[idx] - low[idx]
+    if candleRange == 0
+        buyVol := vol / 2
+        sellVol := vol / 2
+    else if close[idx] > open[idx]
+        float buyRatio = (close[idx] - low[idx]) / candleRange
+        buyVol   := math.round(vol * math.max(0.5, buyRatio))
+        sellVol  := vol - buyVol
+    else
+        float sellRatio = (high[idx] - close[idx]) / candleRange
+        sellVol   := math.round(vol * math.max(0.5, sellRatio))
+        buyVol    := vol - sellVol
+    [buyVol, sellVol, buyVol - sellVol]
+
+// =====================================================
+// MMCB BIAS LINES
+// =====================================================
+var line[]  biasOpenLines   = array.new<line>(0)
+var line[]  biasHighLines   = array.new<line>(0)
+var line[]  biasLowLines    = array.new<line>(0)
+var line[]  biasCloseLines  = array.new<line>(0)
+var label[] biasOpenLabels  = array.new<label>(0)
+var label[] biasHighLabels  = array.new<label>(0)
+var label[] biasLowLabels   = array.new<label>(0)
+var label[] biasCloseLabels = array.new<label>(0)
+var line    currentLiveOpenLine  = na
+var label   currentLiveOpenLabel = na
+var int     mult = 1
+var string  lastDrawnBiasText   = ""
+var color   lastDrawnBiasColor  = color.gray
+var float   lastDrawnBullPercent = 0.0
+var float   lastDrawnBearPercent = 0.0
+
+var position_value = switch table_position
+    'Top Left'     => position.top_left
+    'Top Right'    => position.top_right
+    'Middle Left'  => position.middle_left
+    'Middle Right' => position.middle_right
+    'Bottom Left'  => position.bottom_left
+    'Bottom Right' => position.bottom_right
+    => position.top_right
+
+var table_size = switch table_size_input
+    'Normal'      => size.normal
+    'Small'       => size.small
+    'Tiny'        => size.tiny
+    'Large'       => size.large
+    'Extra Large' => size.huge
+    'Huge'        => size.huge
+    => size.small
+
+var mmm_signals_table = table.new(position=position_value, columns=1, rows=30, bgcolor=#000000, border_width=1)
+
+maxLookback = 5000
+useTF = custom_timeframe == '' ? timeframe.period : custom_timeframe
+
+if barstate.isnew and showBiasLine
+    htfOpen  = time(useTF)
+    htfClose = time_close(useTF)
+    if htfOpen >= time and htfOpen <= time_close
+        mult := math.ceil((htfClose - htfOpen) / (time_close - time))
+
+highNdx = math.min(math.abs(ta.highestbars(mult)), maxLookback)
+lowNdx  = math.min(math.abs(ta.lowestbars(mult)),  maxLookback)
+
+[_high, _low, _time, tClose] = request.security(syminfo.tickerid, useTF, [high, low, time, time_close])
+[_open, _close] = request.security(syminfo.tickerid, useTF, [open, close])
+htf_live_open = request.security(syminfo.tickerid, useTF, open,  gaps=barmerge.gaps_off)
+htf_live_time = request.security(syminfo.tickerid, useTF, time,  gaps=barmerge.gaps_off)
+var prev_htf_time = 0.0
+new_htf_candle = _time != prev_htf_time
+prev_htf_time := _time
+[htfBiasText, htfBiasColor, htfBullPercent, htfBearPercent, htfBiasDirection] = request.security(syminfo.tickerid, useTF, candleBiasHTF(), gaps=barmerge.gaps_off)
+
+if in_calc_range and barstate.isconfirmed
+    currentBarDuration = time_close - time
+
+    if (tClose > time and tClose <= time_close and showBiasLine) or (timeframe.period == useTF and showBiasLine and barstate.isnew)
+        highTime = highNdx > bar_index ? _time : math.max(_time, time[math.min(highNdx, bar_index)])
+        lowTime  = lowNdx  > bar_index ? _time : math.max(_time, time[math.min(lowNdx,  bar_index)])
+        tfString = f_timeframeToString(useTF)
+        lastDrawnBiasText    := htfBiasText
+        lastDrawnBiasColor   := htfBiasColor
+        lastDrawnBullPercent := htfBullPercent
+        lastDrawnBearPercent := htfBearPercent
+        extendedTime = tClose + (extendLines ? extensionLength * currentBarDuration : 0)
+        if showOpenLine  and not na(_open)
+            array.push(biasOpenLines,  line.new(x1=_time, y1=_open, x2=extendedTime, y2=_open,  xloc=xloc.bar_time, color=line_color_open,  width=biasLineWidth))
+        if showHighLine
+            array.push(biasHighLines,  line.new(x1=highTime, y1=_high, x2=extendedTime, y2=_high, xloc=xloc.bar_time, color=line_color_high, width=biasLineWidth))
+        if showLowLine
+            array.push(biasLowLines,   line.new(x1=lowTime,  y1=_low,  x2=extendedTime, y2=_low,  xloc=xloc.bar_time, color=line_color_low,  width=biasLineWidth))
+        if showCloseLine and not na(_close)
+            array.push(biasCloseLines, line.new(x1=_time, y1=_close, x2=extendedTime, y2=_close, xloc=xloc.bar_time, color=line_color_close, width=biasLineWidth))
+        while array.size(biasOpenLines)  > maxBiasLines
+            line.delete(array.shift(biasOpenLines))
+        while array.size(biasHighLines)  > maxBiasLines
+            line.delete(array.shift(biasHighLines))
+        while array.size(biasLowLines)   > maxBiasLines
+            line.delete(array.shift(biasLowLines))
+        while array.size(biasCloseLines) > maxBiasLines
+            line.delete(array.shift(biasCloseLines))
+        if showBiasLabels and not na(htfBiasText)
+            highTextColor = htfBiasDirection == 1 ? #006400 : line_color_high
+            lowTextColor  = htfBiasDirection == -1 ? #8B0000 : line_color_low
+            if showOpenLine  and showOpenLabel
+                array.push(biasOpenLabels,  label.new(x=int(extendedTime), y=_open,  text=tfString + " Open", color=color.new(color.black, 100), textcolor=line_color_open,  style=label.style_label_left, size=getSizeFromString(biasLabelSize), xloc=xloc.bar_time))
+            if showHighLabel
+                array.push(biasHighLabels,  label.new(x=int(extendedTime), y=_high,  text=tfString + "H" + (htfBiasDirection == 1 ? " TGT" : ""), color=color.new(color.black, 100), textcolor=highTextColor, style=label.style_label_left, size=getSizeFromString(biasLabelSize), xloc=xloc.bar_time))
+            if showLowLabel
+                array.push(biasLowLabels,   label.new(x=int(extendedTime), y=_low,   text=tfString + "L" + (htfBiasDirection == -1 ? " TGT" : ""), color=color.new(color.black, 100), textcolor=lowTextColor,  style=label.style_label_left, size=getSizeFromString(biasLabelSize), xloc=xloc.bar_time))
+            if showCloseLine and showCloseLabel
+                array.push(biasCloseLabels, label.new(x=int(extendedTime), y=_close, text=tfString + "C", color=color.new(color.black, 100), textcolor=line_color_close, style=label.style_label_left, size=getSizeFromString(biasLabelSize), xloc=xloc.bar_time))
+            while array.size(biasOpenLabels)  > maxBiasLines
+                label.delete(array.shift(biasOpenLabels))
+            while array.size(biasHighLabels)  > maxBiasLines
+                label.delete(array.shift(biasHighLabels))
+            while array.size(biasLowLabels)   > maxBiasLines
+                label.delete(array.shift(biasLowLabels))
+            while array.size(biasCloseLabels) > maxBiasLines
+                label.delete(array.shift(biasCloseLabels))
+
+if in_calc_range and barstate.islast
+    currentBarDuration = time_close - time
+    if showLiveOpen and showBiasLine and not na(htf_live_open)
+        line.delete(currentLiveOpenLine)
+        label.delete(currentLiveOpenLabel)
+        liveExtendedTime = time + currentBarDuration + (extendLines ? extensionLength * currentBarDuration : 0)
+        currentLiveOpenLine  := line.new(x1=htf_live_time, y1=htf_live_open, x2=liveExtendedTime, y2=htf_live_open, xloc=xloc.bar_time, color=liveOpenColor, width=liveOpenWidth)
+        currentLiveOpenLabel := label.new(x=int(liveExtendedTime), y=htf_live_open, text=f_timeframeToString(useTF) + " Open Live", color=color.new(color.black, 100), textcolor=liveOpenColor, style=label.style_label_left, size=getSizeFromString(biasLabelSize), xloc=xloc.bar_time)
+    extendedTime = time_close + (extendLines ? extensionLength * currentBarDuration : 0)
+    for l in biasOpenLines
+        line.set_x2(l, extendedTime)
+    for l in biasHighLines
+        line.set_x2(l, extendedTime)
+    for l in biasLowLines
+        line.set_x2(l, extendedTime)
+    for l in biasCloseLines
+        line.set_x2(l, extendedTime)
+    if showOpenLabel
+        for lb in biasOpenLabels
+            label.set_x(lb, int(extendedTime))
+    if showHighLabel
+        for lb in biasHighLabels
+            label.set_x(lb, int(extendedTime))
+    if showLowLabel
+        for lb in biasLowLabels
+            label.set_x(lb, int(extendedTime))
+    if showCloseLabel
+        for lb in biasCloseLabels
+            label.set_x(lb, int(extendedTime))
+
+// =====================================================
+// CONTRACTION BLOCKS TYPE
+// =====================================================
+type NeutralBox
+    box    boxes
+    float  high
+    float  low
+    line   highLine
+    line   lowLine
+    line   midLine
+    bool   boxActive
+    int    startBar
+    float  breakoutVolume
+    string breakoutDirection
+    label  CDLabel
+    float  totalVolume
+    int    barCount
+    string boxType
+    float  expanderVolume
+    float  expanderATR
+    float  netCVD
+    float  buyVolume
+    float  sellVolume
+    bool   hasCDLabel
+    int    breakBar
+    line   extHighLine
+    line   extLowLine
+    float  affinityBoundary
+    int    affinityCount
+    float  boxBoundary
+    label  boxLabel
+    int    startTime
+    float  originalHigh
+    float  originalLow
+    bool   isCDLPlus
+    float  openPrice
+    float  closePrice
+    float  midlinePrice
+    bool   zoneTouched
+    bool   waitingForConfirmer
+    float  entryZonePrice
+    label  ldsdLabel
+
+var NeutralBox[] neutralBoxes              = array.new<NeutralBox>(0)
+var NeutralBox[] violatedHighNeutralBoxes = array.new<NeutralBox>(0)
+var NeutralBox[] violatedLowNeutralBoxes  = array.new<NeutralBox>(0)
+
+type LDSDLabel
+    label  theLabel
+    string labelType
+    int    ldsdNumber
+    int    creationTime
+
+var LDSDLabel[] ldsdLabels = array.new<LDSDLabel>(0)
+
+type CDExDot
+    float  price
+    int    startBar
+    int    startTime
+    string dotType
+    label  dotLabel
+
+var CDExDot[] cdexDots = array.new<CDExDot>(0)
+
+var color NEUTRAL_ACCUMULATION_COLOR = color.new(color.green, neutralBoxTransparency)
+var color NEUTRAL_DISTRIBUTION_COLOR = color.new(color.red,   neutralBoxTransparency)
+var color NEUTRAL_NEUTRAL_COLOR      = color.new(color.gray,  neutralBoxTransparency)
+
+var int    neutralCount               = 0
+var float  neutralHigh                = na
+var float  neutralLow                 = na
+var int    neutralStartBar            = na
+var bool   trackingNeutral            = false
+var float  neutralAccumulatedVolume = 0.0
+var float  neutralNetCVD            = 0.0
+var float  neutralBuyVolume         = 0.0
+var float  neutralSellVolume        = 0.0
+var string lastExpanderType          = "none"
+var float  lastExpanderVolume       = 0.0
+var float  lastExpanderATR          = 0.0
+var float  lastExpanderHigh         = 0.0
+var float  lastExpanderLow          = 0.0
+var bool   waitingForInsideClose    = false
+var int    pendingExpanderBar       = na
+var float  affinityTrackedBoundary  = na
+var float  displayBoxBoundary       = na
+var int    pendingExpanderTime      = na
+var float  originalBoxHigh          = na
+var float  originalBoxLow           = na
+
+cachedAvgVol = ta.sma(volume, neutralVolumeLookback)
+cachedATR    = ta.atr(14)
+useExpanderBoundaries = blockMode == "MMM Expander Block"
+
+var NeutralBox currentLiveBox = na
+
+// =====================================================
+// CDLx+/CDSx+ TYPE
+// =====================================================
+type CDLPlusBlock
+    line   theLine
+    label  theLabel
+    float  price
+    int    barIndex
+    string type
+    int    creationBar
+    int    creationTime
+    box    theBox
+    line   highLine
+    line   lowLine
+    line   midLine
+    label  blockLabel
+    float  highPrice
+    float  lowPrice
+    float  openPrice
+    float  closePrice
+    float  midlinePrice
+    bool   zoneTouched
+
+var CDLPlusBlock[] cdlPlusBlocks  = array.new<CDLPlusBlock>(0)
+var bool prevWasBullishBC         = false
+var bool prevWasBearishBC         = false
+
+isCandleOutsideAllUnbrokenBoxes(int offset, NeutralBox liveBox) =>
+    candleH = high[offset]
+    candleL = low[offset]
+    outsideAllBoxes = true
+    if not na(liveBox) and liveBox.boxActive
+        if candleL <= liveBox.high and candleH >= liveBox.low
+            outsideAllBoxes := false
+    if outsideAllBoxes and array.size(neutralBoxes) > 0
+        for i = 0 to array.size(neutralBoxes) - 1
+            box_item = array.get(neutralBoxes, i)
+            if box_item.boxActive and candleL <= box_item.high and candleH >= box_item.low
+                outsideAllBoxes := false
+                break
+    outsideAllBoxes
+
+createCDLPlusBlock(string pType, int barIdx, int barTime, float priceH, float priceL, float openP, float closeP, string tfString) =>
+    blk = CDLPlusBlock.new()
+    blk.type          := pType
+    blk.price         := pType == "CDLx+" ? priceL : priceH
+    blk.barIndex      := barIdx
+    blk.creationBar   := bar_index
+    blk.creationTime  := barTime
+    blk.highPrice     := priceH
+    blk.lowPrice      := priceL
+    blk.openPrice     := openP
+    blk.closePrice    := closeP
+    blk.midlinePrice  := (priceH + priceL) / 2
+    blk.zoneTouched   := false
+
+    extTime = getExtendedTime(time, 20)
+    lineColor = pType == "CDLx+" ? cdlxPlusColor : cdsxPlusColor
+    lineWidth = pType == "CDLx+" ? cdlxPlusWidth : cdsxPlusWidth
+
+    blk.theLine := in_calc_range ? line.new(x1=barTime, y1=blk.price, x2=extTime, y2=blk.price, color=lineColor, style=line.style_solid, width=lineWidth, xloc=xloc.bar_time) : na
+
+    labelText = cdlPlusLblFmt != 'None' ? getCDLPlusLabelText(pType == "CDLx+", tfString, cdlPlusLblFmt) : ""
+    if labelText != "" and in_calc_range
+        labelYPos  = pType == "CDLx+" ? priceH : priceL
+        labelStyle = pType == "CDLx+" ? label.style_label_up : label.style_label_down
+        blk.theLabel := label.new(x=f_future_time(offsetGap), y=labelYPos, text=labelText, color=color.new(color.white, 100), textcolor=lineColor, style=labelStyle, size=getSizeFromString(cdlPlusLblSize), xloc=xloc.bar_time)
+
+    boxColor = pType == "CDLx+" ? NEUTRAL_ACCUMULATION_COLOR : NEUTRAL_DISTRIBUTION_COLOR
+    if showContractionBoxes and in_calc_range
+        blk.theBox := box.new(left=barTime, top=priceH, right=time, bottom=priceL, bgcolor=boxColor, border_color=na, xloc=xloc.bar_time)
+    if showContractionLines and in_calc_range
+        blk.highLine := line.new(x1=barTime, y1=priceH, x2=time, y2=priceH, color=lineColor, width=boxLineWidth, style=getLineStyle(boxLineStyle), xloc=xloc.bar_time)
+        blk.lowLine  := line.new(x1=barTime, y1=priceL, x2=time, y2=priceL, color=lineColor, width=boxLineWidth, style=getLineStyle(boxLineStyle), xloc=xloc.bar_time)
+    if showBlockMidlines and showContractionLines and in_calc_range
+        midPrice = (priceH + priceL) / 2
+        blk.midLine := line.new(x1=barTime, y1=midPrice, x2=time, y2=midPrice, color=lineColor, style=line.style_dotted, width=midlineWidth, xloc=xloc.bar_time)
+    blk
+
+deleteCDLPlusBlock(CDLPlusBlock blk) =>
+    line.delete(blk.theLine)
+    if not na(blk.theLabel)
+        label.delete(blk.theLabel)
+    if not na(blk.theBox)
+        box.delete(blk.theBox)
+    if not na(blk.highLine)
+        line.delete(blk.highLine)
+    if not na(blk.lowLine)
+        line.delete(blk.lowLine)
+    if not na(blk.midLine)
+        line.delete(blk.midLine)
+    if not na(blk.blockLabel)
+        label.delete(blk.blockLabel)
+
+extendCDLPlusBlock(CDLPlusBlock blk) =>
+    extTime = getExtendedTime(time, 20)
+    line.set_x2(blk.theLine, extTime)
+    if not na(blk.theLabel)
+        label.set_x(blk.theLabel, f_future_time(offsetGap))
+    if not na(blk.theBox)
+        box.set_right(blk.theBox, time)
+    if not na(blk.highLine)
+        line.set_x2(blk.highLine, time)
+    if not na(blk.lowLine)
+        line.set_x2(blk.lowLine, time)
+    if not na(blk.midLine)
+        line.set_x2(blk.midLine, time)
+
+// =====================================================
+// TRADE MANAGEMENT
+// =====================================================
+deleteTrade(Trade trade) =>
+    if not na(trade)
+        line.delete(trade.eLine)
+        line.delete(trade.sLine)
+        line.delete(trade.tLine)
+        label.delete(trade.eLbl)
+        label.delete(trade.sLbl)
+        label.delete(trade.tLbl)
+        if not na(trade.ldsdLabel)
+            label.delete(trade.ldsdLabel)
+
+createTrade(bool isLong, float entryPrice, float slPrice, float tpPrice, string entryType, string entryCategory, float boxHigh, float boxLow, int signalTime) =>
+    trade = Trade.new()
+    trade.isLong        := isLong
+    trade.entry         := entryPrice
+    trade.sl            := slPrice
+    trade.tp            := tpPrice
+    trade.triggered     := false
+    trade.activated     := false
+    trade.creationBar   := bar_index
+    trade.creationTime  := signalTime
+    trade.entryType     := entryType
+    trade.entryCategory := entryCategory
+    trade.boxHigh       := boxHigh
+    trade.boxLow        := boxLow
+    trade.boxMid        := (boxHigh + boxLow) / 2
+    trade.ldsdLabel     := na
+    trade.fromCDLPlus   := false
+    trade.forceExit     := false
+    trade.forceExitReason := ""
+
+    float rp = math.abs(entryPrice - slPrice)
+    trade.riskPoints  := rp
+    trade.riskDollars := rp * pointValue * positionSize
+
+    if array.size(firstTradeTime_arr) == 0
+        array.push(firstTradeTime_arr, signalTime)
+
+    int endBar = bar_index + lineExtension
+
+    trade.eLine := in_calc_range ? line.new(x1=bar_index, y1=entryPrice, x2=endBar, y2=entryPrice, xloc=xloc.bar_index, color=entryLineColor, width=tradeLineWidth) : na
+    trade.sLine := in_calc_range ? line.new(x1=bar_index, y1=slPrice,    x2=endBar, y2=slPrice,    xloc=xloc.bar_index, color=slLineColor,    width=tradeLineWidth, style=line.style_dashed) : na
+    trade.tLine := in_calc_range ? line.new(x1=bar_index, y1=tpPrice,    x2=endBar, y2=tpPrice,    xloc=xloc.bar_index, color=tpLineColor,    width=tradeLineWidth, style=line.style_dotted) : na
+
+    float riskCash   = rp * pointValue * positionSize
+    float profitCash = riskCash * rrRatio
+    color transpBg   = color.new(color.white, 100)
+
+    eText = (isLong ? "LONG " : "SHORT ") + entryType + " @ " + str.tostring(entryPrice, format.mintick) + " | $" + str.tostring(positionSize) + "ct"
+    sText = "SL @ " + str.tostring(slPrice, format.mintick) + "  -$" + str.tostring(riskCash, "#")
+    tText = "TP @ " + str.tostring(tpPrice, format.mintick) + "  +" + str.tostring(rrRatio, "#.#") + "R  +$" + str.tostring(profitCash, "#")
+
+    trade.eLbl := in_calc_range ? label.new(x=endBar + offsetGap, y=entryPrice, text=eText, xloc=xloc.bar_index, style=label.style_label_left, color=transpBg, textcolor=universalTextColor ? color.black : entryTextColor,   size=getSizeFromString(tradeLabelSize)) : na
+    trade.sLbl := in_calc_range ? label.new(x=endBar + offsetGap, y=slPrice,    text=sText, xloc=xloc.bar_index, style=label.style_label_left, color=transpBg, textcolor=universalTextColor ? color.black : slTextColor,      size=getSizeFromString(tradeLabelSize)) : na
+    trade.tLbl := in_calc_range ? label.new(x=endBar + offsetGap, y=tpPrice,    text=tText, xloc=xloc.bar_index, style=label.style_label_left, color=transpBg, textcolor=universalTextColor ? color.black : tpTextColor,   size=getSizeFromString(tradeLabelSize)) : na
+    trade
+
+addTradeToCategory(Trade t, string category) =>
+    targetArray = switch category
+        "BlockCDLPlus"   => trades_BlockCDLPlus
+        "BlockCDL"       => trades_BlockCDL
+        "BlockLD"        => trades_BlockLD
+        "CandleCDLPlus"  => trades_CandleCDLPlus
+        "CandleCDL"      => trades_CandleCDL
+        "CandleLD"       => trades_CandleLD
+        => trades_BlockCDL
+    maxLimit = switch category
+        "BlockCDLPlus"   => maxEntries_BlockCDLPlus
+        "BlockCDL"       => maxEntries_BlockCDL
+        "BlockLD"        => maxEntries_BlockLD
+        "CandleCDLPlus"  => maxEntries_CandleCDLPlus
+        "CandleCDL"      => maxEntries_CandleCDL
+        "CandleLD"       => maxEntries_CandleLD
+        => 1
+    while array.size(targetArray) >= maxLimit
+        oldTrade = array.shift(targetArray)
+        deleteTrade(oldTrade)
+    array.push(targetArray, t)
+    array.set(manualExitWarningFlag, 0, false)
+    true
+
+closeOppositeTrades(bool keepLongs) =>
+    for category in array.from("BlockCDLPlus", "BlockCDL", "BlockLD", "CandleCDLPlus", "CandleCDL", "CandleLD")
+        targetArray = switch category
+            "BlockCDLPlus"   => trades_BlockCDLPlus
+            "BlockCDL"       => trades_BlockCDL
+            "BlockLD"        => trades_BlockLD
+            "CandleCDLPlus"  => trades_CandleCDLPlus
+            "CandleCDL"      => trades_CandleCDL
+            "CandleLD"       => trades_CandleLD
+            => trades_BlockCDL
+        i = array.size(targetArray) - 1
+        while i >= 0
+            if array.size(targetArray) > i
+                t = array.get(targetArray, i)
+                if (keepLongs and not t.isLong) or (not keepLongs and t.isLong)
+                    t.forceExit := true
+                    t.forceExitReason := "Opposite Signal"
+                    array.set(targetArray, i, t)
+            i -= 1
+
+calculateCandleEntry(float candleH, float candleL, float candleO, float candleC) =>
+    float e = na
+    if candleEntryMode == "Close"
+        e := candleC
+    else if candleEntryMode == "Open"
+        e := candleO
+    else if candleEntryMode == "50% High-Low"
+        e := (candleH + candleL) / 2
+    else if candleEntryMode == "50% Close-Open"
+        e := (candleC + candleO) / 2
+    e
+
+calculateBoxEntry(bool isLong, float boxH, float boxL, float boxMid, string mode) =>
+    float e = na
+    if mode == "Long in PREMIUM / Short in DISCOUNT"
+        e := isLong ? (boxH + boxMid) / 2 : (boxL + boxMid) / 2
+    else if mode == "Long in DISCOUNT / Short in PREMIUM"
+        e := isLong ? (boxL + boxMid) / 2 : (boxH + boxMid) / 2
+    else if mode == "Enter at 50% midline"
+        e := boxMid
+    else if mode == "Enter at breakout edge"
+        e := isLong ? boxH : boxL
+    e
+
+getZonePrice(bool isLong, float boxH, float boxL, float boxMid) =>
+    float zoneP = na
+    if blockEntryMode == "Long in PREMIUM / Short in DISCOUNT"
+        zoneP := isLong ? (boxH + boxMid) / 2 : (boxL + boxMid) / 2
+    else if blockEntryMode == "Long in DISCOUNT / Short in PREMIUM"
+        zoneP := isLong ? (boxL + boxMid) / 2 : (boxH + boxMid) / 2
+    else if blockEntryMode == "Enter at 50% midline"
+        zoneP := boxMid
+    else if blockEntryMode == "Enter at breakout edge"
+        zoneP := isLong ? boxH : boxL
+    zoneP
+
+checkZoneTouched(bool isLong, float zonePrice, float currentLow, float currentHigh) =>
+    isLong ? (currentLow <= zonePrice) : (currentHigh >= zonePrice)
+
+// =====================================================
+// CONTRACTION BLOCKS LOGIC
+// =====================================================
+if enableNeutralCandleBoxes and barstate.isconfirmed and newHTFBlockCandle and in_calc_range
+    isCurrentNonBodyClose   = htf_isNeutralCandle
+    isCurrentBodyClose      = htf_isBullishBodyClose or htf_isBearishBodyClose
+    isCurrentBullishAffinity = request.security(syminfo.tickerid, blockTF, high <= high[1] and low <= low[1] and close <= high[1] and close >= low[1] and high >= low[1], lookahead=barmerge.lookahead_off)
+    isCurrentBearishAffinity = request.security(syminfo.tickerid, blockTF, low >= low[1] and high >= high[1] and close <= high[1] and close >= low[1] and low <= high[1], lookahead=barmerge.lookahead_off)
+
+    if minNeutralCandles == 1
+        if waitingForInsideClose and not na(lastExpanderHigh) and not na(lastExpanderLow)
+            if isCurrentBodyClose
+                lastExpanderType   := htf_isBullishBodyClose ? "BuBC" : "BeBC"
+                lastExpanderVolume := htf_volume
+                lastExpanderATR    := cachedATR
+                lastExpanderHigh   := htf_high
+                lastExpanderLow    := htf_low
+                pendingExpanderBar  := bar_index
+                pendingExpanderTime := int(htf_time)
+                affinityTrackedBoundary := na
+                displayBoxBoundary      := na
+            else if (isCurrentNonBodyClose or isCurrentBullishAffinity or isCurrentBearishAffinity) and htf_close <= lastExpanderHigh and htf_close >= lastExpanderLow
+                boxType = lastExpanderType == "BuBC" ? "Supply" : "Demand"
+                if lastExpanderType == "BeBC"
+                    affinityTrackedBoundary := lastExpanderLow
+                    displayBoxBoundary      := lastExpanderLow
+                    originalBoxHigh         := lastExpanderHigh
+                    originalBoxLow          := lastExpanderLow
+                else
+                    affinityTrackedBoundary := lastExpanderHigh
+                    displayBoxBoundary      := lastExpanderHigh
+                    originalBoxHigh         := lastExpanderHigh
+                    originalBoxLow          := lastExpanderLow
+                float boxHigh = lastExpanderHigh
+                float boxLow  = lastExpanderLow
+                [buyVol, sellVol, deltaVal] = calculateModifiedDelta(0)
+                neutralNetCVD      := deltaVal
+                neutralBuyVolume   := buyVol
+                neutralSellVolume  := sellVol
+                ndbPercent  = volume > 0 ? deltaVal / volume : 0.0
+                boxColor    = ndbPercent >= ndbThreshold ? NEUTRAL_ACCUMULATION_COLOR : ndbPercent <= -ndbThreshold ? NEUTRAL_DISTRIBUTION_COLOR : NEUTRAL_NEUTRAL_COLOR
+                lineColor   = lastExpanderType == "BuBC" ? bullishBodyCloseColor : bearishBodyCloseColor
+                newBox      = box(na)
+                newHighLine = line(na)
+                newLowLine  = line(na)
+                newMidLine  = line(na)
+                newBoxLabel = label(na)
+                shouldShowLiveBox = not showOnlyCDLPlus and not showOnlyCDLxCDSx
+                if shouldShowLiveBox
+                    if showContractionBoxes
+                        newBox := box.new(left=pendingExpanderTime, top=boxHigh, right=time, bottom=boxLow, bgcolor=boxColor, border_color=na, xloc=xloc.bar_time)
+                    if showContractionLines
+                        newHighLine := line.new(x1=pendingExpanderTime, y1=boxHigh, x2=time, y2=boxHigh, color=lineColor, width=boxLineWidth, style=getLineStyle(boxLineStyle), xloc=xloc.bar_time)
+                        newLowLine  := line.new(x1=pendingExpanderTime, y1=boxLow,  x2=time, y2=boxLow,  color=lineColor, width=boxLineWidth, style=getLineStyle(boxLineStyle), xloc=xloc.bar_time)
+                    if showBlockMidlines and showContractionLines
+                        midPrice = (boxHigh + boxLow) / 2
+                        newMidLine := line.new(x1=pendingExpanderTime, y1=midPrice, x2=time, y2=midPrice, color=lineColor, style=line.style_dotted, width=midlineWidth, xloc=xloc.bar_time)
+                    if blockLabelFormat != 'None' and (showBidAskLabels or blockLabelFormat == 'TF Only')
+                        tfString    = f_timeframeToString(blockTF)
+                        labelText   = getBlockLabelText(boxType == "Demand", tfString, blockLabelFormat, "")
+                        labelStyle  = boxType == "Demand" ? label.style_label_up : label.style_label_down
+                        labelY      = boxType == "Demand" ? boxLow : boxHigh
+                        newBoxLabel := label.new(x=f_future_time(offsetGap), y=labelY, text=labelText, style=labelStyle, size=getSizeFromString(cdlPlusLblSize), color=color.new(color.white, 100), textcolor=lineColor, xloc=xloc.bar_time)
+                currentLiveBox := NeutralBox.new(boxes=newBox, high=boxHigh, low=boxLow, highLine=newHighLine, lowLine=newLowLine, midLine=newMidLine, boxActive=true, startBar=pendingExpanderBar, breakoutVolume=0.0, breakoutDirection="none", CDLabel=label(na), totalVolume=volume, barCount=1, boxType=boxType, expanderVolume=lastExpanderVolume, expanderATR=lastExpanderATR, netCVD=deltaVal, buyVolume=buyVol, sellVolume=sellVol, hasCDLabel=false, breakBar=0, extHighLine=line(na), extLowLine=line(na), affinityBoundary=affinityTrackedBoundary, affinityCount=0, boxBoundary=displayBoxBoundary, boxLabel=newBoxLabel, startTime=pendingExpanderTime, originalHigh=originalBoxHigh, originalLow=originalBoxLow, isCDLPlus=false, openPrice=htf_open, closePrice=htf_close, midlinePrice=(boxHigh+boxLow)/2, zoneTouched=false, waitingForConfirmer=false, entryZonePrice=na, ldsdLabel=label(na))
+                currentLiveBox.entryZonePrice := getZonePrice(currentLiveBox.boxType == "Demand", boxHigh, boxLow, (boxHigh + boxLow) / 2)
+                trackingNeutral             := true
+                neutralCount                := 1
+                neutralHigh                 := htf_high
+                neutralLow                  := htf_low
+                neutralStartBar             := pendingExpanderBar
+                neutralAccumulatedVolume    := volume
+                waitingForInsideClose       := false
+                pendingExpanderBar          := na
+                pendingExpanderTime         := na
+            else
+                waitingForInsideClose := false
+                pendingExpanderBar    := na
+                pendingExpanderTime   := na
+        else if isCurrentBodyClose and not trackingNeutral
+            lastExpanderType    := htf_isBullishBodyClose ? "BuBC" : "BeBC"
+            lastExpanderVolume  := htf_volume
+            lastExpanderATR     := cachedATR
+            lastExpanderHigh    := htf_high
+            lastExpanderLow     := htf_low
+            waitingForInsideClose := true
+            pendingExpanderBar    := bar_index
+            pendingExpanderTime   := int(htf_time)
+            affinityTrackedBoundary := na
+            displayBoxBoundary      := na
+
+    if (isCurrentNonBodyClose or isCurrentBullishAffinity or isCurrentBearishAffinity) and minNeutralCandles == 1 and not na(currentLiveBox) and trackingNeutral
+        neutralCount += 1
+        if currentLiveBox.boxType == "Demand" and isCurrentBullishAffinity
+            if htf_low < affinityTrackedBoundary
+                closedInsideOriginalBox = htf_close >= currentLiveBox.originalLow and htf_close <= currentLiveBox.originalHigh
+                if closedInsideOriginalBox
+                    displayBoxBoundary      := affinityTrackedBoundary
+                    affinityTrackedBoundary := htf_low
+                    currentLiveBox.affinityCount := currentLiveBox.affinityCount + 1
+        else if currentLiveBox.boxType == "Supply" and isCurrentBearishAffinity
+            if htf_high > affinityTrackedBoundary
+                closedInsideOriginalBox = htf_close >= currentLiveBox.originalLow and htf_close <= currentLiveBox.originalHigh
+                if closedInsideOriginalBox
+                    displayBoxBoundary      := affinityTrackedBoundary
+                    affinityTrackedBoundary := htf_high
+                    currentLiveBox.affinityCount := currentLiveBox.affinityCount + 1
+        neutralHigh                  := math.max(neutralHigh, htf_high)
+        neutralLow                   := math.min(neutralLow,  htf_low)
+        neutralAccumulatedVolume     := neutralAccumulatedVolume + volume
+        [buyVol, sellVol, deltaVal]  = calculateModifiedDelta(0)
+        neutralNetCVD                := neutralNetCVD + deltaVal
+        neutralBuyVolume             := neutralBuyVolume + buyVol
+        neutralSellVolume            := neutralSellVolume + sellVol
+        float boxHigh = neutralHigh
+        float boxLow  = neutralLow
+        if useExpanderBoundaries and not na(lastExpanderHigh) and not na(lastExpanderLow)
+            if currentLiveBox.boxType == "Demand"
+                boxLow  := displayBoxBoundary
+                if lastExpanderHigh >= neutralHigh
+                    boxHigh := lastExpanderHigh
+            else
+                boxHigh := displayBoxBoundary
+                if lastExpanderLow <= neutralLow
+                    boxLow := lastExpanderLow
+        shouldShowLiveBox = not showOnlyCDLPlus and not showOnlyCDLxCDSx
+        if shouldShowLiveBox
+            if showContractionBoxes and not na(currentLiveBox.boxes)
+                box.set_top(currentLiveBox.boxes, boxHigh)
+                box.set_bottom(currentLiveBox.boxes, boxLow)
+                box.set_right(currentLiveBox.boxes, time)
+            if showContractionLines
+                if not na(currentLiveBox.highLine)
+                    line.set_y1(currentLiveBox.highLine, boxHigh)
+                    line.set_y2(currentLiveBox.highLine, boxHigh)
+                    line.set_x2(currentLiveBox.highLine, time)
+                if not na(currentLiveBox.lowLine)
+                    line.set_y1(currentLiveBox.lowLine, boxLow)
+                    line.set_y2(currentLiveBox.lowLine, boxLow)
+                    line.set_x2(currentLiveBox.lowLine, time)
+            if not na(currentLiveBox.boxLabel)
+                label.set_y(currentLiveBox.boxLabel, currentLiveBox.boxType == "Demand" ? boxLow : boxHigh)
+            if showBlockMidlines and showContractionLines and not na(currentLiveBox.midLine)
+                midPrice = (boxHigh + boxLow) / 2
+                line.set_y1(currentLiveBox.midLine, midPrice)
+                line.set_y2(currentLiveBox.midLine, midPrice)
+                line.set_x2(currentLiveBox.midLine, time)
+        currentLiveBox.high         := boxHigh
+        currentLiveBox.low          := boxLow
+        currentLiveBox.totalVolume  := neutralAccumulatedVolume
+        currentLiveBox.barCount     := neutralCount
+        currentLiveBox.netCVD       := neutralNetCVD
+        currentLiveBox.buyVolume    := neutralBuyVolume
+        currentLiveBox.sellVolume   := neutralSellVolume
+        currentLiveBox.affinityBoundary := affinityTrackedBoundary
+        currentLiveBox.boxBoundary  := displayBoxBoundary
+        currentLiveBox.midlinePrice := (boxHigh + boxLow) / 2
+        currentLiveBox.entryZonePrice := getZonePrice(currentLiveBox.boxType == "Demand", boxHigh, boxLow, (boxHigh + boxLow) / 2)
+        ndbPercent = neutralAccumulatedVolume > 0 ? neutralNetCVD / neutralAccumulatedVolume : 0.0
+        newBoxColor = ndbPercent >= ndbThreshold ? NEUTRAL_ACCUMULATION_COLOR : ndbPercent <= -ndbThreshold ? NEUTRAL_DISTRIBUTION_COLOR : NEUTRAL_NEUTRAL_COLOR
+        if not showOnlyCDLxCDSx and showContractionBoxes and not na(currentLiveBox.boxes)
+            box.set_bgcolor(currentLiveBox.boxes, newBoxColor)
+
+    if isCurrentBodyClose
+        if trackingNeutral and neutralCount >= minNeutralCandles and not na(currentLiveBox)
+            closeBreaksAbove = htf_close > currentLiveBox.high
+            closeBreaksBelow = htf_close < currentLiveBox.low
+            bodyCloseSwept   = false
+            if not closeBreaksAbove and not closeBreaksBelow
+                if currentLiveBox.boxType == "Demand" and htf_isBullishBodyClose
+                    if htf_low < affinityTrackedBoundary
+                        closedInsideOriginalBox = htf_close >= currentLiveBox.originalLow and htf_close <= currentLiveBox.originalHigh
+                        if closedInsideOriginalBox
+                            displayBoxBoundary      := affinityTrackedBoundary
+                            affinityTrackedBoundary := htf_low
+                            currentLiveBox.affinityCount := currentLiveBox.affinityCount + 1
+                            bodyCloseSwept := true
+                else if currentLiveBox.boxType == "Supply" and htf_isBearishBodyClose
+                    if htf_high > affinityTrackedBoundary
+                        closedInsideOriginalBox = htf_close >= currentLiveBox.originalLow and htf_close <= currentLiveBox.originalHigh
+                        if closedInsideOriginalBox
+                            displayBoxBoundary      := affinityTrackedBoundary
+                            affinityTrackedBoundary := htf_high
+                            currentLiveBox.affinityCount := currentLiveBox.affinityCount + 1
+                            bodyCloseSwept := true
+            if closeBreaksAbove or closeBreaksBelow
+                if closeBreaksAbove
+                    lastExpanderType := "BuBC"
+                else
+                    lastExpanderType := "BeBC"
+                lastExpanderVolume := htf_volume
+                lastExpanderATR    := cachedATR
+                lastExpanderHigh   := htf_high
+                lastExpanderLow    := htf_low
+                if minNeutralCandles == 1
+                    waitingForInsideClose   := true
+                    pendingExpanderBar      := bar_index
+                    pendingExpanderTime     := int(htf_time)
+                    affinityTrackedBoundary := na
+                    displayBoxBoundary      := na
+                CDLabel      = label(na)
+                isReversal   = false
+                if showCDLabels or showOnlyCDLxCDSx
+                    cdexText  = ""
+                    cdexColor = color(na)
+                    cdexY     = 0.0
+                    CDStyle   = label.style_label_up
+                    if currentLiveBox.boxType == "Supply" and closeBreaksBelow
+                        isReversal := true
+                        cdexText   := "CDSx"
+                        cdexColor  := CDShortColor
+                        cdexY      := currentLiveBox.low
+                        CDStyle    := label.style_label_down
+                    else if currentLiveBox.boxType == "Demand" and closeBreaksAbove
+                        isReversal := true
+                        cdexText   := "CDLx"
+                        cdexColor  := CDLongColor
+                        cdexY      := currentLiveBox.high
+                        CDStyle    := label.style_label_up
+                    if isReversal and showCDLabels
+                        middleTime = int(currentLiveBox.startTime + (htf_time - currentLiveBox.startTime) / 2)
+                        CDLabel := label.new(x=f_future_time(offsetGap), y=cdexY, text=cdexText, style=CDStyle, size=getSizeFromString(CDLabelSize), color=color.new(color.white, 100), textcolor=cdexColor, xloc=xloc.bar_time)
+                        if cdexText == "CDSx"
+                            dotLabel = label.new(x=f_future_time(offsetGap), y=currentLiveBox.high, text="•", style=label.style_none, size=size.tiny, color=color.new(CDLongColor, 0), textcolor=CDLongColor, xloc=xloc.bar_time)
+                            array.push(cdexDots, CDExDot.new(currentLiveBox.high, currentLiveBox.startBar, int(htf_time), "CDSx", dotLabel))
+                        else if cdexText == "CDLx"
+                            dotLabel = label.new(x=f_future_time(offsetGap), y=currentLiveBox.low, text="•", style=label.style_none, size=size.tiny, color=color.new(CDShortColor, 0), textcolor=CDShortColor, xloc=xloc.bar_time)
+                            array.push(cdexDots, CDExDot.new(currentLiveBox.low, currentLiveBox.startBar, int(htf_time), "CDLx", dotLabel))
+                        if isReversal
+                            if cdexText == "CDLx"
+                                lastSignalType  := "CDLx"
+                                lastSignalPrice := currentLiveBox.high
+                                lastWasReversal := true
+                                lastRevBoxHigh  := currentLiveBox.high
+                                lastRevBoxLow   := currentLiveBox.low
+                                currentBias     := "CDLx"
+                                ldCount := 0
+                                sdCount := 0
+                                if array.size(ldsdLabels) > 0
+                                    i = array.size(ldsdLabels) - 1
+                                    while i >= 0
+                                        if array.size(ldsdLabels) > i
+                                            ldsdItem = array.get(ldsdLabels, i)
+                                            if ldsdItem.labelType == "SDx"
+                                                label.delete(ldsdItem.theLabel)
+                                                array.remove(ldsdLabels, i)
+                                        i -= 1
+                                closeOppositeTrades(true)
+                                if enableCandleCDL
+                                    float e = calculateCandleEntry(htf_high, htf_low, htf_open, htf_close)
+                                    float slBase = (masterSLMode == "Block Extremes (HH/LL)" and not na(lastRevBoxLow)) ? lastRevBoxLow : htf_low
+                                    slP = slBase - (slTicksCandle * syminfo.mintick)
+                                    riskP = math.abs(e - slP)
+                                    tpP = e + (riskP * rrRatio)
+                                    newTrade = createTrade(true, e, slP, tpP, "PO4 CDLx", "CandleCDL", currentLiveBox.high, currentLiveBox.low, int(htf_time))
+                                    if addTradeToCategory(newTrade, "CandleCDL")
+                                        lastAction := "PO4 CDLx entry created"
+                                        if enableAlerts
+                                            alert(lastAction, alert.freq_all)
+                                    marketDirection := "LONG"
+                            else if cdexText == "CDSx"
+                                lastSignalType  := "CDSx"
+                                lastSignalPrice := currentLiveBox.low
+                                lastWasReversal := true
+                                lastRevBoxHigh  := currentLiveBox.high
+                                lastRevBoxLow   := currentLiveBox.low
+                                currentBias     := "CDSx"
+                                sdCount := 0
+                                ldCount := 0
+                                if array.size(ldsdLabels) > 0
+                                    i = array.size(ldsdLabels) - 1
+                                    while i >= 0
+                                        if array.size(ldsdLabels) > i
+                                            ldsdItem = array.get(ldsdLabels, i)
+                                            if ldsdItem.labelType == "LDx"
+                                                label.delete(ldsdItem.theLabel)
+                                                array.remove(ldsdLabels, i)
+                                        i -= 1
+                                closeOppositeTrades(false)
+                                if enableCandleCDL
+                                    float e = calculateCandleEntry(htf_high, htf_low, htf_open, htf_close)
+                                    float slBase = (masterSLMode == "Block Extremes (HH/LL)" and not na(lastRevBoxLow)) ? lastRevBoxLow : htf_low
+                                    slP = slBase - (slTicksCandle * syminfo.mintick)
+                                    riskP = math.abs(e - slP)
+                                    tpP = e + (riskP * rrRatio)
+                                    newTrade = createTrade(false, e, slP, tpP, "PO4 CDSx", "CandleCDL", currentLiveBox.high, currentLiveBox.low, int(htf_time))
+                                    if addTradeToCategory(newTrade, "CandleCDL")
+                                        lastAction := "PO4 CDSx entry created"
+                                        if enableAlerts
+                                            alert(lastAction, alert.freq_all)
+                                    marketDirection := "SHORT"
+                currentLiveBox.CDLabel    := CDLabel
+                currentLiveBox.hasCDLabel := isReversal
+                currentLiveBox.breakBar   := bar_index
+                currentLiveBox.boxActive  := false
+                shouldShowThisBox = (not showOnlyCDLPlus and not showOnlyCDLxCDSx) or (showOnlyCDLxCDSx and currentLiveBox.hasCDLabel)
+                if shouldShowThisBox
+                    if showOnlyCDLxCDSx and currentLiveBox.hasCDLabel
+                        if na(currentLiveBox.boxes) and showContractionBoxes
+                            ndbPercent = currentLiveBox.totalVolume > 0 ? currentLiveBox.netCVD / currentLiveBox.totalVolume : 0.0
+                            boxColor = ndbPercent >= ndbThreshold ? NEUTRAL_ACCUMULATION_COLOR : ndbPercent <= -ndbThreshold ? NEUTRAL_DISTRIBUTION_COLOR : NEUTRAL_NEUTRAL_COLOR
+                            currentLiveBox.boxes := box.new(left=currentLiveBox.startTime, top=currentLiveBox.high, right=time, bottom=currentLiveBox.low, bgcolor=boxColor, border_color=na, xloc=xloc.bar_time)
+                        if na(currentLiveBox.highLine) and showContractionLines
+                            lineColor = currentLiveBox.boxType == "Supply" ? bullishBodyCloseColor : bearishBodyCloseColor
+                            currentLiveBox.highLine := line.new(x1=currentLiveBox.startTime, y1=currentLiveBox.high, x2=time, y2=currentLiveBox.high, color=lineColor, width=boxLineWidth, style=getLineStyle(boxLineStyle), xloc=xloc.bar_time)
+                        if na(currentLiveBox.lowLine) and showContractionLines
+                            lineColor = currentLiveBox.boxType == "Supply" ? bullishBodyCloseColor : bearishBodyCloseColor
+                            currentLiveBox.lowLine := line.new(x1=currentLiveBox.startTime, y1=currentLiveBox.low, x2=time, y2=currentLiveBox.low, color=lineColor, width=boxLineWidth, style=getLineStyle(boxLineStyle), xloc=xloc.bar_time)
+                        if na(currentLiveBox.midLine) and showBlockMidlines and showContractionLines
+                            lineColor = currentLiveBox.boxType == "Supply" ? bullishBodyCloseColor : bearishBodyCloseColor
+                            midPrice = (currentLiveBox.high + currentLiveBox.low) / 2
+                            currentLiveBox.midLine := line.new(x1=currentLiveBox.startTime, y1=midPrice, x2=time, y2=midPrice, color=lineColor, style=line.style_dotted, width=midlineWidth, xloc=xloc.bar_time)
+                    if showContractionBoxes and not na(currentLiveBox.boxes)
+                        box.set_right(currentLiveBox.boxes, time)
+                    if showContractionLines
+                        if not na(currentLiveBox.highLine)
+                            line.set_x2(currentLiveBox.highLine, time)
+                        if not na(currentLiveBox.lowLine)
+                            line.set_x2(currentLiveBox.lowLine, time)
+                        if not na(currentLiveBox.midLine)
+                            line.set_x2(currentLiveBox.midLine, time)
+                else
+                    if not na(currentLiveBox.boxes)
+                        box.delete(currentLiveBox.boxes)
+                        currentLiveBox.boxes := na
+                    if not na(currentLiveBox.highLine)
+                        line.delete(currentLiveBox.highLine)
+                        currentLiveBox.highLine := na
+                    if not na(currentLiveBox.lowLine)
+                        line.delete(currentLiveBox.lowLine)
+                        currentLiveBox.lowLine := na
+                    if not na(currentLiveBox.midLine)
+                        line.delete(currentLiveBox.midLine)
+                        currentLiveBox.midLine := na
+                    if not na(currentLiveBox.boxLabel)
+                        label.delete(currentLiveBox.boxLabel)
+                        currentLiveBox.boxLabel := na
+                array.push(neutralBoxes, currentLiveBox)
+                currentLiveBox             := na
+                trackingNeutral            := false
+                neutralCount               := 0
+                neutralHigh                := na
+                neutralLow                 := na
+                neutralStartBar            := na
+                neutralAccumulatedVolume   := 0.0
+                neutralNetCVD              := 0.0
+                neutralBuyVolume           := 0.0
+                neutralSellVolume          := 0.0
+
+    // LD/SD DETECTION
+    if (enableBlockLD or enableCandleLD) and lastWasReversal and barstate.isconfirmed and newHTFBlockCandle and in_calc_range
+        if currentBias == "CDLx" and htf_isBullishBodyClose
+            if htf_high > lastRevBoxHigh
+                ldCount += 1
+                ldLabel  = "LDx" + str.tostring(ldCount)
+                tfString = f_timeframeToString(blockTF)
+                label sharedLDLabel = na
+                if (showCDLabels or showOnlyCDLxCDSx) and showLDSDLabels
+                    middleTime  = int((htf_time + htf_time_close) / 2)
+                    ldLabelText = showTimeframeLabel ? getBlockLabelText(true, tfString, blockLabelFormat, ldLabel) : getBlockLabelText(true, "", blockLabelFormat, ldLabel)
+                    sharedLDLabel := label.new(x=f_future_time(offsetGap), y=lastRevBoxHigh, text=ldLabelText, style=label.style_label_up, size=getSizeFromString(blockLabelSize), color=color.new(color.white, 100), textcolor=CDLongColor, xloc=xloc.bar_time)
+                    array.push(ldsdLabels, LDSDLabel.new(sharedLDLabel, "LDx", ldCount, int(htf_time)))
+                if enableCandleLD
+                    float e = calculateCandleEntry(htf_high, htf_low, htf_open, htf_close)
+                    float slBase = (masterSLMode == "Block Extremes (HH/LL)" and not na(lastRevBoxLow)) ? lastRevBoxLow : htf_low
+                    slP = slBase - (slTicksCandle * syminfo.mintick)
+                    riskP = math.abs(e - slP)
+                    tpP = e + (riskP * rrRatio)
+                    newTrade = createTrade(true, e, slP, tpP, "PO4 " + ldLabel, "CandleLD", htf_high, htf_low, int(htf_time))
+                    newTrade.ldsdLabel := sharedLDLabel
+                    newTrade.fromCDLPlus := false
+                    if addTradeToCategory(newTrade, "CandleLD")
+                        lastAction := "PO4 " + ldLabel + " entry created"
+                        if enableAlerts
+                            alert(lastAction, alert.freq_all)
+                lastRevBoxHigh := htf_high
+        else if currentBias == "CDSx" and htf_isBearishBodyClose
+            if htf_low < lastRevBoxLow
+                sdCount += 1
+                sdLabel  = "SDx" + str.tostring(sdCount)
+                tfString = f_timeframeToString(blockTF)
+                label sharedSDLabel = na
+                if (showCDLabels or showOnlyCDLxCDSx) and showLDSDLabels
+                    middleTime  = int((htf_time + htf_time_close) / 2)
+                    sdLabelText = showTimeframeLabel ? getBlockLabelText(false, tfString, blockLabelFormat, sdLabel) : getBlockLabelText(false, "", blockLabelFormat, sdLabel)
+                    sharedSDLabel := label.new(x=f_future_time(offsetGap), y=lastRevBoxLow, text=sdLabelText, style=label.style_label_down, size=getSizeFromString(blockLabelSize), color=color.new(color.white, 100), textcolor=CDShortColor, xloc=xloc.bar_time)
+                    array.push(ldsdLabels, LDSDLabel.new(sharedSDLabel, "SDx", sdCount, int(htf_time)))
+                if enableCandleLD
+                    float e = calculateCandleEntry(htf_high, htf_low, htf_open, htf_close)
+                    float slBase = (masterSLMode == "Block Extremes (HH/LL)" and not na(lastRevBoxHigh)) ? lastRevBoxHigh : htf_high
+                    slP = slBase + (slTicksCandle * syminfo.mintick)
+                    riskP = math.abs(e - slP)
+                    tpP = e - (riskP * rrRatio)
+                    newTrade = createTrade(false, e, slP, tpP, "PO4 " + sdLabel, "CandleLD", htf_high, htf_low, int(htf_time))
+                    newTrade.ldsdLabel := sharedSDLabel
+                    newTrade.fromCDLPlus := false
+                    if addTradeToCategory(newTrade, "CandleLD")
+                        lastAction := "PO4 " + sdLabel + " entry created"
+                        if enableAlerts
+                            alert(lastAction, alert.freq_all)
+                lastRevBoxLow := htf_low
+
+    // CDLx+/CDSx+ CREATION
+    runCDLPlusLogic = showCDLPlus or enableCandleCDLPlus or enableBlockCDLPlus
+    if runCDLPlusLogic and barstate.isconfirmed and newHTFBlockCandle and in_calc_range
+        currentIsBullBC = htf_isBullishBodyClose
+        currentIsBearBC = htf_isBearishBodyClose
+        bool shouldCheckForCDLPlus = false
+        bool cdlPlusIsOutsideBoxes  = false
+        if cdlPlusMode == "All CDLx+"
+            shouldCheckForCDLPlus := true
+            cdlPlusIsOutsideBoxes := isCandleOutsideAllUnbrokenBoxes(0, currentLiveBox)
+        else
+            cdlPlusIsOutsideBoxes := isCandleOutsideAllUnbrokenBoxes(0, currentLiveBox)
+            shouldCheckForCDLPlus := cdlPlusIsOutsideBoxes
+
+        if shouldCheckForCDLPlus
+            shouldShowCDLPlus = showCDLPlus and ((not showOnlyCDLxCDSx) or showOnlyCDLPlus)
+            tfString = f_timeframeToString(blockTF)
+
+            if prevWasBearishBC and currentIsBullBC
+                if shouldShowCDLPlus and showCDLxPlus
+                    blk = createCDLPlusBlock("CDLx+", bar_index, int(htf_prev_time), htf_high, htf_prev_low, htf_open, htf_close, tfString)
+                    array.push(cdlPlusBlocks, blk)
+                bool isReversalCDLPlus = false
+                string cdlPlusLabel = ""
+                if currentBias == "" or currentBias == "CDSx"
+                    isReversalCDLPlus  := true
+                    currentBias    := "CDLx"
+                    ldCount        := 0
+                    sdCount        := 0
+                    lastRevBoxHigh := htf_high
+                    lastRevBoxLow  := htf_prev_low
+                    lastWasReversal := true
+                    cdlPlusLabel := ""
+                    if array.size(ldsdLabels) > 0
+                        i = array.size(ldsdLabels) - 1
+                        while i >= 0
+                            if array.size(ldsdLabels) > i
+                                ldsdItem = array.get(ldsdLabels, i)
+                                if ldsdItem.labelType == "SDx"
+                                    label.delete(ldsdItem.theLabel)
+                                    array.remove(ldsdLabels, i)
+                            i -= 1
+                    closeOppositeTrades(true)
+                else if currentBias == "CDLx"
+                    ldCount  += 1
+                    cdlPlusLabel := "LDx" + str.tostring(ldCount) + "+"
+                    label sharedLDLabel = na
+                    if shouldShowCDLPlus and (showCDLabels or showOnlyCDLxCDSx) and showLDSDLabels
+                        middleTime  = int((htf_time + htf_time_close) / 2)
+                        ldLabelText = showTimeframeLabel ? getBlockLabelText(true, tfString, blockLabelFormat, cdlPlusLabel) : getBlockLabelText(true, "", blockLabelFormat, cdlPlusLabel)
+                        sharedLDLabel := label.new(x=f_future_time(offsetGap), y=lastRevBoxHigh, text=ldLabelText, style=label.style_label_up, size=getSizeFromString(blockLabelSize), color=color.new(color.white, 100), textcolor=CDLongColor, xloc=xloc.bar_time)
+                        array.push(ldsdLabels, LDSDLabel.new(sharedLDLabel, "LDx", ldCount, int(htf_time)))
+                    if enableCandleLD
+                        float e = calculateCandleEntry(htf_high, htf_low, htf_open, htf_close)
+                        float slBase = (masterSLMode == "Block Extremes (HH/LL)" and not na(lastRevBoxLow)) ? lastRevBoxLow : htf_low
+                        slP = slBase - (slTicksCandle * syminfo.mintick)
+                        riskP = math.abs(e - slP)
+                        tpP = e + (riskP * rrRatio)
+                        newTrade = createTrade(true, e, slP, tpP, "PO4 " + cdlPlusLabel, "CandleLD", htf_high, htf_prev_low, int(htf_time))
+                        newTrade.ldsdLabel := sharedLDLabel
+                        newTrade.fromCDLPlus := true
+                        if addTradeToCategory(newTrade, "CandleLD")
+                            lastAction := "PO4 " + cdlPlusLabel + " entry created (CDLx+)"
+                            if enableAlerts
+                                alert(lastAction, alert.freq_all)
+                lastRevBoxHigh := htf_high
+                if enableCandleCDLPlus
+                    lastSignalType  := "CDLx+"
+                    lastSignalPrice := htf_high
+                    float e = calculateCandleEntry(htf_high, htf_low, htf_open, htf_close)
+                    float slBase = (masterSLMode == "Block Extremes (HH/LL)") ? htf_prev_low : htf_low
+                    slP = slBase - (slTicksCandle * syminfo.mintick)
+                    riskP = math.abs(e - slP)
+                    tpP = e + (riskP * rrRatio)
+                    newTrade = createTrade(true, e, slP, tpP, "CDLx+", "CandleCDLPlus", htf_high, htf_prev_low, int(htf_time))
+                    newTrade.fromCDLPlus := true
+                    if addTradeToCategory(newTrade, "CandleCDLPlus")
+                        marketDirection := "LONG"
+                        lastAction := "CDLx+ entry created" + (isReversalCDLPlus ? " (Reversal)" : " (Continuation)")
+                        if enableAlerts
+                            alert(lastAction, alert.freq_all)
+
+            if prevWasBullishBC and currentIsBearBC
+                if shouldShowCDLPlus and showCDSxPlus
+                    blk = createCDLPlusBlock("CDSx+", bar_index, int(htf_prev_time), htf_prev_high, htf_low, htf_open, htf_close, tfString)
+                    array.push(cdlPlusBlocks, blk)
+                bool isReversalCDLPlus = false
+                string cdlPlusLabel = ""
+                if currentBias == "" or currentBias == "CDLx"
+                    isReversalCDLPlus  := true
+                    currentBias    := "CDSx"
+                    ldCount        := 0
+                    sdCount        := 0
+                    lastRevBoxHigh := htf_prev_high
+                    lastRevBoxLow  := htf_low
+                    lastWasReversal := true
+                    cdlPlusLabel := ""
+                    if array.size(ldsdLabels) > 0
+                        i = array.size(ldsdLabels) - 1
+                        while i >= 0
+                            if array.size(ldsdLabels) > i
+                                ldsdItem = array.get(ldsdLabels, i)
+                                if ldsdItem.labelType == "LDx"
+                                    label.delete(ldsdItem.theLabel)
+                                    array.remove(ldsdLabels, i)
+                            i -= 1
+                    closeOppositeTrades(false)
+                else if currentBias == "CDSx"
+                    sdCount  += 1
+                    cdlPlusLabel := "SDx" + str.tostring(sdCount) + "+"
+                    label sharedSDLabel = na
+                    if shouldShowCDLPlus and (showCDLabels or showOnlyCDLxCDSx) and showLDSDLabels
+                        middleTime  = int((htf_time + htf_time_close) / 2)
+                        sdLabelText = showTimeframeLabel ? getBlockLabelText(false, tfString, blockLabelFormat, cdlPlusLabel) : getBlockLabelText(false, "", blockLabelFormat, cdlPlusLabel)
+                        sharedSDLabel := label.new(x=f_future_time(offsetGap), y=lastRevBoxLow, text=sdLabelText, style=label.style_label_down, size=getSizeFromString(blockLabelSize), color=color.new(color.white, 100), textcolor=CDShortColor, xloc=xloc.bar_time)
+                        array.push(ldsdLabels, LDSDLabel.new(sharedSDLabel, "SDx", sdCount, int(htf_time)))
+                    if enableCandleLD
+                        float e = calculateCandleEntry(htf_high, htf_low, htf_open, htf_close)
+                        float slBase = (masterSLMode == "Block Extremes (HH/LL)" and not na(lastRevBoxHigh)) ? lastRevBoxHigh : htf_high
+                        slP = slBase + (slTicksCandle * syminfo.mintick)
+                        riskP = math.abs(e - slP)
+                        tpP = e - (riskP * rrRatio)
+                        newTrade = createTrade(false, e, slP, tpP, "PO4 " + cdlPlusLabel, "CandleLD", htf_prev_high, htf_low, int(htf_time))
+                        newTrade.ldsdLabel := sharedSDLabel
+                        newTrade.fromCDLPlus := true
+                        if addTradeToCategory(newTrade, "CandleLD")
+                            lastAction := "PO4 " + cdlPlusLabel + " entry created (CDSx+)"
+                            if enableAlerts
+                                alert(lastAction, alert.freq_all)
+                lastRevBoxLow := htf_low
+                if enableCandleCDLPlus
+                    lastSignalType  := "CDSx+"
+                    lastSignalPrice := htf_low
+                    float e = calculateCandleEntry(htf_high, htf_low, htf_open, htf_close)
+                    float slBase = (masterSLMode == "Block Extremes (HH/LL)") ? htf_prev_high : htf_high
+                    slP = slBase + (slTicksCandle * syminfo.mintick)
+                    riskP = math.abs(e - slP)
+                    tpP = e - (riskP * rrRatio)
+                    newTrade = createTrade(false, e, slP, tpP, "CDSx+", "CandleCDLPlus", htf_prev_high, htf_low, int(htf_time))
+                    newTrade.fromCDLPlus := true
+                    if addTradeToCategory(newTrade, "CandleCDLPlus")
+                        marketDirection := "SHORT"
+                        lastAction := "CDSx+ entry created" + (isReversalCDLPlus ? " (Reversal)" : " (Continuation)")
+                        if enableAlerts
+                            alert(lastAction, alert.freq_all)
+
+        prevWasBullishBC := currentIsBullBC
+        prevWasBearishBC := currentIsBearBC
+
+// =====================================================
+// LTF ZONE TOUCH + LIMIT ENTRY CONFIRMATION
+// =====================================================
+
+// 1. Long Limit Entries (Demand Blocks & CDLx+ & LDx)
+if array.size(violatedHighNeutralBoxes) > 0 and (enableBlockCDL or enableBlockLD) and in_calc_range
+    for i = 0 to array.size(violatedHighNeutralBoxes) - 1
+        box_item = array.get(violatedHighNeutralBoxes, i)
+        if not box_item.zoneTouched
+            isLongBox = true
+            float boxMid = (box_item.high + box_item.low) / 2
+            float zonePrice = getZonePrice(isLongBox, box_item.high, box_item.low, boxMid)
+
+            if checkZoneTouched(isLongBox, zonePrice, low, high)
+                box_item.zoneTouched := true
+                array.set(violatedHighNeutralBoxes, i, box_item)
+
+                isReversal    = box_item.hasCDLabel
+                shouldCreate  = isReversal ? enableBlockCDL : enableBlockLD
+                entryCategory = isReversal ? "BlockCDL" : "BlockLD"
+
+                if shouldCreate
+                    float e = zonePrice
+                    float slBase = (masterSLMode == "Block Extremes (HH/LL)") ? box_item.low : low
+                    float slP = slBase - (slTicksBox * syminfo.mintick)
+                    float riskP = math.abs(e - slP)
+                    float tpP = e + (riskP * rrRatio)
+
+                    string tfString  = showTimeframeLabel ? f_timeframeToString(blockTF) + " " : ""
+                    string entryLabel = isReversal ? tfString + "CDLx Limit" : tfString + "LDx" + (ldCount > 0 ? str.tostring(ldCount) : "") + " Limit"
+                    newTrade = createTrade(isLongBox, e, slP, tpP, entryLabel, entryCategory, box_item.high, box_item.low, int(time))
+                    if addTradeToCategory(newTrade, entryCategory)
+                        lastAction := entryLabel + " triggered @ " + str.tostring(e, format.mintick)
+                        if enableAlerts
+                            alert(lastAction, alert.freq_all)
+
+// 2. Short Limit Entries (Supply Blocks & CDSx+ & SDx)
+if array.size(violatedLowNeutralBoxes) > 0 and (enableBlockCDL or enableBlockLD) and in_calc_range
+    for i = 0 to array.size(violatedLowNeutralBoxes) - 1
+        box_item = array.get(violatedLowNeutralBoxes, i)
+        if not box_item.zoneTouched
+            isLongBox = false
+            float boxMid = (box_item.high + box_item.low) / 2
+            float zonePrice = getZonePrice(isLongBox, box_item.high, box_item.low, boxMid)
+
+            if checkZoneTouched(isLongBox, zonePrice, low, high)
+                box_item.zoneTouched := true
+                array.set(violatedLowNeutralBoxes, i, box_item)
+
+                isReversal    = box_item.hasCDLabel
+                shouldCreate  = isReversal ? enableBlockCDL : enableBlockLD
+                entryCategory = isReversal ? "BlockCDL" : "BlockLD"
+
+                if shouldCreate
+                    float e = zonePrice
+                    float slBase = (masterSLMode == "Block Extremes (HH/LL)") ? box_item.high : high
+                    float slP = slBase + (slTicksBox * syminfo.mintick)
+                    float riskP = math.abs(e - slP)
+                    float tpP = e - (riskP * rrRatio)
+
+                    string tfString  = showTimeframeLabel ? f_timeframeToString(blockTF) + " " : ""
+                    string entryLabel = isReversal ? tfString + "CDSx Limit" : tfString + "SDx" + (sdCount > 0 ? str.tostring(sdCount) : "") + " Limit"
+                    newTrade = createTrade(isLongBox, e, slP, tpP, entryLabel, entryCategory, box_item.high, box_item.low, int(time))
+                    if addTradeToCategory(newTrade, entryCategory)
+                        lastAction := entryLabel + " triggered @ " + str.tostring(e, format.mintick)
+                        if enableAlerts
+                            alert(lastAction, alert.freq_all)
+
+// 3. CDLx+/CDSx+ Limit Entries
+if array.size(cdlPlusBlocks) > 0 and enableBlockCDLPlus and in_calc_range
+    for i = 0 to array.size(cdlPlusBlocks) - 1
+        blk = array.get(cdlPlusBlocks, i)
+        if not blk.zoneTouched
+            isLongBox = blk.type == "CDLx+"
+            float boxMid = (blk.highPrice + blk.lowPrice) / 2
+            float zonePrice = getZonePrice(isLongBox, blk.highPrice, blk.lowPrice, boxMid)
+
+            if isLongBox and low <= zonePrice
+                blk.zoneTouched := true
+                array.set(cdlPlusBlocks, i, blk)
+                float e = zonePrice
+                float slBase = (masterSLMode == "Block Extremes (HH/LL)") ? blk.lowPrice : low
+                float slP = slBase - (slTicksBox * syminfo.mintick)
+                float riskP = math.abs(e - slP)
+                float tpP = e + (riskP * rrRatio)
+
+                newTrade = createTrade(true, e, slP, tpP, "CDLx+ Limit", "BlockCDLPlus", blk.highPrice, blk.lowPrice, int(time))
+                if addTradeToCategory(newTrade, "BlockCDLPlus")
+                    lastAction := "CDLx+ Limit triggered @ " + str.tostring(e, format.mintick)
+                    if enableAlerts
+                        alert(lastAction, alert.freq_all)
+
+            else if not isLongBox and high >= zonePrice
+                blk.zoneTouched := true
+                array.set(cdlPlusBlocks, i, blk)
+                float e = zonePrice
+                float slBase = (masterSLMode == "Block Extremes (HH/LL)") ? blk.highPrice : high
+                float slP = slBase + (slTicksBox * syminfo.mintick)
+                float riskP = math.abs(e - slP)
+                float tpP = e - (riskP * rrRatio)
+
+                newTrade = createTrade(false, e, slP, tpP, "CDSx+ Limit", "BlockCDLPlus", blk.highPrice, blk.lowPrice, int(time))
+                if addTradeToCategory(newTrade, "BlockCDLPlus")
+                    lastAction := "CDSx+ Limit triggered @ " + str.tostring(e, format.mintick)
+                    if enableAlerts
+                        alert(lastAction, alert.freq_all)
+
+// =====================================================
+// SWEEP DETECTION AND PREMATURE EXITS
+// =====================================================
+if showSweepLines and barstate.isconfirmed and in_calc_range
+    if not na(swH) and high > swH and close < swH
+        string lblTxt = ""
+        string sweepStrength = ""
+        if close > swHC
+            lblTxt := sweepLabelMode == "X Mode" ? "X" : "W.Sw"
+            sweepStrength := "WEAK"
+        else if close < swHC and close > swHM
+            lblTxt := sweepLabelMode == "X Mode" ? "X+" : "S.Sw"
+            sweepStrength := "STRONG"
+        else if close < swHM
+            lblTxt := sweepLabelMode == "X Mode" ? "X++" : "SS.Sw"
+            sweepStrength := "SUPER_STRONG"
+        deleteSweepLine(lastBearishSweep)
+        ln  = line.new(x1=swHTime, y1=swH, x2=time, y2=swH, color=sweepLineColor, width=sweepLineWidth, xloc=xloc.bar_time)
+        midTime = int(swHTime + (time - swHTime) / 2)
+        lbl = label.new(x=midTime, y=swH, text=lblTxt, style=label.style_label_down, color=color.new(color.white, 100), textcolor=sweepLineColor, size=getSizeFromString(sweepLabelSize), xloc=xloc.bar_time)
+        lastBearishSweep := SweepLine.new(ln, lbl, swH, swHTime, time, lblTxt, false)
+        for category in array.from("BlockCDLPlus", "BlockCDL", "BlockLD", "CandleCDLPlus", "CandleCDL", "CandleLD")
+            targetArray = switch category
+                "BlockCDLPlus"   => trades_BlockCDLPlus
+                "BlockCDL"       => trades_BlockCDL
+                "BlockLD"        => trades_BlockLD
+                "CandleCDLPlus"  => trades_CandleCDLPlus
+                "CandleCDL"      => trades_CandleCDL
+                "CandleLD"       => trades_CandleLD
+                => trades_BlockCDL
+            i = array.size(targetArray) - 1
+            while i >= 0
+                if array.size(targetArray) > i
+                    t = array.get(targetArray, i)
+                    shouldExit = false
+                    if t.isLong
+                        if sweepStrength == "WEAK" and exitOnWeakSweep
+                            shouldExit := true
+                        else if sweepStrength == "STRONG" and exitOnStrongSweep
+                            shouldExit := true
+                        else if sweepStrength == "SUPER_STRONG" and exitOnSuperStrongSweep
+                            shouldExit := true
+                        if shouldExit
+                            t.forceExit := true
+                            t.forceExitReason := "Sweep (" + lblTxt + ")"
+                            array.set(targetArray, i, t)
+                i -= 1
+
+    if not na(swL) and low < swL and close > swL
+        string lblTxt = ""
+        string sweepStrength = ""
+        if close < swLC
+            lblTxt := sweepLabelMode == "X Mode" ? "X" : "W.Sw"
+            sweepStrength := "WEAK"
+        else if close > swLC and close < swLM
+            lblTxt := sweepLabelMode == "X Mode" ? "X+" : "S.Sw"
+            sweepStrength := "STRONG"
+        else if close > swLM
+            lblTxt := sweepLabelMode == "X Mode" ? "X++" : "SS.Sw"
+            sweepStrength := "SUPER_STRONG"
+        deleteSweepLine(lastBullishSweep)
+        ln  = line.new(x1=swLTime, y1=swL, x2=time, y2=swL, color=sweepLineColor, width=sweepLineWidth, xloc=xloc.bar_time)
+        midTime = int(swLTime + (time - swLTime) / 2)
+        lbl = label.new(x=midTime, y=swL, text=lblTxt, style=label.style_label_up, color=color.new(color.white, 100), textcolor=sweepLineColor, size=getSizeFromString(sweepLabelSize), xloc=xloc.bar_time)
+        lastBullishSweep := SweepLine.new(ln, lbl, swL, swLTime, time, lblTxt, true)
+        for category in array.from("BlockCDLPlus", "BlockCDL", "BlockLD", "CandleCDLPlus", "CandleCDL", "CandleLD")
+            targetArray = switch category
+                "BlockCDLPlus"   => trades_BlockCDLPlus
+                "BlockCDL"       => trades_BlockCDL
+                "BlockLD"        => trades_BlockLD
+                "CandleCDLPlus"  => trades_CandleCDLPlus
+                "CandleCDL"      => trades_CandleCDL
+                "CandleLD"       => trades_CandleLD
+                => trades_BlockCDL
+            i = array.size(targetArray) - 1
+            while i >= 0
+                if array.size(targetArray) > i
+                    t = array.get(targetArray, i)
+                    shouldExit = false
+                    if not t.isLong
+                        if sweepStrength == "WEAK" and exitOnWeakSweep
+                            shouldExit := true
+                        else if sweepStrength == "STRONG" and exitOnStrongSweep
+                            shouldExit := true
+                        else if sweepStrength == "SUPER_STRONG" and exitOnSuperStrongSweep
+                            shouldExit := true
+                        if shouldExit
+                            t.forceExit := true
+                            t.forceExitReason := "Sweep (" + lblTxt + ")"
+                            array.set(targetArray, i, t)
+                i -= 1
+
+if not na(lastBearishSweep) and close > lastBearishSweep.price
+    deleteSweepLine(lastBearishSweep)
+    lastBearishSweep := na
+
+if not na(lastBullishSweep) and close < lastBullishSweep.price
+    deleteSweepLine(lastBullishSweep)
+    lastBullishSweep := na
+
+// =====================================================
+// TRADE MONITORING (STRICT STATE ENGINE)
+// =====================================================
+totalUnrealizedPL := 0.0
+
+for category in array.from("BlockCDLPlus", "BlockCDL", "BlockLD", "CandleCDLPlus", "CandleCDL", "CandleLD")
+    targetArray = switch category
+        "BlockCDLPlus"   => trades_BlockCDLPlus
+        "BlockCDL"       => trades_BlockCDL
+        "BlockLD"        => trades_BlockLD
+        "CandleCDLPlus"  => trades_CandleCDLPlus
+        "CandleCDL"      => trades_CandleCDL
+        "CandleLD"       => trades_CandleLD
+        => trades_BlockCDL
+
+    if array.size(targetArray) > 0
+        i = array.size(targetArray) - 1
+        while i >= 0
+            if array.size(targetArray) > i
+                t = array.get(targetArray, i)
+                endBar = bar_index + lineExtension
+
+                line.set_x2(t.eLine, endBar)
+                line.set_x2(t.sLine, endBar)
+                line.set_x2(t.tLine, endBar)
+                label.set_x(t.eLbl, endBar)
+                label.set_x(t.sLbl, endBar)
+                label.set_x(t.tLbl, endBar)
+
+                if t.activated
+                    bool liveHitTP = t.isLong ? (high >= t.tp) : (low <= t.tp)
+                    bool liveHitSL = t.isLong ? (low <= t.sl)  : (high >= t.sl)
+
+                    if liveHitTP or liveHitSL
+                        line.set_color(t.eLine, color.gray)
+                        line.set_color(t.sLine, color.gray)
+                        line.set_color(t.tLine, color.gray)
+                        label.set_textcolor(t.eLbl, color.gray)
+                        label.set_textcolor(t.sLbl, color.gray)
+                        label.set_textcolor(t.tLbl, color.gray)
+
+                if t.activated
+                    float _rD   = math.abs(t.entry - t.sl)
+                    float _dist = t.isLong ? (close - t.entry) : (t.entry - close)
+                    if _rD > 0
+                        totalUnrealizedPL += (_dist / _rD) * t.riskDollars
+
+                if barstate.isconfirmed
+                    bool tradeRemoved = false
+
+                    if not t.activated and (bar_index - t.creationBar) > 500
+                        t.forceExit := true
+                        t.forceExitReason := "Expired"
+
+                    if t.activated and exitBoxReentry and not t.forceExit
+                        bool shouldExit = false
+                        if str.contains(t.entryType, "CDLx") or str.contains(t.entryType, "CDSx")
+                            if boxReentryMode == "Box Edge"
+                                shouldExit := (t.isLong and close < t.boxLow) or (not t.isLong and close > t.boxHigh)
+                            else if boxReentryMode == "Midline"
+                                shouldExit := (t.isLong and close < t.boxMid) or (not t.isLong and close > t.boxMid)
+                        if shouldExit
+                            t.forceExit := true
+                            t.forceExitReason := "Box Re-entry"
+
+                    if not t.activated and not t.forceExit and bar_index > t.creationBar
+                        bool hitTpEarly = t.isLong ? (high >= t.tp) : (low <= t.tp)
+                        bool hitSlEarly = t.isLong ? (low <= t.sl) : (high >= t.sl)
+
+                        if hitTpEarly or hitSlEarly
+                            t.forceExit := true
+                            t.forceExitReason := "Missed (TGT/SL Hit Before Entry)"
+                        else
+                            bool hitEntry = t.isLong ? (low <= t.entry) : (high >= t.entry)
+                            if hitEntry
+                                t.activated := true
+                                lastAction := t.entryType + " ACTIVATED"
+                                if enableAlerts
+                                    alert(lastAction, alert.freq_all)
+                                line.set_style(t.eLine, line.style_solid)
+                                line.set_color(t.eLine, entryLineColor)
+
+                    if (t.activated or t.forceExit)
+                        bool isWin = false
+                        float pnl = 0.0
+                        float rr = 0.0
+                        string exitMsg = ""
+                        bool exitTriggered = false
+
+                        if t.forceExit
+                            array.set(manualExitWarningFlag, 0, true)
+                            float exitPrice = close
+                            float _rD = math.abs(t.entry - t.sl)
+                            if t.activated and _rD > 0
+                                pnl := t.isLong ? ((exitPrice - t.entry) / _rD) * t.riskDollars : ((t.entry - exitPrice) / _rD) * t.riskDollars
+                            rr := t.riskDollars > 0 ? pnl / t.riskDollars : 0.0
+                            isWin := pnl >= 0
+                            exitMsg := " ⚠️ Exited: " + t.forceExitReason + " (" + (isWin ? "+" : "") + str.tostring(rr, "#.##") + "R)"
+                            exitTriggered := true
+                            if not t.activated
+                                exitMsg := " Cancelled: " + t.forceExitReason
+                        else
+                            bool hitTP = t.isLong ? (high >= t.tp)  : (low <= t.tp)
+                            bool hitSL = t.isLong ? (low <= t.sl)   : (high >= t.sl)
+
+                            if hitTP or hitSL
+                                isWin := hitTP and not hitSL
+                                pnl := isWin ? t.riskDollars * rrRatio : -t.riskDollars
+                                rr  := isWin ? rrRatio : -1.0
+                                exitMsg := isWin ? " ✅ HIT TP" : " ❌ HIT SL"
+                                exitTriggered := true
+
+                        if exitTriggered
+                            if isWin
+                                totalWins_all      += 1
+                                totalProfitDollars += pnl
+                                totalPosRR         += rr
+                                consecWins         := lastOutcome == "win" ? consecWins + 1 : 1
+                                consecLosses       := 0
+                                maxConsecWins      := math.max(maxConsecWins, consecWins)
+                                lastOutcome        := "win"
+                                switch category
+                                    "CandleCDLPlus" => w_CandleCDLPlus += 1
+                                    "CandleCDL"     => w_CandleCDL     += 1
+                                    "CandleLD"      => w_CandleLD      += 1
+                                    "BlockCDLPlus"  => w_BlockCDLPlus  += 1
+                                    "BlockCDL"      => w_BlockCDL      += 1
+                                    "BlockLD"       => w_BlockLD       += 1
+                            else
+                                if t.activated
+                                    totalLosses_all  += 1
+                                    totalLossDollars += math.abs(pnl)
+                                    totalNegRR       += math.abs(rr)
+                                    consecLosses     := lastOutcome == "loss" ? consecLosses + 1 : 1
+                                    consecWins       := 0
+                                    maxConsecLosses  := math.max(maxConsecLosses, consecLosses)
+                                    lastOutcome      := "loss"
+                                    switch category
+                                        "CandleCDLPlus" => l_CandleCDLPlus += 1
+                                        "CandleCDL"     => l_CandleCDL     += 1
+                                        "CandleLD"      => l_CandleLD      += 1
+                                        "BlockCDLPlus"  => l_BlockCDLPlus  += 1
+                                        "BlockCDL"      => l_BlockCDL      += 1
+                                        "BlockLD"       => l_BlockLD       += 1
+
+                            float curEq     = totalProfitDollars - totalLossDollars
+                            peakEquity     := math.max(peakEquity, curEq)
+                            maxDrawdownStat := math.max(maxDrawdownStat, peakEquity - curEq)
+
+                            lastAction := t.entryType + exitMsg
+                            if enableAlerts
+                                alert(lastAction, alert.freq_all)
+                            deleteTrade(t)
+                            array.remove(targetArray, i)
+            i -= 1
+
+// =====================================================
+// CDLx+/CDSx+ MANAGEMENT
+// =====================================================
+if showCDLPlus and array.size(cdlPlusBlocks) > 0 and ((not showOnlyCDLxCDSx) or showOnlyCDLPlus)
+    i = array.size(cdlPlusBlocks) - 1
+    while i >= 0
+        blk = array.get(cdlPlusBlocks, i)
+        shouldDelete = blk.creationBar != bar_index and ((blk.type == "CDLx+" and low <= blk.price) or (blk.type == "CDSx+" and high >= blk.price))
+        if shouldDelete
+            deleteCDLPlusBlock(blk)
+            array.remove(cdlPlusBlocks, i)
+        i -= 1
+    if array.size(cdlPlusBlocks) > 0
+        for item in cdlPlusBlocks
+            extendCDLPlusBlock(item)
+
+// =====================================================
+// BOX MANAGEMENT
+// =====================================================
+neutralBoxesSize = array.size(neutralBoxes)
+if neutralBoxesSize > 0
+    i = neutralBoxesSize - 1
+    while i >= 0
+        if array.size(neutralBoxes) > i
+            neutralBox = array.get(neutralBoxes, i)
+            if high > neutralBox.high
+                if showOnlyCDLxCDSx and not neutralBox.hasCDLabel
+                    if not na(neutralBox.highLine)
+                        line.delete(neutralBox.highLine)
+                    if not na(neutralBox.lowLine)
+                        line.delete(neutralBox.lowLine)
+                    if not na(neutralBox.midLine)
+                        line.delete(neutralBox.midLine)
+                    if not na(neutralBox.boxes)
+                        box.delete(neutralBox.boxes)
+                    if not na(neutralBox.boxLabel)
+                        label.delete(neutralBox.boxLabel)
+                    if not na(neutralBox.CDLabel)
+                        label.delete(neutralBox.CDLabel)
+                    if not na(neutralBox.ldsdLabel)
+                        label.delete(neutralBox.ldsdLabel)
+                else
+                    array.push(violatedHighNeutralBoxes, neutralBox)
+                array.remove(neutralBoxes, i)
+            else if low < neutralBox.low
+                if showOnlyCDLxCDSx and not neutralBox.hasCDLabel
+                    if not na(neutralBox.highLine)
+                        line.delete(neutralBox.highLine)
+                    if not na(neutralBox.lowLine)
+                        line.delete(neutralBox.lowLine)
+                    if not na(neutralBox.midLine)
+                        line.delete(neutralBox.midLine)
+                    if not na(neutralBox.boxes)
+                        box.delete(neutralBox.boxes)
+                    if not na(neutralBox.boxLabel)
+                        label.delete(neutralBox.boxLabel)
+                    if not na(neutralBox.CDLabel)
+                        label.delete(neutralBox.CDLabel)
+                    if not na(neutralBox.ldsdLabel)
+                        label.delete(neutralBox.ldsdLabel)
+                else
+                    array.push(violatedLowNeutralBoxes, neutralBox)
+                array.remove(neutralBoxes, i)
+        i -= 1
+
+violatedHighNeutralBoxesSize = array.size(violatedHighNeutralBoxes)
+if violatedHighNeutralBoxesSize > 0
+    i = violatedHighNeutralBoxesSize - 1
+    while i >= 0
+        if array.size(violatedHighNeutralBoxes) > i
+            neutralBox = array.get(violatedHighNeutralBoxes, i)
+            if showOnlyCDLxCDSx and not neutralBox.hasCDLabel
+                if not na(neutralBox.highLine)
+                    line.delete(neutralBox.highLine)
+                if not na(neutralBox.lowLine)
+                    line.delete(neutralBox.lowLine)
+                if not na(neutralBox.midLine)
+                    line.delete(neutralBox.midLine)
+                if not na(neutralBox.boxes)
+                    box.delete(neutralBox.boxes)
+                if not na(neutralBox.boxLabel)
+                    label.delete(neutralBox.boxLabel)
+                if not na(neutralBox.CDLabel)
+                    label.delete(neutralBox.CDLabel)
+                if not na(neutralBox.ldsdLabel)
+                    label.delete(neutralBox.ldsdLabel)
+                array.remove(violatedHighNeutralBoxes, i)
+            else
+                shouldExtend = extendLinesAfterBreak and showContractionLines
+                if showOnlyCDLxCDSx
+                    shouldExtend := shouldExtend and neutralBox.hasCDLabel
+                if shouldExtend
+                    if na(neutralBox.extLowLine) and not na(neutralBox.lowLine)
+                        lineColor = neutralBox.boxType == "Supply" ? bullishBodyCloseColor : bearishBodyCloseColor
+                        neutralBox.extLowLine := line.new(x1=time, y1=neutralBox.low, x2=time, y2=neutralBox.low, color=lineColor, width=extendedLineWidth, style=getLineStyle(extendedLineStyle), xloc=xloc.bar_time)
+                    else if not na(neutralBox.extLowLine)
+                        line.set_x2(neutralBox.extLowLine, time)
+                if neutralBox.hasCDLabel and extendCDLxCDSxBoxes
+                    if showContractionBoxes and not na(neutralBox.boxes)
+                        box.set_right(neutralBox.boxes, time)
+                    if showContractionLines and not na(neutralBox.midLine)
+                        line.set_x2(neutralBox.midLine, time)
+                if neutralBox.low >= low
+                    if not na(neutralBox.highLine)
+                        line.delete(neutralBox.highLine)
+                    if not na(neutralBox.lowLine)
+                        line.delete(neutralBox.lowLine)
+                    if not na(neutralBox.extLowLine)
+                        line.delete(neutralBox.extLowLine)
+                    if not na(neutralBox.midLine)
+                        line.delete(neutralBox.midLine)
+                    if showContractionBoxes and not na(neutralBox.boxes)
+                        box.delete(neutralBox.boxes)
+                    if not na(neutralBox.CDLabel)
+                        label.delete(neutralBox.CDLabel)
+                    if not na(neutralBox.boxLabel)
+                        label.delete(neutralBox.boxLabel)
+                    if not na(neutralBox.ldsdLabel)
+                        label.delete(neutralBox.ldsdLabel)
+                    array.remove(violatedHighNeutralBoxes, i)
+        i -= 1
+
+violatedLowNeutralBoxesSize = array.size(violatedLowNeutralBoxes)
+if violatedLowNeutralBoxesSize > 0
+    i = violatedLowNeutralBoxesSize - 1
+    while i >= 0
+        if array.size(violatedLowNeutralBoxes) > i
+            neutralBox = array.get(violatedLowNeutralBoxes, i)
+            if showOnlyCDLxCDSx and not neutralBox.hasCDLabel
+                if not na(neutralBox.highLine)
+                    line.delete(neutralBox.highLine)
+                if not na(neutralBox.lowLine)
+                    line.delete(neutralBox.lowLine)
+                if not na(neutralBox.midLine)
+                    line.delete(neutralBox.midLine)
+                if not na(neutralBox.boxes)
+                    box.delete(neutralBox.boxes)
+                if not na(neutralBox.boxLabel)
+                    label.delete(neutralBox.boxLabel)
+                if not na(neutralBox.CDLabel)
+                    label.delete(neutralBox.CDLabel)
+                if not na(neutralBox.ldsdLabel)
+                    label.delete(neutralBox.ldsdLabel)
+                array.remove(violatedLowNeutralBoxes, i)
+            else
+                shouldExtend = extendLinesAfterBreak and showContractionLines
+                if showOnlyCDLxCDSx
+                    shouldExtend := shouldExtend and neutralBox.hasCDLabel
+                if shouldExtend
+                    if na(neutralBox.extHighLine) and not na(neutralBox.highLine)
+                        lineColor = neutralBox.boxType == "Supply" ? bullishBodyCloseColor : bearishBodyCloseColor
+                        neutralBox.extHighLine := line.new(x1=time, y1=neutralBox.high, x2=time, y2=neutralBox.high, color=lineColor, width=extendedLineWidth, style=getLineStyle(extendedLineStyle), xloc=xloc.bar_time)
+                    else if not na(neutralBox.extHighLine)
+                        line.set_x2(neutralBox.extHighLine, time)
+                if neutralBox.hasCDLabel and extendCDLxCDSxBoxes
+                    if showContractionBoxes and not na(neutralBox.boxes)
+                        box.set_right(neutralBox.boxes, time)
+                    if showContractionLines and not na(neutralBox.midLine)
+                        line.set_x2(neutralBox.midLine, time)
+                if neutralBox.high < high
+                    if not na(neutralBox.highLine)
+                        line.delete(neutralBox.highLine)
+                    if not na(neutralBox.lowLine)
+                        line.delete(neutralBox.lowLine)
+                    if not na(neutralBox.extHighLine)
+                        line.delete(neutralBox.extHighLine)
+                    if not na(neutralBox.midLine)
+                        line.delete(neutralBox.midLine)
+                    if showContractionBoxes and not na(neutralBox.boxes)
+                        box.delete(neutralBox.boxes)
+                    if not na(neutralBox.CDLabel)
+                        label.delete(neutralBox.CDLabel)
+                    if not na(neutralBox.boxLabel)
+                        label.delete(neutralBox.boxLabel)
+                    if not na(neutralBox.ldsdLabel)
+                        label.delete(neutralBox.ldsdLabel)
+                    array.remove(violatedLowNeutralBoxes, i)
+        i -= 1
+
+if (showCDLabels or showOnlyCDLxCDSx) and array.size(cdexDots) > 0
+    i = array.size(cdexDots) - 1
+    while i >= 0
+        if array.size(cdexDots) > i
+            dot = array.get(cdexDots, i)
+            if (dot.dotType == "CDSx" and high > dot.price) or (dot.dotType == "CDLx" and low < dot.price)
+                label.delete(dot.dotLabel)
+                array.remove(cdexDots, i)
+        i -= 1
+
+// =====================================================
+// RISK TABLE
+// =====================================================
+if show_risk_table and barstate.islast
+    var table _rT = table.new(getTablePosition(riskTablePos), 2, 11, bgcolor=#000000, frame_color=color.rgb(60,60,60), frame_width=1, border_color=color.rgb(40,40,40), border_width=1)
+    color _rg = color.rgb(22,22,22)
+    int   _r  = 0
+    table.cell(_rT, 0, _r, "─ RISK ─", text_color=#e1b31a, text_size=getTableTextSize(riskTableSz), bgcolor=#000000)
+    table.merge_cells(_rT, 0, _r, 1, _r)
+    _r += 1
+    table.cell(_rT, 0, _r, "Drawdown",      text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, "$" + str.tostring(capitalDrawdown, "#,###"), text_color=color.red, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "Profit TGT",   text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, "$" + str.tostring(profitTarget, "#,###"), text_color=#27ffc3, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, cycleType,      text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, str.tostring(challengeDays) + " Days", text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, overrideRiskPerTrade ? "Risk/Trade (Manual)" : "Risk/Trade (Auto)",   text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, "$" + str.tostring(riskPerTrade, "#.##") + " × " + str.tostring(positionSize) + "ct", text_color=color.orange, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "R:R",          text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, "1:" + str.tostring(rrRatio, "#.#"), text_color=color.lime, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "Total R Needed",text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, str.tostring(totalRNeeded, "#.#") + "R", text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "Min Daily R",  text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, str.tostring(minDailyR, "#.##") + "R", text_color=#27ffc3, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "Wins Goal",    text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, str.tostring(totalWinsNeeded), text_color=color.lime, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "Consec Loss",  text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, str.tostring(expectedConsecLoss) + " ($" + str.tostring(expectedTotalLoss, "#,###") + ")", text_color=color.red, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "SL Mode",      text_color=color.white, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+    table.cell(_rT, 1, _r, masterSLMode == "Candle High/Low" ? "Candles" : "Block HH/LL", text_color=color.orange, text_size=getTableTextSize(riskTableSz), bgcolor=_rg)
+
+// =====================================================
+// STATISTICS TABLE
+// =====================================================
+if show_stats_table and barstate.islast
+    var table _sT = table.new(getTablePosition(statsTablePos), 3, 28, bgcolor=#000000, frame_color=color.gray, frame_width=1)
+    string _sz  = statsTableSz
+    int    _cT_ = totalWins_all + totalLosses_all
+    float  _wr  = _cT_ > 0 ? totalWins_all / _cT_ * 100 : 0.0
+    float  _nPL = totalProfitDollars - totalLossDollars
+    float  _avgW = totalWins_all   > 0 ? totalPosRR / totalWins_all   : 0.0
+    float  _avgL = totalLosses_all > 0 ? totalNegRR / totalLosses_all : 1.0
+    float  _pF   = totalLossDollars > 0 ? totalProfitDollars / totalLossDollars : na
+    float  _exp  = _cT_ > 0 ? _nPL / _cT_ : 0.0
+
+    int _firstTime = na
+    if array.size(firstTradeTime_arr) > 0
+        _firstTime := array.get(firstTradeTime_arr, 0)
+
+    string _sD   = na(_firstTime) ? "No Trades" : str.format("{0,date,MMM dd yyyy}", _firstTime)
+
+    int st = 0
+    table.cell(_sT, 0, st, "═ STATISTICS ═", bgcolor=#000000, text_color=#e1b31a, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 0, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Since",      bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _sD,          bgcolor=#000000, text_color=#27ffc3,                text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Risk/Trade", bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, "$" + str.tostring(riskPerTrade, "#.##") + (overrideRiskPerTrade ? " (Manual)" : " (Auto)"), bgcolor=#000000, text_color=color.orange, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    int _aT = trades_BlockCDLPlus.size() + trades_BlockCDL.size() + trades_BlockLD.size() + trades_CandleCDLPlus.size() + trades_CandleCDL.size() + trades_CandleLD.size()
+    table.cell(_sT, 0, st, "Total/Live", bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, str.tostring(_cT_ + _aT),             bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, "(" + str.tostring(_aT) + " live)",   bgcolor=#000000, text_color=#27ffc3,    text_size=getTableTextSize(_sz))
+    st += 1
+    table.cell(_sT, 0, st, "W / L",      bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, str.tostring(totalWins_all),   bgcolor=#000000, text_color=color.lime, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, str.tostring(totalLosses_all), bgcolor=#000000, text_color=color.red,  text_size=getTableTextSize(_sz))
+    st += 1
+    float _req_wr = 1.0 / (1.0 + rrRatio) * 100.0
+    string _wr_rr_txt = (_cT_ > 0 ? str.tostring(_wr, "#.#") + "%" : "—") + "  @  1:" + str.tostring(rrRatio, "#.#") + "R"
+    color  _rr_bg = _cT_ == 0 ? color.new(color.gray, 80) : _wr >= _req_wr + 5 ? color.new(color.green, 70) : _wr >= _req_wr ? color.new(color.orange, 70) : color.new(color.red, 80)
+    color  _rr_vc = _cT_ == 0 ? color.gray : _wr >= _req_wr + 5 ? color.lime : _wr >= _req_wr ? color.orange : color.red
+    table.cell(_sT, 0, st, "WR / RR",    bgcolor=_rr_bg, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _wr_rr_txt,   bgcolor=_rr_bg, text_color=_rr_vc,      text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Need",        bgcolor=_rr_bg, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, str.tostring(_req_wr, "#.#") + "% min", bgcolor=_rr_bg, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Avg R W/L",  bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, totalWins_all   > 0 ? "+" + str.tostring(_avgW, "#.#") : "—", bgcolor=#000000, text_color=color.lime, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, totalLosses_all > 0 ? "-" + str.tostring(_avgL, "#.#") : "—", bgcolor=#000000, text_color=color.red,  text_size=getTableTextSize(_sz))
+    st += 1
+    string _pfTx = not na(_pF) ? str.tostring(_pF, "#.##") : (totalWins_all > 0 ? "∞" : "—")
+    color  _pfCl = (not na(_pF) and _pF >= 2) ? color.lime : (not na(_pF) and _pF >= 1) ? color.orange : (na(_pF) and totalWins_all > 0) ? color.lime : color.red
+    table.cell(_sT, 0, st, "Prof Factor", bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _pfTx, bgcolor=#000000, text_color=_pfCl, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Expectancy", bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _cT_ > 0 ? ((_exp >= 0 ? "+$" : "-$") + str.tostring(math.abs(_exp), "#.##")) : "—", bgcolor=#000000, text_color=_exp >= 0 ? color.lime : color.red, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Consec W/L", bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, str.tostring(maxConsecWins),    bgcolor=#000000, text_color=color.lime, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, str.tostring(maxConsecLosses), bgcolor=#000000, text_color=color.red,  text_size=getTableTextSize(_sz))
+    st += 1
+    table.cell(_sT, 0, st, "Max DD",     bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, maxDrawdownStat > 0 ? "$" + str.tostring(maxDrawdownStat, "#,###") : "—", bgcolor=#000000, text_color=color.red, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Total P/L",  bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, totalWins_all   > 0 ? "+$" + str.tostring(totalProfitDollars, "#,###") : "—", bgcolor=#000000, text_color=color.lime, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, totalLosses_all > 0 ? "-$" + str.tostring(totalLossDollars,   "#,###") : "—", bgcolor=#000000, text_color=color.red,  text_size=getTableTextSize(_sz))
+    st += 1
+    color _nBg = _nPL >= 0 ? color.new(color.green, 70) : color.new(color.red, 70)
+    table.cell(_sT, 0, st, "NET P/L",    bgcolor=_nBg, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _cT_ > 0 ? ((_nPL >= 0 ? "+$" : "-$") + str.tostring(math.abs(_nPL), "#,###")) : "—", bgcolor=_nBg, text_color=_nPL >= 0 ? color.lime : color.red, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Unrealized", bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, totalUnrealizedPL != 0 ? (totalUnrealizedPL > 0 ? "+$" : "-$") + str.tostring(math.abs(totalUnrealizedPL), "#,###") : "—", bgcolor=#000000, text_color=totalUnrealizedPL >= 0 ? color.lime : color.red, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+
+    if array.get(manualExitWarningFlag, 0)
+        table.cell(_sT, 0, st, "⚠️ ALERT", bgcolor=color.new(color.red, 40), text_color=color.white, text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, "MANUAL EXIT OR DO NOT ENTER", bgcolor=color.new(color.red, 40), text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+
+    table.cell(_sT, 0, st, "── BY ENTRY ──", bgcolor=#000000, text_color=#e1b31a, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 0, st, 2, st)
+    st += 1
+    if enableCandleCDLPlus
+        table.cell(_sT, 0, st, "1️⃣ CDLx+ Candle",     bgcolor=#000000, text_color=color.fuchsia, text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(w_CandleCDLPlus, l_CandleCDLPlus), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if enableCandleCDL
+        table.cell(_sT, 0, st, "2️⃣ PO4 CDLx/CDSx",  bgcolor=#000000, text_color=color.orange,  text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(w_CandleCDL, l_CandleCDL), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if enableCandleLD
+        table.cell(_sT, 0, st, "3️⃣ PO4 LDx/SDx",    bgcolor=#000000, text_color=#27ffc3,       text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(w_CandleLD,  l_CandleLD),  bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if enableBlockCDLPlus
+        table.cell(_sT, 0, st, "4️⃣ CDLx+ Blk Limit", bgcolor=#000000, text_color=color.purple,    text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(w_BlockCDLPlus, l_BlockCDLPlus),  bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if enableBlockCDL
+        table.cell(_sT, 0, st, "5️⃣ CDLx/CDSx Limit", bgcolor=#000000, text_color=color.aqua,    text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(w_BlockCDL,  l_BlockCDL),  bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if enableBlockLD
+        table.cell(_sT, 0, st, "6️⃣ LDx/SDx Limit",   bgcolor=#000000, text_color=color.yellow,  text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(w_BlockLD,   l_BlockLD),   bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+
+// =====================================================
+// SIGNALS TABLE
+// =====================================================
+
+if show_mmm_table and barstate.islast
+    table.clear(mmm_signals_table, 0, 0, 0, 29)
+
+    htfString = tfMode == "Auto Combination" ?
+                 "Auto (" + autoMultiplier + "): " + f_timeframeToString(timeframe.period) + " → " + f_timeframeToString(blockTF) :
+                 (blockTimeframe == '' ? "Chart TF" : f_timeframeToString(blockTF))
+    ltfString = ltfExecutionTF == '' ? "Chart TF" : f_timeframeToString(ltfTF)
+
+    table.cell(mmm_signals_table, 0, 0, 'MMM 3.0 Pro [HTF: ' + htfString + ' | LTF: ' + ltfString + ']', text_color=color.white, text_size=table_size)
+
+    row = 1
+
+    blockCDLPlus_act = 0
+    blockCDLPlus_pnd = 0
+    for t in trades_BlockCDLPlus
+        if t.activated
+            blockCDLPlus_act += 1
+        else
+            blockCDLPlus_pnd += 1
+    blockCDL_active  = 0
+    blockCDL_pending = 0
+    for t in trades_BlockCDL
+        if t.activated
+            blockCDL_active += 1
+        else
+            blockCDL_pending += 1
+    blockLD_active  = 0
+    blockLD_pending = 0
+    for t in trades_BlockLD
+        if t.activated
+            blockLD_active += 1
+        else
+            blockLD_pending += 1
+    candleCDLPlus_act = 0
+    candleCDLPlus_pnd = 0
+    for t in trades_CandleCDLPlus
+        if t.activated
+            candleCDLPlus_act += 1
+        else
+            candleCDLPlus_pnd += 1
+    candleCDL_active  = 0
+    candleCDL_pending = 0
+    for t in trades_CandleCDL
+        if t.activated
+            candleCDL_active += 1
+        else
+            candleCDL_pending += 1
+    candleLD_active  = 0
+    candleLD_pending = 0
+    for t in trades_CandleLD
+        if t.activated
+            candleLD_active += 1
+        else
+            candleLD_pending += 1
+
+    table.cell(mmm_signals_table, 0, row, '1️⃣ CDLx+/CDSx+ Candle: ' + str.tostring(candleCDLPlus_act) + 'A | ' + str.tostring(candleCDLPlus_pnd) + 'P | ' + str.tostring(maxEntries_CandleCDLPlus) + 'Max', text_color=enableCandleCDLPlus ? color.white : color.gray, text_size=table_size)
+    row += 1
+    table.cell(mmm_signals_table, 0, row, '2️⃣ PO4 CDLx/CDSx: ' + str.tostring(candleCDL_active) + 'A | ' + str.tostring(candleCDL_pending) + 'P | ' + str.tostring(maxEntries_CandleCDL) + 'Max', text_color=enableCandleCDL ? color.white : color.gray, text_size=table_size)
+    row += 1
+    table.cell(mmm_signals_table, 0, row, '3️⃣ PO4 LDx/SDx: ' + str.tostring(candleLD_active) + 'A | ' + str.tostring(candleLD_pending) + 'P | ' + str.tostring(maxEntries_CandleLD) + 'Max', text_color=enableCandleLD ? color.white : color.gray, text_size=table_size)
+    row += 1
+    table.cell(mmm_signals_table, 0, row, '4️⃣ CDLx+/CDSx+ Limit: ' + str.tostring(blockCDLPlus_act) + 'A | ' + str.tostring(blockCDLPlus_pnd) + 'P | ' + str.tostring(maxEntries_BlockCDLPlus) + 'Max', text_color=enableBlockCDLPlus ? color.white : color.gray, text_size=table_size)
+    row += 1
+    table.cell(mmm_signals_table, 0, row, '5️⃣ CDLx/CDSx Limit: ' + str.tostring(blockCDL_active) + 'A | ' + str.tostring(blockCDL_pending) + 'P | ' + str.tostring(maxEntries_BlockCDL) + 'Max', text_color=enableBlockCDL ? color.white : color.gray, text_size=table_size)
+    row += 1
+    table.cell(mmm_signals_table, 0, row, '6️⃣ LDx/SDx Limit: ' + str.tostring(blockLD_active) + 'A | ' + str.tostring(blockLD_pending) + 'P | ' + str.tostring(maxEntries_BlockLD) + 'Max', text_color=enableBlockLD ? color.white : color.gray, text_size=table_size)
+    row += 1
+    table.cell(mmm_signals_table, 0, row, '══════════════', text_color=color.gray, text_size=table_size)
+    row += 1
+
+    if showBiasSection and currentBias != "NONE"
+        biasText  = currentBias == "CDLx" ? "Bias: CDLx → LDx" + str.tostring(ldCount) : "Bias: CDSx → SDx" + str.tostring(sdCount)
+        biasColor = currentBias == "CDLx" ? color.green : color.red
+        table.cell(mmm_signals_table, 0, row, biasText, text_color=biasColor, text_size=table_size)
+        row += 1
+        table.cell(mmm_signals_table, 0, row, '══════════════', text_color=color.gray, text_size=table_size)
+        row += 1
+
+    if showSignalSection
+        color signalColor = color.gray
+        if str.contains(lastSignalType, "CDLx") or str.contains(lastSignalType, "LD")
+            signalColor := color.green
+        else if str.contains(lastSignalType, "CDSx") or str.contains(lastSignalType, "SD")
+            signalColor := color.red
+        table.cell(mmm_signals_table, 0, row, 'Last Signal: ' + lastSignalType, text_color=signalColor, text_size=table_size)
+        row += 1
+        color actionColor = color.white
+        if str.contains(lastAction, "created") or str.contains(lastAction, "triggered")
+            actionColor := color.yellow
+        else if str.contains(lastAction, "ACTIVATED")
+            actionColor := color.aqua
+        else if str.contains(lastAction, "TP")
+            actionColor := color.green
+        else if str.contains(lastAction, "SL") or str.contains(lastAction, "exited") or str.contains(lastAction, "Cancelled") or str.contains(lastAction, "Exited")
+            actionColor := color.red
+        table.cell(mmm_signals_table, 0, row, lastAction, text_color=actionColor, text_size=table_size)
+        row += 1
+        table.cell(mmm_signals_table, 0, row, 'Zone: ' + blockEntryMode, text_color=color.gray, text_size=table_size)
+        row += 1
+
+    if showBiasLine and not na(lastDrawnBiasText)
+        table.cell(mmm_signals_table, 0, row, '══════════════', text_color=color.gray, text_size=table_size)
+        row += 1
+        table.cell(mmm_signals_table, 0, row, lastDrawnBiasText, text_color=lastDrawnBiasColor, text_size=table_size)
+        row += 1
+        table.cell(mmm_signals_table, 0, row, 'Bull: ' + str.tostring(lastDrawnBullPercent, '#.#') + '% | Bear: ' + str.tostring(lastDrawnBearPercent, '#.#') + '%', text_color=color.gray, text_size=table_size)
+
+// Execute final unified A&B overlap drawing checks on the last bar
+if barstate.islast
+    f_draw_groups()

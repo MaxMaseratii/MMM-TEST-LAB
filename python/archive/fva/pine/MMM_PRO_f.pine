@@ -1,0 +1,1521 @@
+//@version=6
+indicator("MMM PRO f: FVA Order Flow @MaxMaserati", "MMM PRO f", overlay=true, max_boxes_count=500, max_labels_count=50, max_lines_count=50)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MMM PRO f — the FVA Break box engine driven by the MMM PRO order flow.
+//
+// CANDLES: BuBC = close above the previous high · BeBC = close below the previous low · NBC = neither.
+//
+// TURN BOX (every time the body closes flip side):
+//   BeBC → NBC(s) → BuBC : bullish box = the FIRST NBC body top (close if bullish, open if bearish)
+//                          down to the LOWEST low from that last BeBC to the BuBC. It starts at that NBC.
+//   BeBC → BuBC (no NBC) : bullish box = the BuBC open down to the lowest low of the two.
+//   Bearish box = the mirror. A turn box at the SAME extreme as a live box is not a new box:
+//   it merges into that box (no two boxes, no two PO4 T1 at one level).
+//
+// ORDER FLOW (same dynamic as MMM PRO c). Example in a BEAR trend, tier 5 (BePO4 T5 above):
+//   · the first bullish box after T5            = BuP5  (the pullback starts)
+//   · R5 = the HIGHEST high between T5 and P5, printed once a bearish BC shows up. If that high
+//     was an NBC before the BC-on-BC turn, R5 = that candle's body (open if bullish) to its high;
+//     the BC-on-BC box stays internal (pale, small letters) so the level where the move started is kept.
+//   · No box without an opposite BC. No new T1 unless the last T# is closed through.
+//     Older T# never move.
+//   · a close BELOW BuP5 = SD5 → BeR5 becomes BePO4 T6. No R# yet: the T# waits for the next
+//     opposite BC (its bearish box becomes T6). No invented boxes.
+//   · a close ABOVE the last T# = CDL → that SAME box turns bull color with CDL in its center,
+//     BuP5 becomes BuPO4 T1. No P# yet: T1 waits for the next bullish box. Older T# closed
+//     through after that are simply deleted (with their break box).
+//   Break boxes stop at the candle that broke them. They live and die with the PO4 they made (husband & wife).
+//
+// NEW HIGH / LOW WITHOUT A CLOSE (any live box):
+//   Bearish box: a wick above its top that does NOT close above → ONLY the top goes to the new high.
+//   The body edge and the start stay until the next opposite BC; then the box resets to that turn
+//   (its highest high + its first NBC body bottom / the BeBC open). No box edge on a BC body. Bullish: mirror.
+//   ONE BOX PER LEVEL: when 2+ live boxes end at the same new high / low (or a new box is born there)
+//   they become ONE box with every name joined: "BuPO4 T1 & BuP3". The box starts at the OLDEST
+//   level and keeps the FRESHEST level's open / close (where the newest level is) + the shared high / low. Each name keeps its own job (a close through kills them all).
+//   The same name twice ("BuPO4 T1 & BuPO4 T1") shows once with a * (a fusion). No pale box on a level that has a name.
+//
+// 🟢 / 🔴 = T1 of the newest bull / bear leg (stays until closed through) · 🟩 / 🟥 = that leg's newest T#.
+//
+// HTF in LTF: pick a structure timeframe (e.g. 60 for the FVA Break 1h boxes on a 5m chart).
+// Only CLOSED structure candles are used: no repaint.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── 0. STRUCTURE TIMEFRAME ───
+grp_tf   = "0. Structure Timeframe"
+stfIn    = input.timeframe("", "Structure Timeframe", group=grp_tf, tooltip="Empty = chart timeframe.\n60 = the FVA Break 1h boxes, drawn on any chart of 1h or lower.\nOnly CLOSED structure candles are used: no repaint.")
+tfTag    = input.bool(true, "Timeframe at the End of Names (BuP5 [H1])", group=grp_tf, tooltip="Only when the structure timeframe is higher than the chart.")
+
+// ─── 1. DISPLAY ───
+grp_disp = "1. Display"
+showT    = input.bool(true, "PO4 Origins (T#)", group=grp_disp, tooltip="BuPO4 / BePO4 T1, T2… The origin of each trend leg. T1 = born of a CDL / CDS. T2+ = born of an LD / SD.")
+showP    = input.bool(true, "Pullbacks (P#)", group=grp_disp, tooltip="The first box against the trend after the last T#. A close through it = LD / SD.")
+showR    = input.bool(true, "Resumptions (R#)", group=grp_disp, tooltip="The box with the trend at the most extreme point between the last T# and the P# (highest high in a bear trend, lowest low in a bull trend). It becomes the next T# on the LD / SD.")
+showBrk  = input.bool(true, "Break Boxes (CDL / CDS / LD / SD)", group=grp_disp, tooltip="The box that was closed through keeps the break name in its center and stops at the candle that broke it. It is deleted together with the PO4 it created (husband & wife).")
+showInt  = input.bool(true, "Internal Boxes (small letters)", group=grp_disp, tooltip="Boxes between the last T# and the P# that are not the P# / R#. Pale, small letters.\nOnly 4 are kept: per side the most extreme one (highest bear / lowest bull) and the newest one.")
+showIntB = input.bool(false, "Internal cdl / cds", group=grp_disp, tooltip="ON: an internal box (or an R#) that is closed through stays with a small cdl / cds in its center until the range ends.\nOFF: it is deleted at once.")
+purgeInt = input.bool(true, "Clear Internal Boxes on LD / SD / CDL / CDS", group=grp_disp, tooltip="ON: when a range ends (continuation or reversal) its internal boxes are cleared.\nOFF: they stay as history until price closes through them.")
+pfxMode  = input.string("Pullback direction (BuP5 in a bear trend)", "P# / R# Prefix", options=["Pullback direction (BuP5 in a bear trend)", "Trend direction (BeP5 in a bear trend)"], group=grp_disp, tooltip="Pullback direction: in a bear trend the pullback goes UP → BuP5, the resumption goes down → BeR5.\nTrend direction: everything in a bear trend starts with Be → BeP5, BeR5.")
+engTag   = input.bool(false, "Engine Tag (CDLf / SDf5)", group=grp_disp)
+
+// ─── 2. 🟢🟩 / 🔴🟥 MARKERS & OLDER T# ───
+grp_mk   = "2. Trend Markers & Older T#"
+showMk   = input.bool(true, "🟢🟩 / 🔴🟥 Markers", group=grp_mk, tooltip="🟢 / 🔴 = the T1 of the newest bull / bear leg. It never moves and stays until that T1 is closed through.\n🟩 / 🟥 = the newest T# of that leg. It steps forward on every LD / SD.\nOnly T1 = they print together: 🟢🟩.")
+maxIn    = input.int(20, "Max T# Inside the 🟢🔴 Range", minval=0, maxval=60, group=grp_mk, tooltip="Older PO4 origins (still alive) whose box sits between the highest and the lowest marker, newest first.\nThe marker boxes and the current T# always show.")
+maxOld   = input.int(2, "Max T# Outside the Range (per side)", minval=0, maxval=30, group=grp_mk, tooltip="Older PO4 origins (still alive) above or below the marker range, newest first, per side.")
+
+// ─── 3. STYLE ───
+grp_sty  = "3. Colors & Text"
+c_tBu    = input.color(#00C853, "Bull  T#", inline="cb", group=grp_sty, tooltip="Bullish boxes (BuPO4, BuP#, BuR#, bu internal) = green.")
+c_pBu    = input.color(#69F0AE, "P#", inline="cb", group=grp_sty)
+c_rBu    = input.color(#1DE9B6, "R#", inline="cb", group=grp_sty)
+c_iBu    = input.color(#69F0AE, "Internal", inline="cb", group=grp_sty)
+c_tBe    = input.color(#E254FF, "Bear  T#", inline="ce", group=grp_sty, tooltip="Bearish boxes (BePO4, BeP#, BeR#, be internal) = purple.")
+c_pBe    = input.color(#EE72E8, "P#", inline="ce", group=grp_sty)
+c_rBe    = input.color(#C77DFF, "R#", inline="ce", group=grp_sty)
+c_iBe    = input.color(#EE72E8, "Internal", inline="ce", group=grp_sty)
+c_cdl    = input.color(#01d401, "CDL", inline="c2", group=grp_sty, tooltip="The T# box that was closed through UP turns this color.")
+c_cds    = input.color(#c2185b, "CDS", inline="c2", group=grp_sty, tooltip="The T# box that was closed through DOWN turns this color.")
+c_ld     = input.color(#69F0AE, "LD", inline="c2", group=grp_sty)
+c_sd     = input.color(#EE72E8, "SD", inline="c2", group=grp_sty)
+healthOn = input.bool(true, "Box Health Colors", inline="h1", group=grp_sty, tooltip="Colors change on T# and R# only (break boxes, P# and internal keep their color; their ⚠ ✖ F✖ ▲▼ marks still show):\n· fresh (no close inside yet) = a bit DEEPER than its color\n· a candle CLOSES INSIDE = weakness → GREY\n· then a close back out on its side → PALE\n· a close past the candle with the lowest low (bear box) / highest high (bull box) of the inside closes → its FULL color again\nBreak boxes (CDS / SD; CDL / LD = mirror):\n· a close back ABOVE the box → pale opposite color + ⚠ under that candle (⚠ gone once a close goes below that candle's low)\n· then a BuBC = exit sign ✖ → the box turns green (still CDS)\n· a BuBC closing above the highest high of the candles that closed above the box = full exit F✖")
+c_grey   = input.color(#9E9E9E, "Weak", inline="h1", group=grp_sty)
+c_cau    = input.color(#FFB300, "⚠", inline="h1", group=grp_sty)
+cauMode  = input.string("Last close inside (moves)", "⚠ Reference", options=["Last close inside (moves)", "First close inside (fixed)"], inline="h4", group=grp_sty, tooltip="⚠ starts on a candle that CLOSES INSIDE a box.\nLast (moves) = the ⚠ moves to every new candle that closes inside; a close past THAT candle (below its low for a short box, above its high for a long box) clears ⚠ and ✖.\nFirst (fixed) = the ⚠ stays on the first one.")
+deep     = input.int(15, "Fresh Boxes Deeper By", minval=0, maxval=60, inline="h2", group=grp_sty, tooltip="Fresh boxes (no close inside yet) are this much less transparent than their color.")
+fullRef  = input.string("Open / body", "Full Again Past the Inside Candle's", options=["Open / body", "Low / high"], inline="h3", group=grp_sty, tooltip="After a close inside, the box gets its full color back when a candle closes past the candle with the lowest low (bear box) / highest high (bull box) of the inside closes:\nOpen / body = past its body (its open when it pushed into the box)\nLow / high = past its low (bear box) / high (bull box).")
+
+grp_view = "5. Show Only (none ticked = everything)"
+vClean   = input.bool(false, "▼▲ Clean First Touch + Untouched", group=grp_view, tooltip="Boxes whose FIRST touch back had no close inside, then a body close WITH the box (bear box → BeBC, bull box → BuBC). A tiny ▼ / ▲ marks that BC. Untouched boxes (candidates) show too.")
+vPale    = input.bool(false, "Greyed, Then Closed Back Out", group=grp_view, tooltip="A candle closed inside, then a close back out on the box side (pale).")
+vRec     = input.bool(false, "Greyed, Then Closed Past the Inside Candles", group=grp_view, tooltip="Back to full color: a close past the lowest low (bear) / highest high (bull) candle of the inside closes.")
+vRev     = input.bool(false, "Reversal: Greyed, Then Closed Through", group=grp_view, tooltip="A candle closed inside, then price closed through the OTHER side of the box (the box turned into CDL / CDS / LD / SD, or a break box got its ⚠).")
+c_triL   = input.color(#00E676, "▲ Long", inline="tri", group=grp_view, tooltip="Retest arrows: green ▲ = long, red ▼ = short. Size = the retest type: tiny = immediate · small = after NBC · normal = after an opposite BC.")
+c_triS   = input.color(#FF1744, "▼ Short", inline="tri", group=grp_view)
+fxRef    = input.string("Open", "F✖ When a BC Closes Past the Last Opposite BC's", options=["Low / high", "Open", "Body (open and close)"], group=grp_view, tooltip="Break → TOUCH → reaction: on a BULL box, a BuBC closing above the HIGH / open / body of the last BeBC since the touch = F✖S (exit short) under its low. On a BEAR box, a BeBC closing below the LOW / open / body of the last BuBC since the touch = F✖L (exit long) over its high. One F✖ per level. Not on T# / R#.")
+keepTr   = input.int(30, "Keep ▼▲ Retest Marks", minval=0, maxval=100, group=grp_view, tooltip="Every clean retest of a live box gets its ▼ / ▲ (the first one and every later one). How many stay on the chart, newest first.")
+keepFx   = input.int(20, "Keep F✖ Marks", minval=0, maxval=50, group=grp_view, tooltip="F✖ marks stay on their candle, newest first.")
+c_fx     = input.color(#FF1744, "F✖ Color", group=grp_view)
+rt1      = input.bool(true, "Retest 1 · Immediate (tiny ▲)", group=grp_view, tooltip="The first touch back comes with NO NBC and NO opposite BC between the break candle and the touch.")
+rt2      = input.bool(true, "Retest 2 · After NBC (small ▲)", group=grp_view, tooltip="NBC(s) between the break candle and the touch, no opposite BC.")
+rt3      = input.bool(true, "Retest 3 · After an Opposite BC (normal ▲)", group=grp_view, tooltip="An opposite BC printed between the break candle and the touch.")
+mkT      = input.bool(true, "Marks on T# + CDL / CDS", inline="mk1", group=grp_view, tooltip="Marks = the ▼▲ retest arrows, ⚠ caution, ✖ exit and F✖ full exit.")
+mkP      = input.bool(true, "P# + LD / SD", inline="mk1", group=grp_view)
+mkR      = input.bool(true, "Marks on R#", inline="mk2", group=grp_view)
+mkI      = input.bool(true, "Internal", inline="mk2", group=grp_view)
+trMain   = input.int(70, "Transparency", minval=0, maxval=97, inline="tr", group=grp_sty)
+trInt    = input.int(88, "Internal", minval=0, maxval=97, inline="tr", group=grp_sty)
+trBrk    = input.int(78, "Break", minval=0, maxval=97, inline="tr", group=grp_sty)
+c_txt    = input.color(#000000, "Text", inline="tx", group=grp_sty)
+grp_lbl  = "4. Label Sizes"
+szAll    = input.string("per item", "ALL Labels", options=["per item", "tiny", "small", "normal", "large"], group=grp_lbl, tooltip="One switch for every label. \"per item\" = use each size below.")
+szT1     = input.string("small", "PO4 T1", options=["tiny", "small", "normal", "large"], inline="s1", group=grp_lbl)
+szTn     = input.string("tiny", "PO4 T2+", options=["tiny", "small", "normal", "large"], inline="s1", group=grp_lbl)
+szCD     = input.string("small", "CDL / CDS", options=["tiny", "small", "normal", "large"], inline="s2", group=grp_lbl)
+szLS     = input.string("tiny", "LD / SD", options=["tiny", "small", "normal", "large"], inline="s2", group=grp_lbl)
+szP      = input.string("tiny", "P#", options=["tiny", "small", "normal", "large"], inline="s3", group=grp_lbl)
+szR      = input.string("tiny", "R#", options=["tiny", "small", "normal", "large"], inline="s3", group=grp_lbl)
+szInt    = input.string("tiny", "Internal", options=["tiny", "small", "normal", "large"], inline="s4", group=grp_lbl)
+ext      = input.int(15, "Boxes Past Price (Candles)", minval=0, maxval=200, group=grp_sty)
+nbcOn    = input.bool(true, "NBC Bodies", inline="nbc", group=grp_sty, tooltip="Every chart candle that is an NBC (closes inside the previous candle's high / low) gets this BODY color. Its wick stays as it is; the border keeps the up / down color.")
+c_nbc    = input.color(color.white, "", inline="nbc", group=grp_sty)
+c_nbcU   = input.color(#1B9E3E, "Border Up", inline="nbc", group=grp_sty)
+c_nbcD   = input.color(#9C27B0, "Down", inline="nbc", group=grp_sty)
+
+// ─── 6. LAST ENGAGEMENT ZONE (LEZ) ───
+grp_lez  = "6. Last Engagement Zone (Bu LEZ / Be LEZ)"
+lezOn    = input.bool(true, "Last Engagement Zones", group=grp_lez, tooltip="The LAST setup that pushed price into the break. When a CDL / LD (bull) or CDS / SD (bear) prints, the last FVA box of that direction made BEFORE the break candle becomes the LEZ:\n· a flip box: BeBC → NBC → BuBC (Bu LEZ) / BuBC → NBC → BeBC (Be LEZ)\n· or an NBC continuation box: BuBC → NBC → BuBC (Bu LEZ) / BeBC → NBC → BeBC (Be LEZ)\nSame box as the FVA boxes: first NBC body top / bottom to the low / high (a continuation box does not use the first BC's wick). A wick past the low / high with no close moves only that edge.\nDeleted when a candle CLOSES below a Bu LEZ / above a Be LEZ.")
+c_lzBu   = input.color(#00E676, "Bu LEZ", inline="lz1", group=grp_lez)
+c_lzBe   = input.color(#E040FB, "Be LEZ", inline="lz1", group=grp_lez)
+trLez    = input.int(85, "Transparency", minval=0, maxval=97, inline="lz1", group=grp_lez)
+lezMax   = input.int(1, "Max LEZ per Break Type", minval=1, maxval=20, inline="lz2", group=grp_lez, tooltip="How many LEZ stay for EACH break type: CDL · CDS · LD · SD (newest first).\n1 = the LEZ of the last CDL, the last CDS, the last LD and the last SD (4 max).\n2 = 2 of each (8 max) · 3 = 3 of each (12 max)…")
+lezExt   = input.int(10, "Extra Candles Past the Boxes", minval=0, maxval=100, inline="lz2", group=grp_lez, tooltip="The LEZ reaches this many candles further right than the other boxes, so its name never sits on top of theirs.")
+szLez    = input.string("small", "Label", options=["tiny", "small", "normal", "large"], inline="lz3", group=grp_lez)
+lezBrk   = input.bool(false, "Add the Break Name (Be LEZ · CDS)", inline="lz3", group=grp_lez)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+f_sz(string s0) =>
+    string s = szAll == "per item" ? s0 : szAll
+    s == "large" ? size.large : s == "normal" ? size.normal : s == "small" ? size.small : size.tiny
+
+f_tfTxt(string tf) =>
+    string t0 = str.length(tf) == 0 ? timeframe.period : tf
+    switch t0
+        "1"   => "M1"
+        "3"   => "M3"
+        "5"   => "M5"
+        "15"  => "M15"
+        "30"  => "M30"
+        "45"  => "M45"
+        "60"  => "H1"
+        "120" => "H2"
+        "180" => "H3"
+        "240" => "H4"
+        "360" => "H6"
+        "480" => "H8"
+        "720" => "H12"
+        "D"   => "D"
+        "1D"  => "D"
+        "W"   => "W"
+        "1W"  => "W"
+        "M"   => "M"
+        "1M"  => "M"
+        => t0
+
+string STF    = stfIn == "" ? timeframe.period : stfIn
+int    STFS   = timeframe.in_seconds(STF)
+int    CHS    = timeframe.in_seconds(timeframe.period)
+bool   useHTF = STFS > CHS
+bool   tfBad  = STFS < CHS
+int    CHMS   = CHS * 1000
+// the structure timeframe at the END of every name: "BePO4 T1 [H1]" (HTF in LTF only)
+string TFX    = useHTF and tfTag ? " [" + f_tfTxt(STF) + "]" : ""
+string ENG    = engTag ? "f" : ""
+bool   PFXDIR = str.startswith(pfxMode, "Pullback")
+float  HT     = syminfo.mintick / 2
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATA: the last CLOSED structure candle
+// ═══════════════════════════════════════════════════════════════════════════
+[hT1, hO1, hH1, hL1, hC1] = request.security(syminfo.tickerid, STF, [time[1], open[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+
+var int lastHT = na
+bool  newBlk = false
+int   bT = na
+float bO = na
+float bH = na
+float bL = na
+float bC = na
+if barstate.isconfirmed and not tfBad
+    if not useHTF
+        newBlk := true
+        bT := time
+        bO := open
+        bH := high
+        bL := low
+        bC := close
+    // (na(lastHT) first: in Pine a compare with na is never true, so the first HTF candle was never read)
+    else if not na(hT1) and (na(lastHT) or hT1 != lastHT)
+        newBlk := true
+        bT := hT1
+        bO := hO1
+        bH := hH1
+        bL := hL1
+        bC := hC1
+        lastHT := hT1
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════════
+// kind: 0 internal · 1 P# · 2 R# · 3 T# (PO4) · 4 break box (wife of a T#) · 5 internal break (cdl / cds)
+type Bx
+    int    id
+    int    pol
+    int    kind
+    int    tier
+    float  top
+    float  bot
+    int    tL
+    int    mk
+    int    ts
+    int    tB = na
+    string brk = ""
+    string bn = ""
+    int    wife = -1
+    int    born = 0
+    string il = ""
+    int    leg = 0
+    bool   fu = false
+    int    vs = 0       // health: 0 fresh · 1 weak (closed inside) · 2 pale · 6 full again · 3 caution ⚠ · 4 exit ✖ · 5 full exit F✖
+    float  sx = na      // low (high) of the candles that closed inside
+    float  wx = na      // high (low) of the candles that closed back through a break box
+    float  cauPx = na
+    int    cauT = na
+    int    cs = 0       // ⚠ / ✖ / F✖: 0 none · 1 caution · 2 exit · 3 full exit
+    int    exT = na
+    float  exPx = na
+    float  so = na      // open / body of the inside candle with the extreme
+    bool   rev = false  // greyed, then closed through the other side
+    int    tch = 0      // first touch: 0 untouched · 1 touched · 2 clean ▼▲ · 3 failed
+    bool   aw = false   // price LEFT the box since it was born (a retest needs price to come BACK)
+    int    nbcN = 0     // NBCs between the break candle and the first touch
+    int    oppN = 0     // opposite BCs between the break candle and the first touch
+    int    tty = 0      // retest type 1 immediate · 2 after NBC · 3 after an opposite BC
+    int    ctT = na
+    bool   everT = false  // touched at least once
+    bool   ct = false     // had a clean retest
+    float  rfO = na       // the last OPPOSITE BC since the touch (bull box: last BeBC · bear box: last BuBC)
+    float  rfC = na
+    float  rfX = na       // its high (bull box) / low (bear box)
+    bool   fxDone = false // this level already has its F✖
+    float  ctPx = na
+
+var array<Bx>  BX  = array.new<Bx>()
+var array<int> NID = array.from(0)
+
+var int side  = 0
+var int tier  = 0
+var int idT   = -1
+var int idP   = -1
+var int idR   = -1
+var int pend  = 0    // 1 = LD / SD waiting for its T# · 2 = CDL / CDS waiting for its T1
+var int pendW = -1   // the break box that waits for its husband
+var int legN  = 0
+var int legBu = -1
+var int legBe = -1
+var int bi    = -1
+
+// candle sequence since the last BC
+var float pH    = na
+var float pL    = na
+var int   lastBc = 0
+var float fnTop = na
+var float fnBot = na
+var int   fnT   = na
+var float seqLo = na
+var float seqHi = na
+
+// the last BuBC / BeBC (for F✖)
+var float lbuO = na
+var float lbuC = na
+var float lbuL = na
+var float lbeO = na
+var float lbeC = na
+var float lbeH = na
+
+// LEZ: the last setup per side (0 = bull, 1 = bear) and the live LEZ boxes
+var array<float>  lcT  = array.new<float>(2, na)   // candidate top
+var array<float>  lcB  = array.new<float>(2, na)   // candidate bottom
+var array<int>    lcL  = array.new<int>(2, na)     // candidate start time
+var array<float>  lzT  = array.new<float>()
+var array<float>  lzB  = array.new<float>()
+var array<int>    lzL  = array.new<int>()
+var array<int>    lzD  = array.new<int>()
+var array<int>    lzBi = array.new<int>()
+var array<string> lzN  = array.new<string>()
+var array<int>    lzK  = array.new<int>()      // break type: 0 CDL · 1 CDS · 2 LD · 3 SD
+var float nHi = na   // highest high of the NBCs since the last BC
+var float nLo = na   // lowest low of the NBCs since the last BC
+
+// F✖ marks left by T# / R# that were closed through (the box is gone)
+var array<int>    fxT  = array.new<int>()
+var array<float>  fxP  = array.new<float>()
+var array<int>    fxD  = array.new<int>()
+var array<int>    fxK  = array.new<int>()
+
+// ▼▲ retest marks (every clean retest, not only the first)
+var array<int>    trT  = array.new<int>()
+var array<float>  trP  = array.new<float>()
+var array<int>    trD  = array.new<int>()
+var array<int>    trY  = array.new<int>()
+var array<int>    trK  = array.new<int>()
+
+// extreme of the pullback since the P# (the R# sits there)
+var float pbX  = na
+var float pbXO = na
+var float pbXC = na
+var int   pbXT = na
+
+bool evCDL = false
+bool evCDS = false
+bool evLD  = false
+bool evSD  = false
+
+f_idx(int id) =>
+    int r = -1
+    if id >= 0 and BX.size() > 0
+        for i = 0 to BX.size() - 1
+            if BX.get(i).id == id
+                r := i
+                break
+    r
+
+f_get(int id) =>
+    Bx r = na
+    int i = f_idx(id)
+    if i >= 0
+        r := BX.get(i)
+    r
+
+f_new(int pol, int kind, int tr, float top, float bot, int tL, int mk, int ts) =>
+    int id = NID.get(0)
+    NID.set(0, id + 1)
+    BX.push(Bx.new(id, pol, kind, tr, top, bot, tL, mk, ts))
+    id
+
+// the R# already sitting at this extreme
+f_findR(int pol, float px) =>
+    int r = -1
+    if BX.size() > 0
+        for b in BX
+            if b.kind == 2 and b.pol == pol and math.abs((pol == 1 ? b.bot : b.top) - px) < HT
+                r := b.id
+    r
+
+// a box dies with its wife (the break box that created it)
+f_kill(int id0) =>
+    int id = id0
+    int g  = 0
+    while id >= 0 and g < 6
+        int i = f_idx(id)
+        if i < 0
+            break
+        Bx b = BX.get(i)
+        BX.remove(i)
+        id := b.wife
+        g += 1
+    true
+
+// d = -1: F✖S (exit short, under the low) · d = 1: F✖L (exit long, over the high) · one per candle and side
+f_fxAdd(int d, int kd, int t, float px) =>
+    bool dup = false
+    int  n = fxT.size()
+    if n > 0
+        for i = n - 1 to math.max(0, n - 10)
+            if fxT.get(i) == t and fxD.get(i) == d
+                dup := true
+    if not dup
+        fxT.push(t)
+        fxP.push(px)
+        fxD.push(d)
+        fxK.push(kd)
+    while fxT.size() > 50
+        fxT.shift()
+        fxP.shift()
+        fxD.shift()
+        fxK.shift()
+    true
+
+f_ext(Bx b) =>
+    b.pol == 1 ? b.bot : b.top
+
+// live boxes of this side sitting at this extreme
+f_cnt(int pol, float px) =>
+    int n = 0
+    for b in BX
+        if b.kind <= 3 and b.pol == pol and math.abs(f_ext(b) - px) < HT
+            n += 1
+    n
+
+// ONE box for every level sitting at the same extreme: they share the FRESHEST
+// level's open / close and start (a new turn box leads when there is one),
+// each keeps its own name. No pale box on a level that has a name; the same
+// PO4 name twice = keep one (the current T#, else the newest).
+f_sync(int pol, float px, int lead) =>
+    array<Bx> G = array.new<Bx>()
+    for b in BX
+        if b.kind <= 3 and b.pol == pol and math.abs(f_ext(b) - px) < HT
+            G.push(b)
+    if G.size() >= 2
+        Bx e = G.get(0)
+        bool hasRole = false
+        bool byLead = false
+        for b in G
+            if b.id == lead
+                e      := b
+                byLead := true
+        for b in G
+            // no new turn: the FRESHEST level (newest start) gives the body edge
+            if not byLead and (b.tL > e.tL or (b.tL == e.tL and b.id > e.id))
+                e := b
+            if b.kind >= 1
+                hasRole := true
+        // start = the OLDEST level · body edge = the FRESHEST level (or the new turn)
+        int oldL = e.tL
+        for b in G
+            oldL := math.min(oldL, b.tL)
+        // F✖ tracking is KEPT through a merge: the touch, the last opposite BC since it, and the done flag
+        bool  keepT = false
+        bool  keepD = false
+        bool  kTch  = false
+        int   kTty  = 0
+        int   kMk   = bi
+        for b in G
+            if b.tch == 1 and b.mk != bi
+                kTch := true
+                kTty := b.tty
+                kMk  := math.min(kMk, b.mk)
+        float kO = na
+        float kC = na
+        float kX = na
+        for b in G
+            keepT := keepT or b.everT
+            keepD := keepD or b.fxDone
+            if not na(b.rfX)
+                kO := b.rfO
+                kC := b.rfC
+                kX := b.rfX
+        for b in G
+            if pol == 1
+                b.top := e.top
+            else
+                b.bot := e.bot
+            b.tL := oldL
+            // reset to a NEW turn: the level is born again on this candle (touch / retest / health start over)
+            if byLead
+                // touched on an EARLIER candle: the touch is kept, so the first BC after it still gets its ▼▲
+                b.mk   := kTch ? kMk : bi
+                b.tch  := kTch ? 1 : 0
+                b.aw   := kTch
+                b.tty  := kTch ? kTty : 0
+                b.nbcN := 0
+                b.oppN := 0
+                b.vs   := 0
+                b.sx   := na
+                b.cs := 0
+                b.cauPx := na
+                b.cauT := na
+                b.exT := na
+                b.exPx := na
+                b.wx := na
+                b.everT  := keepT
+                b.fxDone := keepD
+                b.rfO    := kO
+                b.rfC    := kC
+                b.rfX    := kX
+        array<int> kill = array.new<int>()
+        int lastInt = -1
+        for i = 0 to G.size() - 1
+            Bx a = G.get(i)
+            if a.kind == 0
+                if hasRole
+                    kill.push(a.id)
+                else if lastInt >= 0
+                    kill.push(math.min(lastInt, a.id))
+                    lastInt := math.max(lastInt, a.id)
+                    Bx sv = f_get(lastInt)
+                    if not na(sv)
+                        sv.fu := true
+                else
+                    lastInt := a.id
+            if a.kind == 3 and i < G.size() - 1
+                for j = i + 1 to G.size() - 1
+                    Bx b = G.get(j)
+                    if b.kind == 3 and a.tier == b.tier
+                        int kid = a.id == idT ? b.id : b.id == idT ? a.id : math.min(a.id, b.id)
+                        kill.push(kid)
+                        if kid == a.id
+                            b.fu := true
+                        else
+                            a.fu := true
+        for id in kill
+            f_kill(id)
+    true
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENGINE — one closed structure candle
+// ═══════════════════════════════════════════════════════════════════════════
+if newBlk
+    bi += 1
+    float o = bO
+    float h = bH
+    float l = bL
+    float c = bC
+    int   t = bT
+    bool isBu = not na(pH) and c > pH
+    bool isBe = not na(pL) and c < pL
+    bool isN  = not na(pH) and not isBu and not isBe
+
+    // ── marks clean-up (fewer labels): a close past the price where a mark sits deletes it
+    //    ▼ / F✖L sit over the high → a close ABOVE it · ▲ / F✖S sit under the low → a close BELOW it
+    if trT.size() > 0
+        for i = trT.size() - 1 to 0
+            float mp = trP.get(i)
+            if trD.get(i) == -1 ? c > mp : c < mp
+                trT.remove(i)
+                trP.remove(i)
+                trD.remove(i)
+                trY.remove(i)
+                trK.remove(i)
+    if fxT.size() > 0
+        for i = fxT.size() - 1 to 0
+            float mp = fxP.get(i)
+            if fxD.get(i) == 1 ? c > mp : c < mp
+                fxT.remove(i)
+                fxP.remove(i)
+                fxD.remove(i)
+                fxK.remove(i)
+
+    // ── 0. new high / low with no close past a box: the box moves there
+    //       (body edge = that candle's open / close when it is tighter). Boxes that end
+    //       at the same new high / low become ONE box with both names ──
+    bool mvH = false
+    bool mvL = false
+    if BX.size() > 0
+        for b in BX
+            if b.kind == 4 or b.kind == 5
+                continue
+            // only the high / low moves; the body edge waits for the next opposite BC
+            if b.pol == -1 and h > b.top + HT and c <= b.top
+                b.top := h
+                mvH   := true
+            else if b.pol == 1 and l < b.bot - HT and c >= b.bot
+                b.bot := l
+                mvL   := true
+        if mvH
+            f_sync(-1, h, -1)
+        if mvL
+            f_sync(1, l, -1)
+
+    // pullback extreme since the P# (kept while an LD / SD waits for its T#)
+    if side != 0 and (idP >= 0 or pend == 1)
+        if na(pbX) or (side == -1 ? h > pbX : l < pbX)
+            pbX  := side == -1 ? h : l
+            pbXO := o
+            pbXC := c
+            pbXT := t
+
+    // ── 1. turn box (only when the body closes flip side) ──
+    int newId = -1
+    float tzTop = na
+    float tzBot = na
+    int   tzL   = na
+    if isBu and lastBc == -1
+        float lo = math.min(nz(seqLo, l), l)
+        float tp = na(fnTop) ? o : fnTop
+        int   tl = na(fnT) ? t : fnT
+        if tp <= lo
+            tp := math.max(o, c)
+            tl := t
+        newId := f_new(1, 0, tier, tp, lo, tl, bi, side)
+        tzTop := tp
+        tzBot := lo
+        tzL   := tl
+    else if isBe and lastBc == 1
+        float hi = math.max(nz(seqHi, h), h)
+        float bt = na(fnBot) ? o : fnBot
+        int   tl = na(fnT) ? t : fnT
+        if bt >= hi
+            bt := math.min(o, c)
+            tl := t
+        newId := f_new(-1, 0, tier, hi, bt, tl, bi, side)
+        tzTop := hi
+        tzBot := bt
+        tzL   := tl
+
+    // ── 2. its role (a box that already has a role keeps it) ──
+    if newId >= 0
+        Bx nb = f_get(newId)
+        if nb.kind == 0
+            // a box WITH the trend after the P# (or for an LD / SD waiting for its T#):
+            // it sits at the most extreme point of the pullback. If that extreme came BEFORE
+            // this BC-on-BC / turn, the box goes to that candle (its body to its high / low).
+            int cand = newId
+            bool resum = nb.pol == side and side != 0 and ((pend == 0 and idP >= 0) or pend == 1)
+            if resum and not na(pbX) and (side == -1 ? pbX > nb.top + HT : pbX < nb.bot - HT)
+                int rid = f_findR(side, pbX)
+                if rid < 0
+                    float eb = math.min(pbXO, pbXC)
+                    float et = math.max(pbXO, pbXC)
+                    if side == -1
+                        rid := f_new(-1, 0, tier, pbX, eb < pbX - HT ? eb : pbX - syminfo.mintick, pbXT, bi, side)
+                    else
+                        rid := f_new(1, 0, tier, et > pbX + HT ? et : pbX + syminfo.mintick, pbX, pbXT, bi, side)
+                nb.il := "r"
+                cand  := rid
+            Bx cb = f_get(cand)
+            Bx oR0 = f_get(idR)
+            bool moreR = na(oR0) ? true : cb.id == oR0.id ? false : side == -1 ? cb.top > oR0.top + HT : cb.bot < oR0.bot - HT
+            if pend == 1 and resum
+                // the T# that waited for an opposite BC
+                cb.kind := 3
+                cb.tier := tier
+                cb.leg  := legN
+                cb.wife := pendW
+                idT     := cb.id
+                pend    := 0
+                pendW   := -1
+                pbX     := na
+            else if pend == 2 and nb.pol == side
+                // the T1 that waited for an opposite BC
+                nb.kind := 3
+                nb.tier := tier
+                nb.leg  := legN
+                nb.wife := pendW
+                idT     := newId
+                pend    := 0
+                pendW   := -1
+            else if side == 0
+                side    := nb.pol
+                tier    := 1
+                legN    += 1
+                nb.kind := 3
+                nb.tier := 1
+                nb.leg  := legN
+                idT     := newId
+                if side == 1
+                    legBu := legN
+                else
+                    legBe := legN
+            else if pend == 0 and nb.pol == -side
+                if idP < 0
+                    nb.kind := 1
+                    nb.tier := tier
+                    idP     := newId
+                    pbX     := side == -1 ? h : l
+                    pbXO    := o
+                    pbXC    := c
+                    pbXT    := t
+                else
+                    nb.il := "p"
+            else if resum and cb.kind == 0
+                if moreR
+                    if not na(oR0)
+                        oR0.kind := 0
+                        oR0.il   := "r"
+                    cb.kind := 2
+                    cb.tier := tier
+                    idR     := cb.id
+                else
+                    cb.il := "r"
+                    nb.il := "r"
+            else
+                nb.il := nb.pol == -side ? "p" : "r"
+
+            // a box at the same extreme as other live boxes = ONE box (names joined)
+            // (the level resets to THIS turn: its extreme + its first NBC / BC open, its start)
+            for cid in array.from(newId, cb.id)
+                Bx q = f_get(cid)
+                if not na(q)
+                    f_sync(q.pol, f_ext(q), q.mk == bi ? q.id : -1)
+
+    // ── 3. official breaks: CDL / CDS (close past the last T#) · LD / SD (close past the P#) ──
+    bool official = false
+    Bx curT = f_get(idT)
+    if side != 0 and not na(curT)
+        bool revBrk = side == -1 ? c > curT.top : c < curT.bot
+        if revBrk
+            int ns = -side
+            // the SAME T# box becomes the CDL / CDS box and stops at this candle
+            f_kill(curT.wife)
+            curT.wife := -1
+            curT.born := 3
+            curT.kind := 4
+            curT.tB   := t
+            curT.brk  := ns == 1 ? "CDL" : "CDS"
+            curT.bn   := ""
+            curT.rev  := curT.vs == 1
+            curT.vs   := 0
+            curT.sx   := na
+            curT.tch  := 0
+            curT.nbcN := 0
+            curT.oppN := 0
+            curT.cs := 0
+            curT.cauPx := na
+            curT.cauT := na
+            curT.exT := na
+            curT.exPx := na
+            curT.wx := na
+            curT.rfX := na
+            curT.fxDone := false
+            if pend == 1
+                f_kill(pendW)
+            pend  := 0
+            pendW := -1
+            Bx oR = f_get(idR)
+            if not na(oR)
+                oR.kind := 0
+                oR.il   := "r"
+            legN += 1
+            if ns == 1
+                legBu := legN
+            else
+                legBe := legN
+            Bx bP = f_get(idP)
+            if not na(bP)
+                bP.kind := 3
+                bP.tier := 1
+                bP.leg  := legN
+                bP.wife := curT.id
+                idT     := bP.id
+            else
+                idT   := -1
+                pend  := 2
+                pendW := curT.id
+            pbX      := na
+            evCDL    := ns == 1
+            evCDS    := ns == -1
+            side     := ns
+            tier     := 1
+            idP      := -1
+            idR      := -1
+            official := true
+        else if pend == 0
+            Bx curP = f_get(idP)
+            if not na(curP)
+                bool contBrk = side == -1 ? c < curP.bot : c > curP.top
+                if contBrk
+                    curP.born := 1
+                    curP.kind := 4
+                    curP.tB   := t
+                    curP.brk  := side == 1 ? "LD" : "SD"
+                    curP.bn   := str.tostring(tier)
+                    curP.rev  := curP.vs == 1
+                    curP.vs   := 0
+                    curP.sx   := na
+                    curP.tch  := 0
+                    curP.nbcN := 0
+                    curP.oppN := 0
+                    curP.cs := 0
+                    curP.cauPx := na
+                    curP.cauT := na
+                    curP.exT := na
+                    curP.exPx := na
+                    curP.wx := na
+                    curP.rfX := na
+                    curP.fxDone := false
+                    tier      += 1
+                    Bx bR = f_get(idR)
+                    if not na(bR)
+                        bR.kind := 3
+                        bR.tier := tier
+                        bR.leg  := legN
+                        bR.wife := curP.id
+                        idT     := bR.id
+                    else
+                        pend  := 1
+                        pendW := curP.id
+                    if pend == 0
+                        pbX := na
+                    evLD     := side == 1
+                    evSD     := side == -1
+                    idP      := -1
+                    idR      := -1
+                    official := true
+
+    if official
+        Bx nT0 = f_get(idT)
+        if not na(nT0)
+            f_sync(nT0.pol, f_ext(nT0), -1)
+
+    // ── 4. a range ended: clear its internal boxes ──
+    if official and purgeInt and BX.size() > 0
+        array<int> kill = array.new<int>()
+        for b in BX
+            if b.kind == 0 or b.kind == 5
+                kill.push(b.id)
+        for id in kill
+            f_kill(id)
+
+    // ── 5. closes through the other boxes ──
+    if BX.size() > 0
+        array<int> kill = array.new<int>()
+        for b in BX
+            if b.kind == 4 or b.kind == 5 or b.mk == bi
+                continue
+            bool viol = b.pol == 1 ? c < b.bot : c > b.top
+            if viol
+                if b.kind == 3
+                    // an older PO4 closed through: deleted with its break box
+                    if b.id != idT
+                        kill.push(b.id)
+                else if b.kind == 2 or b.kind == 0
+                    if b.id == idR
+                        idR := -1
+                    if showIntB
+                        b.born := b.kind
+                        b.kind := 5
+                        b.tB   := t
+                        b.brk  := b.pol == -1 ? "cdl" : "cds"
+                        b.vs   := 0
+                        b.sx   := na
+                        b.tch  := 0
+                        b.nbcN := 0
+                        b.oppN := 0
+                        b.cs := 0
+                        b.cauPx := na
+                        b.cauT := na
+                        b.exT := na
+                        b.exPx := na
+                        b.wx := na
+                        b.rfX := na
+                        b.fxDone := false
+                    else
+                        kill.push(b.id)
+        for id in kill
+            f_kill(id)
+        // husband & wife: a CDL / CDS / LD / SD box lives only while its PO4 lives
+        if BX.size() > 0 and (official or kill.size() > 0)
+            array<int> orphan = array.new<int>()
+            for w in BX
+                if w.kind == 4 and w.id != pendW
+                    bool hasH = false
+                    for hb in BX
+                        if hb.kind == 3 and hb.wife == w.id
+                            hasH := true
+                            break
+                    if not hasH
+                        orphan.push(w.id)
+            for id in orphan
+                int oi = f_idx(id)
+                if oi >= 0
+                    BX.remove(oi)
+
+    // ── 6. box health + first touch (every box) ──
+    if BX.size() > 0
+        bool useOpen = fullRef == "Open / body"
+        for b in BX
+            // the candle that made the box never counts · break boxes (CDL / CDS / LD / SD) start their
+            // health AFTER their break candle and give no ▼▲ retests (they keep their colors and ⚠ ✖ F✖)
+            bool isBrk = b.kind >= 4
+            if (not isBrk and b.mk == bi) or (isBrk and not na(b.tB) and b.tB >= t)
+                continue
+            int  gd    = b.kind >= 4 ? (b.brk == "CDL" or b.brk == "LD" or b.brk == "cdl" ? 1 : -1) : b.pol
+            bool ins   = c <= b.top and c >= b.bot
+            bool good  = gd == 1 ? c > b.top : c < b.bot
+            bool wrong = b.kind >= 4 and (gd == 1 ? c < b.bot : c > b.top)
+            bool oppBC = gd == 1 ? isBe : isBu
+            bool dirBC = gd == 1 ? isBu : isBe
+            if not isBrk
+                // retest: a touch, then the first body close WITH the box → ▼ / ▲ (a close inside does not cancel it)
+                // (re-armed after each retest once a candle no longer touches the box)
+                bool touchNow = gd == -1 ? h >= b.bot : l <= b.top
+                if (b.tch == 2 or b.tch == 3) and not touchNow
+                    b.tch  := 0
+                    b.nbcN := 0
+                    b.oppN := 0
+                // no retest while price never left the box (candles still trading in it since it was born)
+                if b.tch == 0
+                    if touchNow and b.aw
+                        b.tch   := 1
+                        b.everT := true
+                        b.rfX   := na
+                        b.tty   := b.oppN > 0 ? 3 : b.nbcN > 0 ? 2 : 1
+                    else if not touchNow
+                        b.aw := true
+                        // what happened between the break candle (or the last retest) and the touch
+                        if isN
+                            b.nbcN += 1
+                        if oppBC
+                            b.oppN += 1
+                // arrow logic is separate from the colors: touch → the FIRST BC with the box = ▼ / ▲
+                if b.tch == 1
+                    if dirBC
+                        b.tch  := 2
+                        b.ct   := true
+                        b.ctT  := t
+                        b.ctPx := gd == -1 ? h : l
+                        bool dupT = false
+                        if trT.size() > 0
+                            for k = trT.size() - 1 to math.max(0, trT.size() - 10)
+                                if trT.get(k) == t and trD.get(k) == gd
+                                    dupT := true
+                        if not dupT
+                            trT.push(t)
+                            trP.push(b.ctPx)
+                            trD.push(gd)
+                            trY.push(b.tty)
+                            trK.push(b.kind == 4 ? b.born : b.kind == 5 ? (b.born == 2 ? 2 : 0) : b.kind)
+                        while trT.size() > 200
+                            trT.shift()
+                            trP.shift()
+                            trD.shift()
+                            trY.shift()
+                            trK.shift()
+            // colors: ALWAYS updated (a mark never freezes the color) · close inside = grey · back out = pale · past the inside candle = full again
+            if wrong
+                b.rev := b.rev or b.vs == 1
+                b.vs  := 3
+            else if ins and not isBrk
+                bool newSer = (b.vs != 1 and b.vs != 2) or na(b.sx)
+                if newSer or (gd == -1 ? l < b.sx : h > b.sx)
+                    b.sx := gd == -1 ? l : h
+                    b.so := gd == -1 ? math.min(o, c) : math.max(o, c)
+                b.vs := 1
+            else if good and not isBrk and (b.vs == 1 or b.vs == 2 or b.vs == 3)
+                float ref = useOpen ? b.so : b.sx
+                b.vs := not na(ref) and (gd == -1 ? c < ref : c > ref) ? 6 : 2
+            // ⚠ caution (close inside) · ✖ exit (then an opposite BC, not on T# / R#) · F✖ = the touch rule below
+            // T# / R# / P# / internal: ⚠ ONLY on a close INSIDE the box
+            // break boxes (CDS / CDL / LD / SD): ⚠ on a close inside or a close back through the box
+            bool bad = ins or wrong
+            int  pcs = b.cs
+            // break box (CDS / SD: close back BELOW it · CDL / LD: close back ABOVE it): the reversal failed →
+            // its ⚠ / ✖ / F✖ are removed and it gets its own color back (it can get new ones later)
+            if isBrk and pcs >= 1 and good
+                b.cs    := 0
+                b.vs    := 0
+                b.cauPx := na
+                b.cauT  := na
+                b.exT   := na
+                b.exPx  := na
+                b.wx    := na
+                pcs     := 0
+                bad     := false
+            if pcs == 3
+                // F✖ stays: nothing more to mark on this box · its ⚠ / F✖ labels go once a close is past their candle
+                bad := false
+                if not na(b.cauT) and b.cauT < t and (gd == -1 ? c < b.cauPx : c > b.cauPx)
+                    b.cauT := na
+                if not na(b.exT) and b.exT < t and (gd == -1 ? c < b.exPx : c > b.exPx)
+                    b.exT := na
+            else if pcs >= 1 and not bad and (gd == -1 ? c < b.cauPx : c > b.cauPx)
+                // a close past the caution candle while the box lives: ⚠ / ✖ deleted
+                b.cs    := 0
+                b.cauPx := na
+                b.cauT  := na
+                b.exT   := na
+                b.exPx  := na
+                b.wx    := na
+                if isBrk
+                    b.vs := 0
+            else
+                // the ✖ label goes once a close is past its candle (low for S / high for L)
+                if b.cs == 2 and not na(b.exT) and b.exT < t and (gd == -1 ? c < b.exPx : c > b.exPx)
+                    b.exT := na
+                // ✖ exit: an opposite BC after ⚠ (NOT on T# / R#: those are where you trade)
+                // break boxes: that opposite BC closing past the highest high (CDS / SD) / lowest low
+                // (CDL / LD) of the ⚠ candles = F✖ full exit, else ✖
+                if pcs >= 1 and oppBC and b.kind != 3 and b.kind != 2
+                    b.cs   := isBrk and (gd == -1 ? c > b.wx : c < b.wx) ? 3 : 2
+                    b.exT  := t
+                    b.exPx := gd == -1 ? l : h
+                if bad and b.cs != 3
+                    if b.cs == 0
+                        b.cs    := 1
+                        b.wx    := gd == -1 ? h : l
+                        b.cauPx := gd == -1 ? l : h
+                        b.cauT  := t
+                    else
+                        b.wx := gd == -1 ? math.max(b.wx, h) : math.min(b.wx, l)
+                        if str.startswith(cauMode, "Last")
+                            b.cauPx := gd == -1 ? l : h
+                            b.cauT  := t
+
+    // ── F✖ full exit (one per level): break → TOUCH → a BC WITH the box closes past the last OPPOSITE BC
+    //    since the touch (bull box: a BuBC past the last BeBC's high / open / body = F✖S, exit short, under
+    //    its low · bear box: a BeBC past the last BuBC's low / open / body = F✖L, exit long, over its high).
+    //    Not on T# / R#: those only get ⚠ while alive, and F✖ when closed through.
+    if BX.size() > 0
+        for b in BX
+            if b.mk == bi or b.kind >= 4 or not b.everT or b.fxDone or b.kind == 3 or b.kind == 2
+                continue
+            int  gd    = b.kind >= 4 ? (b.brk == "CDL" or b.brk == "LD" or b.brk == "cdl" ? 1 : -1) : b.pol
+            bool dirBC = gd == 1 ? isBu : isBe
+            bool oppBC = gd == 1 ? isBe : isBu
+            bool tNow  = gd == -1 ? h >= b.bot : l <= b.top
+            // a break candle (it made a new box) can not be the F✖ candle, unless it also touches THIS box
+            bool brkC  = newId >= 0 and not tNow
+            if dirBC and not na(b.rfX) and not brkC
+                float ref = fxRef == "Low / high" ? b.rfX : fxRef == "Open" ? b.rfO : gd == 1 ? math.max(b.rfO, b.rfC) : math.min(b.rfO, b.rfC)
+                if gd == 1 ? c > ref : c < ref
+                    int kd = b.kind == 4 ? b.born : b.kind == 5 ? (b.born == 2 ? 2 : 0) : b.kind
+                    f_fxAdd(-gd, kd, t, gd == 1 ? l : h)
+                    b.fxDone := true
+            if oppBC
+                b.rfO := o
+                b.rfC := c
+                b.rfX := gd == 1 ? h : l
+
+    // ── internal boxes: per side keep the most extreme one and the newest one (4 max) ──
+    for pp = 0 to 1
+        int   pol    = pp == 0 ? -1 : 1
+        int   newest = -1
+        int   extId  = -1
+        float ex     = na
+        for b in BX
+            if b.kind == 0 and b.pol == pol
+                newest := math.max(newest, b.id)
+                float e2 = f_ext(b)
+                if na(ex) or (pol == -1 ? e2 > ex : e2 < ex)
+                    ex    := e2
+                    extId := b.id
+        array<int> kill = array.new<int>()
+        for b in BX
+            if b.kind == 0 and b.pol == pol and b.id != newest and b.id != extId
+                kill.push(b.id)
+        for id in kill
+            f_kill(id)
+
+    // ── 7. memory guard ──
+    int g = 0
+    while BX.size() > 120 and g < 20
+        g += 1
+        Bx cT = f_get(idT)
+        int keepW = na(cT) ? -1 : cT.wife
+        int j = 0
+        while j < BX.size()
+            int bid = BX.get(j).id
+            if bid != idT and bid != idP and bid != idR and bid != keepW and bid != pendW
+                break
+            j += 1
+        if j < BX.size()
+            f_kill(BX.get(j).id)
+
+    // ── LEZ: the last engagement zone before a CDL / CDS / LD / SD ──
+    // a) live LEZ: a close past the low (Bu) / high (Be) deletes it · a wick past it with no close moves that edge
+    if lzT.size() > 0
+        for i = lzT.size() - 1 to 0
+            if lzBi.get(i) < bi
+                int d = lzD.get(i)
+                if d == 1 ? c < lzB.get(i) : c > lzT.get(i)
+                    lzT.remove(i)
+                    lzB.remove(i)
+                    lzL.remove(i)
+                    lzD.remove(i)
+                    lzBi.remove(i)
+                    lzN.remove(i)
+                    lzK.remove(i)
+                else if d == 1 and l < lzB.get(i)
+                    lzB.set(i, l)
+                else if d == -1 and h > lzT.get(i)
+                    lzT.set(i, h)
+    // b) the waiting setups (made before this candle): same rules
+    for k = 0 to 1
+        if not na(lcT.get(k))
+            if k == 0 ? c < lcB.get(k) : c > lcT.get(k)
+                lcT.set(k, na)
+                lcB.set(k, na)
+                lcL.set(k, na)
+            else if k == 0 and l < lcB.get(k)
+                lcB.set(k, l)
+            else if k == 1 and h > lcT.get(k)
+                lcT.set(k, h)
+    // c) a break: the last setup of that direction made BEFORE this candle becomes the LEZ
+    if evCDL or evCDS or evLD or evSD
+        int d = evCDL or evLD ? 1 : -1
+        int k = d == 1 ? 0 : 1
+        if not na(lcT.get(k))
+            lzT.push(lcT.get(k))
+            lzB.push(lcB.get(k))
+            lzL.push(lcL.get(k))
+            lzD.push(d)
+            lzBi.push(bi)
+            lzN.push(evCDL ? "CDL" : evCDS ? "CDS" : evLD ? "LD" + str.tostring(tier - 1) : "SD" + str.tostring(tier - 1))
+            int ty = evCDL ? 0 : evCDS ? 1 : evLD ? 2 : 3
+            lzK.push(ty)
+            lcT.set(k, na)
+            lcB.set(k, na)
+            lcL.set(k, na)
+            // keep the newest per break type (CDL · CDS · LD · SD)
+            int n = 0
+            for i = lzK.size() - 1 to 0
+                if lzK.get(i) == ty
+                    n += 1
+                    if n > lezMax
+                        lzT.remove(i)
+                        lzB.remove(i)
+                        lzL.remove(i)
+                        lzD.remove(i)
+                        lzBi.remove(i)
+                        lzN.remove(i)
+                        lzK.remove(i)
+    // d) the setup THIS candle makes (it waits for the next break)
+    //    flip box = the turn box · NBC continuation = first NBC body to the NBCs' + this BC's extreme
+    if not na(tzTop)
+        int k = isBu ? 0 : 1
+        lcT.set(k, tzTop)
+        lcB.set(k, tzBot)
+        lcL.set(k, tzL)
+    else if isBu and lastBc == 1 and not na(fnT) and not na(nLo)
+        float lo2 = math.min(nLo, l)
+        if fnTop > lo2
+            lcT.set(0, fnTop)
+            lcB.set(0, lo2)
+            lcL.set(0, fnT)
+    else if isBe and lastBc == -1 and not na(fnT) and not na(nHi)
+        float hi2 = math.max(nHi, h)
+        if fnBot < hi2
+            lcT.set(1, hi2)
+            lcB.set(1, fnBot)
+            lcL.set(1, fnT)
+
+    // ── 8. candle sequence for the next turn box ──
+    if isBu
+        lbuO := o
+        lbuC := c
+        lbuL := l
+    if isBe
+        lbeO := o
+        lbeC := c
+        lbeH := h
+    if isBu or isBe
+        lastBc := isBu ? 1 : -1
+        fnTop  := na
+        fnBot  := na
+        fnT    := na
+        seqLo  := l
+        seqHi  := h
+        nHi    := na
+        nLo    := na
+    else if isN
+        nHi := math.max(nz(nHi, h), h)
+        nLo := math.min(nz(nLo, l), l)
+        if na(fnT)
+            fnTop := math.max(o, c)
+            fnBot := math.min(o, c)
+            fnT   := t
+        seqLo := math.min(nz(seqLo, l), l)
+        seqHi := math.max(nz(seqHi, h), h)
+    pH := h
+    pL := l
+
+    if evCDL or evCDS or evLD or evSD
+        string ev = evCDL ? "CDL" : evCDS ? "CDS" : evLD ? "LD" + str.tostring(tier - 1) : "SD" + str.tostring(tier - 1)
+        alert("MMM PRO f · " + ev + ENG + " on " + syminfo.ticker + (pend == 0 ? " · new " + (side == 1 ? "BuPO4" : "BePO4") + " T" + str.tostring(tier) : " · the T# waits for the next opposite BC") + TFX, alert.freq_once_per_bar_close)
+
+alertcondition(evCDL, "CDL (bullish flip)", "MMM PRO f: CDL on {{ticker}}")
+alertcondition(evCDS, "CDS (bearish flip)", "MMM PRO f: CDS on {{ticker}}")
+alertcondition(evLD, "LD (bullish continuation)", "MMM PRO f: LD on {{ticker}}")
+alertcondition(evSD, "SD (bearish continuation)", "MMM PRO f: SD on {{ticker}}")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DRAW — redrawn from the state on the last bar (plain boxes, no border, name inside)
+// ═══════════════════════════════════════════════════════════════════════════
+var array<box> DB = array.new<box>()
+
+// marks queue: everything on the same candle and side becomes ONE label, one row per mark
+var array<int>    qT = array.new<int>()
+var array<float>  qP = array.new<float>()
+var array<bool>   qU = array.new<bool>()
+var array<string> qX = array.new<string>()
+var array<color>  qC = array.new<color>()
+var array<int>    qR = array.new<int>()
+var array<int>    qS = array.new<int>()
+
+f_srk(string s0) =>
+    string s = szAll == "per item" ? s0 : szAll
+    s == "large" ? 3 : s == "normal" ? 2 : s == "small" ? 1 : 0
+
+// up = over the high (long marks / ▼) · pr = row order and color priority · sr = size rank
+f_q(int t, float px, bool up, string tx, color col, int pr, int sr) =>
+    qT.push(t)
+    qP.push(px)
+    qU.push(up)
+    qX.push(tx)
+    qC.push(col)
+    qR.push(pr)
+    qS.push(sr)
+    true
+var label warnL = na
+
+f_pfx(Bx b) =>
+    PFXDIR ? (b.pol == 1 ? "Bu" : "Be") : (b.ts == 1 ? "Bu" : "Be")
+
+f_nm0(Bx b) =>
+    string s = ""
+    if b.kind == 3
+        s := (b.pol == 1 ? "BuPO4" : "BePO4") + " T" + str.tostring(b.tier)
+    else if b.kind == 1
+        s := f_pfx(b) + "P" + str.tostring(b.tier)
+    else if b.kind == 2
+        s := f_pfx(b) + "R" + str.tostring(b.tier)
+    else if b.kind == 0
+        s := str.lower(f_pfx(b)) + (b.il == "" ? "r" : b.il)
+    else
+        s := b.brk + ENG + b.bn
+    s
+
+f_name(Bx b) =>
+    f_nm0(b) + (b.fu ? "*" : "")
+
+// stack priority: current T# > older T# > R# > P# > internal
+f_pr(Bx b) =>
+    b.id == idT ? 6 : b.kind == 3 ? 5 : b.kind == 2 ? 4 : b.kind == 1 ? 3 : 1
+
+f_draw(Bx b, color col, int tr, int x2, bool center, string sz, string mk) =>
+    DB.push(box.new(b.tL, b.top, x2, b.bot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(col, tr), text=(mk == "" ? "" : mk + " ") + f_name(b) + TFX, text_color=c_txt, text_size=f_sz(sz), text_halign=center ? text.align_center : text.align_right, text_valign=text.align_center))
+    true
+
+f_brkCol(Bx w) =>
+    w.born == 3 ? (w.brk == "CDL" ? c_cdl : c_cds) : w.brk == "LD" ? c_ld : c_sd
+
+f_oppCol(Bx w) =>
+    w.brk == "CDL" ? c_cds : w.brk == "CDS" ? c_cdl : w.brk == "LD" ? c_sd : c_ld
+
+f_pale(int tr) =>
+    tr + math.round((100 - tr) / 2)
+
+// health → [color, transparency]
+// colors change ONLY on T# and R# (CDS / CDL / LD / SD / P# / internal keep their color):
+// fresh = deeper · ANY close inside (even a BC) = grey · back out = pale · past the inside candle = full
+f_hc(int vs, int cs, color base, color opp, int tr, bool live) =>
+    bool  on  = healthOn and live
+    color col = on and vs == 1 ? c_grey : base
+    int   t2  = not on ? tr : vs == 0 ? math.max(0, tr - deep) : vs == 2 ? f_pale(tr) : tr
+    [col, t2]
+
+// break boxes (CDS / CDL / LD / SD): no grey on a close inside ·
+// a close back through = pale OPPOSITE color + ⚠ · then an opposite BC = ✖ / F✖ = OPPOSITE color ·
+// a close past the ⚠ candle = its own color again
+f_hcBrk(int vs, int cs, color base, color opp, int tr) =>
+    color col = not healthOn ? base : cs >= 2 ? opp : cs == 1 and vs == 3 ? opp : base
+    int   t2  = not healthOn ? tr : cs == 1 and vs == 3 ? f_pale(tr) : tr
+    [col, t2]
+
+// view filter (none ticked = everything)
+f_rtOn(int ty) =>
+    ty == 1 ? rt1 : ty == 2 ? rt2 : ty == 3 ? rt3 : false
+
+f_view(Bx b) =>
+    bool anyV = vClean or vPale or vRec or vRev
+    not anyV or (vClean and (not b.everT or (b.ct and f_rtOn(b.tty)))) or (vPale and b.vs == 2) or (vRec and b.vs == 6) or (vRev and b.rev)
+
+// marks (▼▲ ⚠ ✖ F✖) on / off per box type
+f_mkOn(Bx b) =>
+    int r = b.kind == 4 ? b.born : b.kind == 5 ? (b.born == 2 ? 2 : 0) : b.kind
+    r == 3 ? mkT : r == 1 ? mkP : r == 2 ? mkR : mkI
+
+// ⚠ / ✖ / F✖ at the end of the box name
+// with the side we exit / watch: S = short box (BeP / BeR / BePO4 / CDS / SD) · L = long box (Bu… / CDL / LD)
+f_csTx(Bx b) =>
+    int    gd = b.kind >= 4 ? (b.brk == "CDL" or b.brk == "LD" or b.brk == "cdl" ? 1 : -1) : b.pol
+    string tg = gd == 1 ? "L" : "S"
+    not f_mkOn(b) ? "" : b.cs == 1 ? " ⚠" + tg : b.cs == 2 ? " ✖" + tg : b.cs == 3 ? " F✖" + tg : ""
+
+// ⚠L/S · ✖L/S · F✖L/S on their candles (S = short box: under the low · L = long box: over the high)
+f_sym(Bx b, int gd, string sz) =>
+    if f_mkOn(b) and b.cs >= 1
+        string tg = gd == 1 ? "L" : "S"
+        string st = gd == 1 ? label.style_label_down : label.style_label_up
+        if not na(b.cauT)
+            f_q(b.cauT, b.cauPx, gd == 1, "⚠" + tg, c_cau, 2, f_srk(sz))
+        if b.cs >= 2 and not na(b.exT)
+            f_q(b.exT, b.exPx, gd == 1, (b.cs == 3 ? "F✖" : "✖") + tg, b.cs == 3 ? c_fx : c_cau, 3, f_srk(sz))
+    true
+
+// ▼ / ▲ on the BC of a clean first touch: tiny = immediate · small = after NBC · normal = after an opposite BC
+f_tri(Bx b, int gd) =>
+    if b.tch == 2 and not na(b.ctT) and f_rtOn(b.tty) and f_mkOn(b)
+        label.new(b.ctT, b.ctPx, gd == -1 ? "▼" : "▲", xloc=xloc.bar_time, style=gd == -1 ? label.style_label_down : label.style_label_up, color=color(na), textcolor=gd == -1 ? c_triS : c_triL, size=b.tty == 1 ? size.tiny : b.tty == 2 ? size.small : size.normal)
+    true
+
+// a break box with its health color, ✖ on a full exit, ⚠ under / over the caution candle
+f_drawBrk(Bx w, string sz) =>
+    if f_view(w)
+        bool  intB = w.kind == 5
+        color base = intB ? (w.pol == 1 ? c_iBu : c_iBe) : f_brkCol(w)
+        color opp  = intB ? (w.pol == 1 ? c_iBe : c_iBu) : f_oppCol(w)
+        [hc, ht] = f_hcBrk(w.vs, w.cs, base, opp, intB ? math.max(trInt, trBrk) : trBrk)
+        DB.push(box.new(w.tL, w.top, w.tB, w.bot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(hc, ht), text=f_name(w) + f_csTx(w) + TFX, text_color=c_txt, text_size=f_sz(sz), text_halign=text.align_center, text_valign=text.align_center))
+        int wg = w.brk == "CDL" or w.brk == "LD" or w.brk == "cdl" ? 1 : -1
+        f_sym(w, wg, sz)
+    true
+
+if barstate.islast
+    // delete EVERY box of this script (live / replay candles can leave old copies behind)
+    for x in box.all
+        box.delete(x)
+    for x in label.all
+        label.delete(x)
+    DB.clear()
+    qT.clear()
+    qP.clear()
+    qU.clear()
+    qX.clear()
+    qC.clear()
+    qR.clear()
+    qS.clear()
+    if tfBad
+        warnL := label.new(bar_index, high, "MMM PRO f: the structure timeframe must be the chart timeframe or higher", style=label.style_label_down, color=#FFB300, textcolor=#000000, size=size.small)
+    else if BX.size() == 0
+        warnL := label.new(bar_index, high, "MMM PRO f: " + (useHTF ? f_tfTxt(STF) + " " : "") + "structure · " + str.tostring(bi + 1) + " candles read · no box yet", style=label.style_label_down, color=#FFB300, textcolor=#000000, size=size.small)
+    else if BX.size() > 0
+        int xR = time + ext * CHMS
+        // LEZ boxes first (behind the FVA boxes), reaching further right so their names stay clear
+        if lezOn and lzT.size() > 0
+            int xL = xR + lezExt * CHMS
+            for i = 0 to lzT.size() - 1
+                int d = lzD.get(i)
+                string nm = (d == 1 ? "Bu LEZ" : "Be LEZ") + (lezBrk ? " · " + lzN.get(i) : "") + TFX
+                DB.push(box.new(lzL.get(i), lzT.get(i), xL, lzB.get(i), xloc=xloc.bar_time, border_color=na, bgcolor=color.new(d == 1 ? c_lzBu : c_lzBe, trLez), text=nm, text_color=c_txt, text_size=f_sz(szLez), text_halign=text.align_right, text_valign=text.align_center))
+        // ▼▲ retest marks: red ▼ short · green ▲ long · tiny = immediate · small = after NBC · normal = after an opposite BC
+        int ntr = trT.size()
+        if ntr > 0 and keepTr > 0
+            for i = math.max(0, ntr - keepTr) to ntr - 1
+                int kd = trK.get(i)
+                int ty = trY.get(i)
+                bool on = (kd == 3 ? mkT : kd == 1 ? mkP : kd == 2 ? mkR : mkI) and f_rtOn(ty)
+                if on
+                    int dd = trD.get(i)
+                    f_q(trT.get(i), trP.get(i), dd == -1, dd == -1 ? "▼" : "▲", dd == -1 ? c_triS : c_triL, 1, ty == 1 ? 0 : ty == 2 ? 1 : 2)
+        // F✖ marks: reactions + T# / R# closed through
+        int nfx = fxT.size()
+        if nfx > 0 and keepFx > 0
+            for i = math.max(0, nfx - keepFx) to nfx - 1
+                int  kd = fxK.get(i)
+                bool on = kd == 3 ? mkT : kd == 1 ? mkP : kd == 2 ? mkR : mkI
+                if on
+                    int dd = fxD.get(i)
+                    f_q(fxT.get(i), fxP.get(i), dd == 1, "F✖" + (dd == 1 ? "L" : "S"), c_fx, 4, f_srk(szCD))
+        // markers (same as MMM PRO c): per side, among the PO4 still alive
+        // 🟢 / 🔴 = the newest T1 · 🟩 / 🟥 = the newest T# (newest leg, then highest tier)
+        // → bull AND bear both show while that side has a live PO4
+        int buT1 = -1
+        int buTn = -1
+        int beT1 = -1
+        int beTn = -1
+        int buL1 = -1
+        int beL1 = -1
+        int buLn = -1
+        int beLn = -1
+        int buTier = 0
+        int beTier = 0
+        for b in BX
+            if b.kind == 3
+                if b.pol == 1
+                    if b.tier == 1 and b.leg >= buL1
+                        buT1 := b.id
+                        buL1 := b.leg
+                    if b.leg > buLn or (b.leg == buLn and b.tier > buTier)
+                        buLn   := b.leg
+                        buTier := b.tier
+                        buTn   := b.id
+                else
+                    if b.tier == 1 and b.leg >= beL1
+                        beT1 := b.id
+                        beL1 := b.leg
+                    if b.leg > beLn or (b.leg == beLn and b.tier > beTier)
+                        beLn   := b.leg
+                        beTier := b.tier
+                        beTn   := b.id
+        float rHi = na
+        float rLo = na
+        for id in array.from(buT1, buTn, beT1, beTn)
+            Bx m = f_get(id)
+            if not na(m)
+                rHi := na(rHi) ? m.top : math.max(rHi, m.top)
+                rLo := na(rLo) ? m.bot : math.min(rLo, m.bot)
+        // visible live boxes (T# first, then R#, P#, internal) + their markers
+        array<Bx>     V  = array.new<Bx>()
+        array<string> VM = array.new<string>()
+        // break boxes: drawn on their own
+        if showBrk and pend != 0
+            Bx pw = f_get(pendW)
+            if not na(pw)
+                f_drawBrk(pw, pw.born == 3 ? szCD : szLS)
+        if showIntB
+            for b in BX
+                if b.kind == 5
+                    f_drawBrk(b, szInt)
+        // PO4 origins: markers + current T# always · older ones inside / outside the marker range
+        int nIn = 0
+        array<int> nOut = array.from(0, 0)
+        for i = BX.size() - 1 to 0
+            Bx b = BX.get(i)
+            if b.kind == 3 and showT
+                bool mkB = b.id == buT1 or b.id == buTn or b.id == beT1 or b.id == beTn
+                bool keep = b.id == idT or mkB
+                if not keep
+                    bool inside = not na(rHi) and b.bot >= rLo - HT and b.top <= rHi + HT
+                    if inside
+                        keep := nIn < maxIn
+                        if keep
+                            nIn += 1
+                    else
+                        int k = b.pol == 1 ? 0 : 1
+                        keep := nOut.get(k) < maxOld
+                        if keep
+                            nOut.set(k, nOut.get(k) + 1)
+                if keep
+                    string mk = ""
+                    if showMk
+                        mk := (b.id == buT1 ? "🟢" : "") + (b.id == buTn ? "🟩" : "") + (b.id == beT1 ? "🔴" : "") + (b.id == beTn ? "🟥" : "")
+                    if showBrk and b.wife >= 0
+                        Bx w = f_get(b.wife)
+                        if not na(w)
+                            f_drawBrk(w, w.born == 3 ? szCD : szLS)
+                    V.push(b)
+                    VM.push(mk)
+        Bx bR = f_get(idR)
+        if showR and not na(bR)
+            V.push(bR)
+            VM.push("")
+        Bx bP = f_get(idP)
+        if showP and not na(bP)
+            V.push(bP)
+            VM.push("")
+        for i = BX.size() - 1 to 0
+            Bx b = BX.get(i)
+            if b.kind == 0 and showInt
+                V.push(b)
+                VM.push("")
+        // ONE box per level: every name at that exact box joined with " & " (the same name once)
+        int nV = V.size()
+        if nV > 0
+            array<bool> used = array.new<bool>(nV, false)
+            for pass = 0 to 1
+                for i = 0 to nV - 1
+                    if not used.get(i)
+                        Bx a = V.get(i)
+                        array<string> names = array.from(f_nm0(a) + (a.fu ? "*" : ""))
+                        string mks  = VM.get(i)
+                        int    best = f_pr(a)
+                        Bx     bb   = a
+                        bool   hasT1 = a.kind == 3 and a.tier == 1
+                        if i < nV - 1
+                            for j = i + 1 to nV - 1
+                                Bx q = V.get(j)
+                                if not used.get(j) and q.pol == a.pol and math.abs(q.top - a.top) < HT and math.abs(q.bot - a.bot) < HT
+                                    string nm = f_nm0(q)
+                                    int    ix = names.indexof(nm)
+                                    int    ixs = names.indexof(nm + "*")
+                                    if ix >= 0
+                                        names.set(ix, nm + "*")
+                                    else if ixs < 0
+                                        names.push(nm + (q.fu ? "*" : ""))
+                                    mks  += VM.get(j)
+                                    if f_pr(q) > best
+                                        best := f_pr(q)
+                                        bb   := q
+                                    hasT1 := hasT1 or (q.kind == 3 and q.tier == 1)
+                        // pass 0 = pale internal boxes (behind) · pass 1 = the named boxes
+                        if (pass == 0) == (best == 1)
+                            used.set(i, true)
+                            if i < nV - 1
+                                for j = i + 1 to nV - 1
+                                    Bx q = V.get(j)
+                                    if not used.get(j) and q.pol == a.pol and math.abs(q.top - a.top) < HT and math.abs(q.bot - a.bot) < HT
+                                        used.set(j, true)
+                            color col = a.pol == 1 ? (best >= 5 ? c_tBu : best == 4 ? c_rBu : best == 3 ? c_pBu : c_iBu) : (best >= 5 ? c_tBe : best == 4 ? c_rBe : best == 3 ? c_pBe : c_iBe)
+                            color colO = a.pol == -1 ? (best >= 5 ? c_tBu : best == 4 ? c_rBu : best == 3 ? c_pBu : c_iBu) : (best >= 5 ? c_tBe : best == 4 ? c_rBe : best == 3 ? c_pBe : c_iBe)
+                            string tx = (mks == "" ? "" : mks + " ") + array.join(names, " & ") + f_csTx(bb) + TFX
+                            string sz = hasT1 ? szT1 : best >= 5 ? szTn : best == 4 ? szR : best == 3 ? szP : szInt
+                            [hc, ht] = f_hc(bb.vs, bb.cs, col, colO, best == 1 ? trInt : trMain, bb.kind == 3 or bb.kind == 2)
+                            if f_view(bb)
+                                f_sym(bb, bb.pol, sz)
+                                DB.push(box.new(a.tL, a.top, xR, a.bot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(hc, ht), text=tx, text_color=c_txt, text_size=f_sz(sz), text_halign=text.align_right, text_valign=text.align_center))
+
+    // ── flush the marks: ONE label per candle and side, the marks stacked in rows (no overlap) ──
+    int nq = qT.size()
+    if nq > 0
+        array<bool> qd = array.new<bool>(nq, false)
+        for i = 0 to nq - 1
+            if not qd.get(i)
+                int   ti = qT.get(i)
+                bool  ui = qU.get(i)
+                float px = qP.get(i)
+                int   bp = qR.get(i)
+                color cl = qC.get(i)
+                int   sr = qS.get(i)
+                array<string> rows = array.new<string>()
+                array<int>    rp   = array.new<int>()
+                for j = i to nq - 1
+                    if not qd.get(j) and qT.get(j) == ti and qU.get(j) == ui
+                        qd.set(j, true)
+                        string tx = qX.get(j)
+                        if not rows.includes(tx)
+                            // rows: highest priority nearest the candle
+                            int k = 0
+                            while k < rp.size() and rp.get(k) >= qR.get(j)
+                                k += 1
+                            rows.insert(k, tx)
+                            rp.insert(k, qR.get(j))
+                        px := ui ? math.max(px, qP.get(j)) : math.min(px, qP.get(j))
+                        sr := math.max(sr, qS.get(j))
+                        if qR.get(j) > bp
+                            bp := qR.get(j)
+                            cl := qC.get(j)
+                // over the high: the nearest row is the LAST line · under the low: the FIRST line
+                if ui
+                    rows.reverse()
+                label.new(ti, px, array.join(rows, "\n"), xloc=xloc.bar_time, style=ui ? label.style_label_down : label.style_label_up, color=color(na), textcolor=cl, size=sr == 3 ? size.large : sr == 2 ? size.normal : sr == 1 ? size.small : size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NBC BODIES — closed chart candles that close inside the previous high / low
+// ═══════════════════════════════════════════════════════════════════════════
+bool chNbc = nbcOn and barstate.isconfirmed and not na(high[1]) and close <= high[1] and close >= low[1]
+plotcandle(chNbc ? open : na, chNbc ? high : na, chNbc ? low : na, chNbc ? close : na, "NBC Body", color=c_nbc, wickcolor=color(na), bordercolor=close >= open ? c_nbcU : c_nbcD, editable=false, display=display.pane)

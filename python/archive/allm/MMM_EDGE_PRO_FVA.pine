@@ -1,0 +1,1769 @@
+//@version=6
+indicator("MMM EDGE PRO FVA @MaxMaserati", "MMM EDGE PRO FVA", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MMM EDGE PRO FVA — the 22 MMM PRO FVA strategies of the MMM strategy book (FVA.M1 – FVA.M22).
+//  ONE strategy at a time (pick it in ①). Study it, backtest it yourself, then decide.
+//  · Every strategy has ONE entry chart: 1m, 5m, 15m or 1h. Put the indicator on that chart.
+//  · HTF levels come from CLOSED higher-timeframe candles (M15 · H1 · H4 · D · W): no repaint.
+//    UPG gaps = 3-candle gaps · MMM PRO FVA boxes (T# · P# · R# · internal · CDL / CDS / LD / SD) · LEZ · session highs / lows.
+//  · The level is touched for the FIRST time → the first MMM PRO FVA reversal box of the trade direction prints
+//    on your chart within 1 hour with its edge at the level → the strategy's entry (box-edge limit, retest + BC, …).
+//  · Stops: box edge (20–50 pts) or fixed 50 / 20 pts on NQ. Other markets use the same distance scaled:
+//    ES × 0.4 (50 → 20) · gold × 0.24 (50 → 12) · crude × 0.01 (50 → 0.50). Costs: NQ 1 · ES 0.5 · gold 0.2 · crude 0.02 a trade.
+//  · Session rule (every strategy, as tested): at the next session open (18:00 · 02:00 · 08:00 · 09:30 New York)
+//    a losing trade is closed at the open, a winning trade trails under / over each BC; out at the 2nd session open.
+//  · MARKET CHECK: on ES, gold and crude a strategy only trades when it made money in BOTH periods on that market's
+//    own data (rebuilt FVA test engine). NQ / MNQ: all 22 passed in the book test.
+//  · Numbers in the tables: NQ = the strategy book (NQ 2022–25 + MNQ 2026). ES / gold / crude = the rebuilt test
+//    engine, Dec 2025 – Oct 2026 (close to the book engine, not identical). "This chart" = what the indicator traded here.
+//  Research only, not financial advice.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── ① STRATEGY ───
+g1 = "① Strategy (one at a time)"
+selIn = input.string("FVA.M17 · Clean Gap Retest · 15m", "Strategy", options=["FVA.M1 · Goalkeeper · 1H Gap · 5m", "FVA.M2 · Goalkeeper · NY Afternoon · 5m", "FVA.M3 · Goalkeeper · NY Morning · 5m", "FVA.M4 · Goalkeeper · PM Range Low · 5m", "FVA.M5 · Goalkeeper · Session High/Low · 5m", "FVA.M6 · Morning Runner · 1m", "FVA.M7 · Goalkeeper · London · 1m", "FVA.M8 · Goalkeeper · Any Gap · 5m", "FVA.M9 · 1H Box Retest · 5m", "FVA.M10 · Open Door Long · 5m", "FVA.M11 · Open Door · 15m", "FVA.M12 · 1H Breakout Ride · 1h", "FVA.M13 · Asia Wick Retest · 15m", "FVA.M14 · Half-Candle Dip · 5m", "FVA.M15 · Half-Candle Dip · London · 15m", "FVA.M16 · Max Re-entry · 5m", "FVA.M17 · Clean Gap Retest · 15m", "FVA.M18 · Sniper 1:10 · 15m", "FVA.M19 · Box Retest 1:2 · 5m", "FVA.M20 · Fast Retest · 15m", "FVA.M21 · Pause, Then Retest · 5m", "FVA.M22 · 1m Safe Retest · 1m"], group=g1, tooltip="Pick ONE strategy. Put the indicator on its entry chart (the timeframe at the end of its name).\nStudy it, check that it fits your style, backtest it yourself, then decide.")
+mkChk = input.bool(true, "Market Check · only trade where it passed", group=g1, tooltip="ON: on ES, gold or crude the strategy only trades when it made money in BOTH test periods on that market's own data.\nNQ / MNQ: all 22 passed · ES: FVA.M3, FVA.M19 · gold: FVA.M13, FVA.M14, FVA.M16 · crude: FVA.M13, FVA.M19.\nOFF: it trades anyway (research only). Other markets were not tested: nothing is blocked there.")
+cstIn = input.float(-1.0, "Cost per Trade, pts (-1 = auto)", minval=-1.0, step=0.01, group=g1, tooltip="-1 = auto: NQ 1 · ES 0.5 · gold 0.2 · crude 0.02 (as tested).")
+maxOp = input.int(0, "Max Open Trades (0 = no limit, as tested)", minval=0, maxval=10, group=g1)
+
+// ─── ② SIZE ───
+g2 = "② Size"
+szN = input.int(1, "Contracts", minval=1, inline="sz", group=g2)
+szT = input.string("Chart", "", options=["Chart", "Mini", "Micro"], inline="sz", group=g2, tooltip="Chart = the contract of this chart. Or pick the mini / micro of this market (NQ / MNQ, ES / MES, GC / MGC, CL / MCL).")
+
+// ─── ③ DRAWING ───
+g3 = "③ Drawing"
+drOn  = input.bool(true, "Show Trades", inline="a", group=g3)
+shBox = input.bool(true, "Shade Risk / Reward", inline="a", group=g3)
+fnOn  = input.bool(true, "Keep Finished", inline="k", group=g3, tooltip="ON: the last N finished trades stay on the chart with their result.")
+fnN   = input.int(10, "", minval=1, maxval=60, inline="k", group=g3)
+lvOn  = input.bool(true, "HTF Levels (nearest)", inline="l", group=g3, tooltip="The live levels of the picked strategy, nearest to price first. Armed = touched, waiting for the reversal box.")
+lvN   = input.int(8, "", minval=1, maxval=30, inline="l", group=g3)
+sbOn  = input.bool(true, "Reversal Box of Each Setup", group=g3)
+c_up  = input.color(#4DFFD2, "Long", inline="c1", group=g3)
+c_dn  = input.color(#C561E8, "Short", inline="c1", group=g3)
+c_en  = input.color(#2F7BFF, "Entry", inline="c2", group=g3)
+c_sl  = input.color(#FF3B3B, "Stop", inline="c2", group=g3)
+c_tp  = input.color(#00A65A, "Target", inline="c2", group=g3)
+lblSz = input.string("Small", "Label Size", options=["Tiny", "Small", "Normal"], group=g3)
+
+// ─── ④ TABLES ───
+g4 = "④ Tables"
+tlOn  = input.bool(true, "LIVE", inline="t0", group=g4)
+tlPos = input.string("Top Right", "", options=["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], inline="t0", group=g4)
+tsOn  = input.bool(true, "Statistics", inline="t1", group=g4)
+tsPos = input.string("Bottom Left", "", options=["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], inline="t1", group=g4)
+tbSz  = input.string("Small", "Text Size", options=["Tiny", "Small", "Normal"], group=g4)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SETUP OF THE PICKED STRATEGY
+// ═══════════════════════════════════════════════════════════════════════════
+string CODE = str.split(selIn, " ").get(0)
+int    K    = int(str.tonumber(str.replace(CODE, "FVA.M", ""))) - 1     // 0 … 21
+string NY   = "America/New_York"
+
+// per strategy: entry chart (min) · type 0 edge limit / 1 retest / 2 wait 3 / 3 next open · level · held · window a / b (-1 none) · H1 trend
+//               stop 0 zone 20–50 · 1 fixed 50 · 2 fixed 20 · 3 zone no cap · 4 zone, at least 10, no cap · RR (0 = none) · trail 0 none / 1 after an opposite candle / 2 under each BC / 3 BE after 1 BC / 4 BE after 2 BC
+//               side 0 both / 1 long only · touch 0 any / 1 wick only / 2 close inside · area 0 next open / 1 50% of the BC / 2 the high / low the BC broke
+//               pre 0 none / 1 a 2nd BC / 2 P0 straight retest / 3 an NBC, no opposite BC / 4 2nd BC + NBC + opposite candle · re-entries · box needs an NBC · close past the box = out
+// level: 1 UPG H1 · 2 UPG M15 · 3 UPG all (M15 · H1 · H4 · D · W) · 4 NY PM opening range low · 5 every session high / low
+//        6 M15 internal boxes · 7 LEZ (M15 · H1 · H4) · 8 every H1 box · 9 break boxes (M15 · H1 · H4) · 0 none (wait 3 / next open)
+f_cfg(int k) =>
+    switch k
+        0 => "5,0,1,1,-1,-1,0,0,2.0,1,0,0,0,0,0,0,1"
+        1 => "5,0,3,0,720,960,0,1,3.0,2,0,0,0,0,0,0,1"
+        2 => "5,0,2,0,570,720,0,0,2.0,2,0,0,0,0,0,0,1"
+        3 => "5,0,4,0,-1,-1,0,1,3.0,2,1,0,0,0,0,0,1"
+        4 => "5,0,5,0,-1,-1,1,0,3.0,2,0,0,0,0,0,0,1"
+        5 => "1,0,6,0,570,720,0,2,0.0,1,0,0,0,0,0,0,1"
+        6 => "1,0,7,1,120,480,0,2,2.0,1,0,0,0,0,0,0,1"
+        7 => "5,0,3,1,-1,-1,0,0,2.0,1,0,0,0,0,0,0,1"
+        8 => "5,1,8,1,-1,-1,1,0,5.0,3,0,1,0,0,0,0,1"
+        9 => "5,2,0,0,-1,-1,0,0,10.0,0,1,0,0,0,0,0,1"
+        10 => "15,2,0,0,-1,-1,0,1,10.0,1,0,0,0,0,0,0,1"
+        11 => "60,3,0,0,-1,-1,0,0,5.0,2,1,0,0,0,0,0,1"
+        12 => "15,1,3,1,1080,120,0,0,2.0,0,0,1,0,0,0,0,1"
+        13 => "5,1,1,1,-1,-1,0,4,10.0,0,0,0,1,1,0,0,0"
+        14 => "15,1,3,0,120,480,0,1,3.0,2,0,1,1,1,0,0,1"
+        15 => "5,1,1,1,-1,-1,0,0,0.0,3,0,0,0,1,3,0,1"
+        16 => "15,1,3,1,-1,-1,0,0,3.0,0,0,1,0,0,0,0,1"
+        17 => "15,1,2,1,-1,-1,0,2,10.0,0,0,1,2,0,0,0,1"
+        18 => "5,1,9,0,-1,-1,0,0,2.0,0,0,0,0,0,0,1,1"
+        19 => "15,1,3,1,-1,-1,0,0,5.0,0,0,0,0,2,0,0,1"
+        20 => "5,1,2,0,-1,-1,0,1,3.0,0,0,0,0,3,1,0,0"
+        => "1,1,6,0,-1,-1,0,1,3.0,4,0,2,0,4,0,0,0"
+
+array<string> CF = str.split(f_cfg(K), ",")
+int   LTF  = int(str.tonumber(CF.get(0)))
+int   TYP  = int(str.tonumber(CF.get(1)))
+int   LVL  = int(str.tonumber(CF.get(2)))
+bool  HELD = CF.get(3) == "1"
+int   WA   = int(str.tonumber(CF.get(4)))
+int   WB   = int(str.tonumber(CF.get(5)))
+bool  H1F  = CF.get(6) == "1"
+int   STK  = int(str.tonumber(CF.get(7)))
+float RRT  = str.tonumber(CF.get(8))
+int   TRL  = int(str.tonumber(CF.get(9)))
+int   SIDE = int(str.tonumber(CF.get(10)))
+int   TCH  = int(str.tonumber(CF.get(11)))
+int   AREA = int(str.tonumber(CF.get(12)))
+int   PRE  = int(str.tonumber(CF.get(13)))
+int   REN  = int(str.tonumber(CF.get(14)))
+bool  NBCQ = CF.get(15) == "1"
+bool  BXX  = CF.get(16) == "1"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MARKET
+// ═══════════════════════════════════════════════════════════════════════════
+string ROOT = syminfo.root
+int    MKT  = str.contains(ROOT, "NQ") ? 0 : str.contains(ROOT, "ES") ? 1 : str.contains(ROOT, "GC") or ROOT == "1OZ" ? 2 : str.contains(ROOT, "CL") or ROOT == "QM" ? 3 : -1
+string MKTN = MKT == 0 ? "NQ" : MKT == 1 ? "ES" : MKT == 2 ? "Gold" : MKT == 3 ? "Crude" : ROOT
+float  SC   = MKT == 1 ? 0.4 : MKT == 2 ? 0.24 : MKT == 3 ? 0.01 : 1.0
+float  COST = cstIn >= 0 ? cstIn : MKT == 1 ? 0.5 : MKT == 2 ? 0.2 : MKT == 3 ? 0.02 : 1.0
+float  S50  = 50 * SC
+float  S20  = 20 * SC
+float  MINR = 2 * SC
+float  TICK = syminfo.mintick
+string PASSL = MKT == 1 ? "FVA.M3,FVA.M19" : MKT == 2 ? "FVA.M13,FVA.M14,FVA.M16" : MKT == 3 ? "FVA.M13,FVA.M19" : ""
+bool   MOK  = not mkChk or MKT <= 0 or str.contains("," + PASSL + ",", "," + CODE + ",")
+int    CHM  = int(timeframe.in_seconds() / 60)
+bool   TFOK = CHM == LTF
+bool   RUN  = TFOK and MOK
+// contracts: $ per point of one micro · names
+f_specs() =>
+    string r = syminfo.root
+    float pvM = syminfo.pointvalue
+    string mi = syminfo.ticker
+    string mn = syminfo.ticker
+    if str.contains(r, "NQ")
+        pvM := 2.0
+        mi := "MNQ"
+        mn := "NQ"
+    else if str.contains(r, "ES")
+        pvM := 5.0
+        mi := "MES"
+        mn := "ES"
+    else if str.contains(r, "GC") or r == "1OZ"
+        pvM := 10.0
+        mi := "MGC"
+        mn := "GC"
+    else if str.contains(r, "CL") or r == "QM"
+        pvM := 100.0
+        mi := "MCL"
+        mn := "CL"
+    [pvM, mi, mn]
+[PVM, MIC, MIN] = f_specs()
+float  PV1 = szT == "Chart" ? syminfo.pointvalue : szT == "Mini" ? PVM * 10 : PVM
+string CTN = szT == "Chart" ? syminfo.root : szT == "Mini" ? MIN : MIC
+float  USD = PV1 * szN          // $ per point at your size
+
+// palette
+color EL_BG   = #000000
+color EL_ROW  = #161616
+color EL_ALT  = #1C1C1C
+color EL_LBL  = #FFFFFF
+color EL_GOLD = #E1B31A
+color EL_POS  = #27FFC3
+color EL_NEG  = #FF5252
+color EL_WARN = #FF9800
+color EL_MUTE = #9E9E9E
+
+f_tsz(string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+f_pos(string p) =>
+    switch p
+        "Top Left" => position.top_left
+        "Top Center" => position.top_center
+        "Top Right" => position.top_right
+        "Middle Left" => position.middle_left
+        "Middle Right" => position.middle_right
+        "Bottom Left" => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        => position.bottom_right
+f_px(float p) =>
+    str.tostring(p, format.mintick)
+f_usd(float v) =>
+    (v < 0 ? "−$" : "$") + str.tostring(math.abs(v), "#,##0")
+f_sgn(float v, string f) =>
+    (v > 0 ? "+" : v < 0 ? "−" : "") + str.tostring(math.abs(v), f)
+f_md(int t) =>
+    hour(t, NY) * 60 + minute(t, NY)
+f_win(int t) =>
+    int m = f_md(t)
+    WA < 0 ? true : WA > WB ? (m >= WA or m < WB) : (m >= WA and m < WB)
+f_dayK(int t) =>
+    str.format_time(t + 6 * 3600000, "yyyyMMdd", NY)
+
+// stop price from the entry price · box (top, bot)
+f_stop(int d, float e, float top, float bot) =>
+    float r = 0.0
+    if STK == 1
+        r := S50
+    else if STK == 2
+        r := S20
+    else
+        float edge = d == 1 ? bot - TICK : top + TICK
+        r := math.abs(e - edge)
+        if STK == 0
+            r := math.min(math.max(r, S20), S50)
+        else if STK == 4
+            r := math.max(r, 10 * SC)
+    e - d * r
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MMM PRO FVA BOX ENGINE (the structure part of MMM PRO FVA: turn boxes, T# / P# / R# / internal,
+// CDL / CDS / LD / SD break boxes, closes through, wick moves + one box per level, LEZ, trend side)
+// ═══════════════════════════════════════════════════════════════════════════
+// kind: 0 internal · 1 P# · 2 R# · 3 T# (PO4) · 4 break box (wife of a T#)
+type Bx
+    int    id
+    int    pol
+    int    kind
+    int    tier
+    float  top
+    float  bot
+    int    tL
+    int    mk
+    int    wife = -1
+    string brk = ""
+    int    leg = 0
+    string il = ""
+
+f_bidx(array<Bx> A, int id) =>
+    int r = -1
+    if id >= 0 and A.size() > 0
+        for i = 0 to A.size() - 1
+            if A.get(i).id == id
+                r := i
+                break
+    r
+
+f_bget(array<Bx> A, int id) =>
+    Bx r = na
+    int i = f_bidx(A, id)
+    if i >= 0
+        r := A.get(i)
+    r
+
+f_bnew(array<Bx> A, array<int> N, int pol, int kind, int tr, float top, float bot, int tL, int mk) =>
+    int id = N.get(0)
+    N.set(0, id + 1)
+    A.push(Bx.new(id, pol, kind, tr, top, bot, tL, mk))
+    id
+
+f_bfindR(array<Bx> A, int pol, float px, float HT) =>
+    int r = -1
+    for b in A
+        if b.kind == 2 and b.pol == pol and math.abs((pol == 1 ? b.bot : b.top) - px) < HT
+            r := b.id
+    r
+
+// a box dies with its wife (the break box that created it)
+f_bkill(array<Bx> A, int id0) =>
+    int id = id0
+    int g = 0
+    while id >= 0 and g < 6
+        int i = f_bidx(A, id)
+        if i < 0
+            break
+        Bx b = A.get(i)
+        A.remove(i)
+        id := b.wife
+        g += 1
+    true
+
+f_bext(Bx b) =>
+    b.pol == 1 ? b.bot : b.top
+
+// ONE box per level: boxes at the same extreme share the freshest level's body edge and the oldest start
+f_bsync(array<Bx> A, int pol, float px, int lead, int idT, float HT) =>
+    array<Bx> G = array.new<Bx>()
+    for b in A
+        if b.kind <= 3 and b.pol == pol and math.abs(f_bext(b) - px) < HT
+            G.push(b)
+    if G.size() >= 2
+        Bx e = G.get(0)
+        bool hasRole = false
+        bool byLead = false
+        for b in G
+            if b.id == lead
+                e := b
+                byLead := true
+        for b in G
+            if not byLead and (b.tL > e.tL or (b.tL == e.tL and b.id > e.id))
+                e := b
+            if b.kind >= 1
+                hasRole := true
+        int oldL = e.tL
+        for b in G
+            oldL := math.min(oldL, b.tL)
+        for b in G
+            if pol == 1
+                b.top := e.top
+            else
+                b.bot := e.bot
+            b.tL := oldL
+        array<int> kill = array.new<int>()
+        int lastInt = -1
+        for i = 0 to G.size() - 1
+            Bx a = G.get(i)
+            if a.kind == 0
+                if hasRole
+                    kill.push(a.id)
+                else if lastInt >= 0
+                    kill.push(math.min(lastInt, a.id))
+                    lastInt := math.max(lastInt, a.id)
+                else
+                    lastInt := a.id
+            if a.kind == 3 and i < G.size() - 1
+                for j = i + 1 to G.size() - 1
+                    Bx b = G.get(j)
+                    if b.kind == 3 and a.tier == b.tier
+                        kill.push(a.id == idT ? b.id : b.id == idT ? a.id : math.min(a.id, b.id))
+        for id in kill
+            f_bkill(A, id)
+    true
+
+// one closed structure candle. A = the boxes · N = id counter · zT/zB/zD/zK/zI = LEZ (top, bottom, side, break type, id)
+// returns [trend side, event 0 none · 1 CDL · 2 CDS · 3 LD · 4 SD, the broken box top, bottom]
+f_eng(array<Bx> A, array<int> N, array<float> zT, array<float> zB, array<int> zD, array<int> zK, array<int> zI, bool step, float o, float h, float l, float c, int t) =>
+    var int   side  = 0
+    var int   tier  = 0
+    var int   idT   = -1
+    var int   idP   = -1
+    var int   idR   = -1
+    var int   pend  = 0
+    var int   pendW = -1
+    var int   legN  = 0
+    var int   bi    = -1
+    var float pH    = na
+    var float pL    = na
+    var int   lastBc = 0
+    var float fnTop = na
+    var float fnBot = na
+    var int   fnT   = na
+    var float seqLo = na
+    var float seqHi = na
+    var float nHi   = na
+    var float nLo   = na
+    var float pbX   = na
+    var float pbXO  = na
+    var float pbXC  = na
+    var int   pbXT  = na
+    var array<float> lcT = array.new<float>(2, na)
+    var array<float> lcB = array.new<float>(2, na)
+    var array<int>   lcL = array.new<int>(2, na)
+    int   ev    = 0
+    float evTop = na
+    float evBot = na
+    if step and not na(c) and not na(h) and not na(l) and not na(o)
+        bi += 1
+        float HT = syminfo.mintick / 2
+        bool isBu = not na(pH) and c > pH
+        bool isBe = not na(pL) and c < pL
+        bool isN  = not na(pH) and not isBu and not isBe
+        // 0. new high / low with no close past a box: only that edge moves
+        bool mvH = false
+        bool mvL = false
+        for b in A
+            if b.kind >= 4
+                continue
+            if b.pol == -1 and h > b.top + HT and c <= b.top
+                b.top := h
+                mvH := true
+            else if b.pol == 1 and l < b.bot - HT and c >= b.bot
+                b.bot := l
+                mvL := true
+        if mvH
+            f_bsync(A, -1, h, -1, idT, HT)
+        if mvL
+            f_bsync(A, 1, l, -1, idT, HT)
+        // pullback extreme since the P#
+        if side != 0 and (idP >= 0 or pend == 1)
+            if na(pbX) or (side == -1 ? h > pbX : l < pbX)
+                pbX  := side == -1 ? h : l
+                pbXO := o
+                pbXC := c
+                pbXT := t
+        // 1. turn box (the body closes flip side)
+        int   newId = -1
+        float tzTop = na
+        float tzBot = na
+        int   tzL   = na
+        if isBu and lastBc == -1
+            float lo = math.min(nz(seqLo, l), l)
+            float tp = na(fnTop) ? o : fnTop
+            int   tl = na(fnT) ? t : fnT
+            if tp <= lo
+                tp := math.max(o, c)
+                tl := t
+            newId := f_bnew(A, N, 1, 0, tier, tp, lo, tl, bi)
+            tzTop := tp
+            tzBot := lo
+            tzL   := tl
+        else if isBe and lastBc == 1
+            float hi = math.max(nz(seqHi, h), h)
+            float bt = na(fnBot) ? o : fnBot
+            int   tl = na(fnT) ? t : fnT
+            if bt >= hi
+                bt := math.min(o, c)
+                tl := t
+            newId := f_bnew(A, N, -1, 0, tier, hi, bt, tl, bi)
+            tzTop := hi
+            tzBot := bt
+            tzL   := tl
+        // 2. its role
+        if newId >= 0
+            Bx nb = f_bget(A, newId)
+            int cand = newId
+            bool resum = nb.pol == side and side != 0 and ((pend == 0 and idP >= 0) or pend == 1)
+            if resum and not na(pbX) and (side == -1 ? pbX > nb.top + HT : pbX < nb.bot - HT)
+                int rid = f_bfindR(A, side, pbX, HT)
+                if rid < 0
+                    float eb = math.min(pbXO, pbXC)
+                    float et = math.max(pbXO, pbXC)
+                    if side == -1
+                        rid := f_bnew(A, N, -1, 0, tier, pbX, eb < pbX - HT ? eb : pbX - syminfo.mintick, pbXT, bi)
+                    else
+                        rid := f_bnew(A, N, 1, 0, tier, et > pbX + HT ? et : pbX + syminfo.mintick, pbX, pbXT, bi)
+                nb.il := "r"
+                cand := rid
+            Bx cb = f_bget(A, cand)
+            Bx oR0 = f_bget(A, idR)
+            bool moreR = na(oR0) ? true : cb.id == oR0.id ? false : side == -1 ? cb.top > oR0.top + HT : cb.bot < oR0.bot - HT
+            if pend == 1 and resum
+                cb.kind := 3
+                cb.tier := tier
+                cb.leg  := legN
+                cb.wife := pendW
+                idT     := cb.id
+                pend    := 0
+                pendW   := -1
+                pbX     := na
+            else if pend == 2 and nb.pol == side
+                nb.kind := 3
+                nb.tier := tier
+                nb.leg  := legN
+                nb.wife := pendW
+                idT     := newId
+                pend    := 0
+                pendW   := -1
+            else if side == 0
+                side    := nb.pol
+                tier    := 1
+                legN    += 1
+                nb.kind := 3
+                nb.tier := 1
+                nb.leg  := legN
+                idT     := newId
+            else if pend == 0 and nb.pol == -side
+                if idP < 0
+                    nb.kind := 1
+                    nb.tier := tier
+                    idP     := newId
+                    pbX     := side == -1 ? h : l
+                    pbXO    := o
+                    pbXC    := c
+                    pbXT    := t
+                else
+                    nb.il := "p"
+            else if resum and cb.kind == 0
+                if moreR
+                    if not na(oR0)
+                        oR0.kind := 0
+                        oR0.il   := "r"
+                    cb.kind := 2
+                    cb.tier := tier
+                    idR     := cb.id
+                else
+                    cb.il := "r"
+                    nb.il := "r"
+            else
+                nb.il := nb.pol == -side ? "p" : "r"
+            int cbId = cb.id
+            for cid in array.from(newId, cbId)
+                Bx q = f_bget(A, cid)
+                if not na(q)
+                    f_bsync(A, q.pol, f_bext(q), q.mk == bi ? q.id : -1, idT, HT)
+        // 3. official breaks: CDL / CDS (close past the last T#) · LD / SD (close past the P#)
+        bool official = false
+        Bx curT = f_bget(A, idT)
+        if side != 0 and not na(curT)
+            bool revBrk = side == -1 ? c > curT.top : c < curT.bot
+            if revBrk
+                int ns = -side
+                f_bkill(A, curT.wife)
+                curT.wife := -1
+                curT.kind := 4
+                curT.brk  := ns == 1 ? "CDL" : "CDS"
+                ev    := ns == 1 ? 1 : 2
+                evTop := curT.top
+                evBot := curT.bot
+                if pend == 1
+                    f_bkill(A, pendW)
+                pend  := 0
+                pendW := -1
+                Bx oR = f_bget(A, idR)
+                if not na(oR)
+                    oR.kind := 0
+                    oR.il   := "r"
+                legN += 1
+                Bx bP = f_bget(A, idP)
+                if not na(bP)
+                    bP.kind := 3
+                    bP.tier := 1
+                    bP.leg  := legN
+                    bP.wife := curT.id
+                    idT     := bP.id
+                else
+                    idT   := -1
+                    pend  := 2
+                    pendW := curT.id
+                pbX      := na
+                side     := ns
+                tier     := 1
+                idP      := -1
+                idR      := -1
+                official := true
+            else if pend == 0
+                Bx curP = f_bget(A, idP)
+                if not na(curP)
+                    bool contBrk = side == -1 ? c < curP.bot : c > curP.top
+                    if contBrk
+                        curP.kind := 4
+                        curP.brk  := side == 1 ? "LD" : "SD"
+                        ev    := side == 1 ? 3 : 4
+                        evTop := curP.top
+                        evBot := curP.bot
+                        tier  += 1
+                        Bx bR = f_bget(A, idR)
+                        if not na(bR)
+                            bR.kind := 3
+                            bR.tier := tier
+                            bR.leg  := legN
+                            bR.wife := curP.id
+                            idT     := bR.id
+                        else
+                            pend  := 1
+                            pendW := curP.id
+                        if pend == 0
+                            pbX := na
+                        idP      := -1
+                        idR      := -1
+                        official := true
+        if official
+            Bx nT0 = f_bget(A, idT)
+            if not na(nT0)
+                f_bsync(A, nT0.pol, f_bext(nT0), -1, idT, HT)
+        // 4. a range ended: clear its internal boxes
+        if official
+            array<int> kI = array.new<int>()
+            for b in A
+                if b.kind == 0
+                    kI.push(b.id)
+            for id in kI
+                f_bkill(A, id)
+        // 5. closes through the other boxes
+        array<int> kill = array.new<int>()
+        for b in A
+            if b.kind >= 4 or b.mk == bi
+                continue
+            bool viol = b.pol == 1 ? c < b.bot : c > b.top
+            if viol
+                if b.kind == 3
+                    if b.id != idT
+                        kill.push(b.id)
+                else if b.kind == 2 or b.kind == 0
+                    if b.id == idR
+                        idR := -1
+                    kill.push(b.id)
+        for id in kill
+            f_bkill(A, id)
+        // husband & wife: a break box lives only while its PO4 lives
+        if official or kill.size() > 0
+            array<int> orphan = array.new<int>()
+            for w in A
+                if w.kind == 4 and w.id != pendW
+                    bool hasH = false
+                    for hb in A
+                        if hb.kind == 3 and hb.wife == w.id
+                            hasH := true
+                            break
+                    if not hasH
+                        orphan.push(w.id)
+            for id in orphan
+                int oi = f_bidx(A, id)
+                if oi >= 0
+                    A.remove(oi)
+        // internal boxes: per side keep the most extreme one and the newest one
+        for pp = 0 to 1
+            int   pol    = pp == 0 ? -1 : 1
+            int   newest = -1
+            int   extId  = -1
+            float ex     = na
+            for b in A
+                if b.kind == 0 and b.pol == pol
+                    newest := math.max(newest, b.id)
+                    float e2 = f_bext(b)
+                    if na(ex) or (pol == -1 ? e2 > ex : e2 < ex)
+                        ex    := e2
+                        extId := b.id
+            array<int> kP = array.new<int>()
+            for b in A
+                if b.kind == 0 and b.pol == pol and b.id != newest and b.id != extId
+                    kP.push(b.id)
+            for id in kP
+                f_bkill(A, id)
+        // memory guard
+        int g = 0
+        while A.size() > 120 and g < 20
+            g += 1
+            Bx cT = f_bget(A, idT)
+            int keepW = na(cT) ? -1 : cT.wife
+            int j = 0
+            while j < A.size()
+                int bid = A.get(j).id
+                if bid != idT and bid != idP and bid != idR and bid != keepW and bid != pendW
+                    break
+                j += 1
+            if j < A.size()
+                f_bkill(A, A.get(j).id)
+        // LEZ: live ones (a close past deletes · a wick past moves that edge)
+        if zT.size() > 0
+            for i = zT.size() - 1 to 0
+                int d = zD.get(i)
+                if d == 1 ? c < zB.get(i) : c > zT.get(i)
+                    zT.remove(i)
+                    zB.remove(i)
+                    zD.remove(i)
+                    zK.remove(i)
+                    zI.remove(i)
+                else if d == 1 and l < zB.get(i)
+                    zB.set(i, l)
+                else if d == -1 and h > zT.get(i)
+                    zT.set(i, h)
+        for k = 0 to 1
+            if not na(lcT.get(k))
+                if k == 0 ? c < lcB.get(k) : c > lcT.get(k)
+                    lcT.set(k, na)
+                    lcB.set(k, na)
+                    lcL.set(k, na)
+                else if k == 0 and l < lcB.get(k)
+                    lcB.set(k, l)
+                else if k == 1 and h > lcT.get(k)
+                    lcT.set(k, h)
+        if ev > 0
+            int d = ev == 1 or ev == 3 ? 1 : -1
+            int k = d == 1 ? 0 : 1
+            int ty = ev - 1
+            if not na(lcT.get(k))
+                zT.push(lcT.get(k))
+                zB.push(lcB.get(k))
+                zD.push(d)
+                zK.push(ty)
+                int zid = N.get(0)
+                N.set(0, zid + 1)
+                zI.push(zid)
+                lcT.set(k, na)
+                lcB.set(k, na)
+                lcL.set(k, na)
+                int n = 0
+                for i = zK.size() - 1 to 0
+                    if zK.get(i) == ty
+                        n += 1
+                        if n > 1
+                            zT.remove(i)
+                            zB.remove(i)
+                            zD.remove(i)
+                            zK.remove(i)
+                            zI.remove(i)
+        if not na(tzTop)
+            int k = isBu ? 0 : 1
+            lcT.set(k, tzTop)
+            lcB.set(k, tzBot)
+            lcL.set(k, tzL)
+        else if isBu and lastBc == 1 and not na(fnT) and not na(nLo)
+            float lo2 = math.min(nLo, l)
+            if fnTop > lo2
+                lcT.set(0, fnTop)
+                lcB.set(0, lo2)
+                lcL.set(0, fnT)
+        else if isBe and lastBc == -1 and not na(fnT) and not na(nHi)
+            float hi2 = math.max(nHi, h)
+            if fnBot < hi2
+                lcT.set(1, hi2)
+                lcB.set(1, fnBot)
+                lcL.set(1, fnT)
+        // 8. candle sequence for the next turn box
+        if isBu or isBe
+            lastBc := isBu ? 1 : -1
+            fnTop  := na
+            fnBot  := na
+            fnT    := na
+            seqLo  := l
+            seqHi  := h
+            nHi    := na
+            nLo    := na
+        else if isN
+            nHi := math.max(nz(nHi, h), h)
+            nLo := math.min(nz(nLo, l), l)
+            if na(fnT)
+                fnTop := math.max(o, c)
+                fnBot := math.min(o, c)
+                fnT   := t
+            seqLo := math.min(nz(seqLo, l), l)
+            seqHi := math.max(nz(seqHi, h), h)
+        pH := h
+        pL := l
+    [side, ev, evTop, evBot]
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HTF DATA (closed candles only) · which engines and levels the picked strategy needs
+// ═══════════════════════════════════════════════════════════════════════════
+f_htf() =>
+    [time[1], open[1], high[1], low[1], close[1], high[2], low[2], close[2], high[3], low[3]]
+[aT, aO, aH, aL, aC, aH2, aL2, aC2, aH3, aL3] = request.security(syminfo.tickerid, "15", f_htf(), lookahead=barmerge.lookahead_on)
+[bT, bO, bH, bL, bC, bH2, bL2, bC2, bH3, bL3] = request.security(syminfo.tickerid, "60", f_htf(), lookahead=barmerge.lookahead_on)
+[cT, cO, cH, cL, cC, cH2, cL2, cC2, cH3, cL3] = request.security(syminfo.tickerid, "240", f_htf(), lookahead=barmerge.lookahead_on)
+[dT, dO, dH, dL, dC, dH2, dL2, dC2, dH3, dL3] = request.security(syminfo.tickerid, "D", f_htf(), lookahead=barmerge.lookahead_on)
+[wT, wO, wH, wL, wC, wH2, wL2, wC2, wH3, wL3] = request.security(syminfo.tickerid, "W", f_htf(), lookahead=barmerge.lookahead_on)
+
+// a NEW closed candle of each HTF (on a confirmed chart candle)
+var int lastA = na
+var int lastB = na
+var int lastC = na
+var int lastD = na
+var int lastW = na
+bool cnf = barstate.isconfirmed
+bool nA = cnf and not na(aT) and (na(lastA) or aT != lastA)
+bool nB = cnf and not na(bT) and (na(lastB) or bT != lastB)
+bool nC = cnf and not na(cT) and (na(lastC) or cT != lastC)
+bool nD = cnf and not na(dT) and (na(lastD) or dT != lastD)
+bool nW = cnf and not na(wT) and (na(lastW) or wT != lastW)
+if nA
+    lastA := aT
+if nB
+    lastB := bT
+if nC
+    lastC := cT
+if nD
+    lastD := dT
+if nW
+    lastW := wT
+
+// engines the strategy needs: M15 (internal · LEZ · break boxes) · H1 (trend side · boxes) · H4 (LEZ · break boxes) · this chart (LD / SD)
+bool needA = LVL == 6 or LVL == 7 or LVL == 9
+bool needB = H1F or LVL == 7 or LVL == 8 or LVL == 9
+bool needC = LVL == 7 or LVL == 9
+bool needX = TYP == 2 or TYP == 3
+var array<Bx>    EA  = array.new<Bx>()
+var array<Bx>    EB  = array.new<Bx>()
+var array<Bx>    EC  = array.new<Bx>()
+var array<Bx>    EX  = array.new<Bx>()
+var array<int>   NA_ = array.from(0)
+var array<int>   NB_ = array.from(0)
+var array<int>   NC_ = array.from(0)
+var array<int>   NX_ = array.from(0)
+var array<float> zAT = array.new<float>()
+var array<float> zAB = array.new<float>()
+var array<int>   zAD = array.new<int>()
+var array<int>   zAK = array.new<int>()
+var array<int>   zAI = array.new<int>()
+var array<float> zBT = array.new<float>()
+var array<float> zBB = array.new<float>()
+var array<int>   zBD = array.new<int>()
+var array<int>   zBK = array.new<int>()
+var array<int>   zBI = array.new<int>()
+var array<float> zCT = array.new<float>()
+var array<float> zCB = array.new<float>()
+var array<int>   zCD = array.new<int>()
+var array<int>   zCK = array.new<int>()
+var array<int>   zCI = array.new<int>()
+var array<float> zXT = array.new<float>()
+var array<float> zXB = array.new<float>()
+var array<int>   zXD = array.new<int>()
+var array<int>   zXK = array.new<int>()
+var array<int>   zXI = array.new<int>()
+[sA, eA, eAT, eAB] = f_eng(EA, NA_, zAT, zAB, zAD, zAK, zAI, RUN and needA and nA, aO, aH, aL, aC, aT)
+[sB, eB, eBT, eBB] = f_eng(EB, NB_, zBT, zBB, zBD, zBK, zBI, RUN and needB and nB, bO, bH, bL, bC, bT)
+[sC, eC, eCT, eCB] = f_eng(EC, NC_, zCT, zCB, zCD, zCK, zCI, RUN and needC and nC, cO, cH, cL, cC, cT)
+[sX, eX, eXT, eXB] = f_eng(EX, NX_, zXT, zXB, zXD, zXK, zXI, RUN and needX and cnf, open, high, low, close, time)
+var int h1Side = 0
+if nB and needB
+    h1Side := sB
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LEVELS of the picked strategy
+// ═══════════════════════════════════════════════════════════════════════════
+// src: 1 UPG M15 · 2 UPG H1 · 3 UPG H4 · 4 UPG D · 5 UPG W · 6 session · 11 / 12 / 13 boxes M15 / H1 / H4 · 21 / 22 / 23 LEZ M15 / H1 / H4
+type Lv
+    int    d
+    float  top
+    float  bot
+    int    src
+    int    key
+    int    kind
+    string nm
+    int    exp = na
+    int    st = 0      // 0 untouched · 1 armed (touched, waiting for the reversal box)
+    int    tk = na
+    int    dl = na
+    bool   seen = true
+    int    t0 = na
+
+var array<Lv> LVS = array.new<Lv>()
+
+f_lvAdd(int d, float top, float bot, int src, int key, int kind, string nm, int ex) =>
+    if SIDE == 0 or d == SIDE
+        LVS.push(Lv.new(d, top, bot, src, key, kind, nm, ex, 0, na, na, true, time))
+    // memory: drop the oldest untouched level
+    if LVS.size() > 400
+        int far = -1
+        float fd = -1.0
+        for i = 0 to LVS.size() - 1
+            Lv w = LVS.get(i)
+            float dd = math.min(math.abs(close - w.top), math.abs(close - w.bot))
+            if w.st != 1 and dd > fd
+                fd := dd
+                far := i
+        if far >= 0
+            LVS.remove(far)
+    true
+
+// a used level: box / LEZ levels stay as "done" (so the next HTF sync does not add them again) · others are deleted
+f_lvDone(int i) =>
+    Lv v = LVS.get(i)
+    if v.src >= 11
+        v.st := 9
+    else
+        LVS.remove(i)
+    true
+
+// UPG gap of the last closed HTF candle (bull: c2 closes above c1 high and c3 low stays above it)
+f_upg(int src, string nm, float h1_, float l1_, float c2_, float h3_, float l3_, float c1_) =>
+    // an HTF close through kills the gap (bull: a close below its bottom · bear: above its top)
+    if LVS.size() > 0
+        for i = LVS.size() - 1 to 0
+            Lv v = LVS.get(i)
+            if v.src == src and (v.d == 1 ? c1_ < v.bot : c1_ > v.top)
+                LVS.remove(i)
+    if not na(h3_) and not na(c2_)
+        if c2_ > h3_ and l1_ > h3_
+            f_lvAdd(1, l1_, h3_, src, -1, 0, "UPG " + nm, na)
+        else if c2_ < l3_ and h1_ < l3_
+            f_lvAdd(-1, l3_, h1_, src, -1, 0, "UPG " + nm, na)
+    true
+
+bool upA = LVL == 2 or LVL == 3
+bool upB = LVL == 1 or LVL == 3
+bool upO = LVL == 3
+if RUN
+    if upA and nA
+        f_upg(1, "M15", aH, aL, aC2, aH3, aL3, aC)
+    if upB and nB
+        f_upg(2, "H1", bH, bL, bC2, bH3, bL3, bC)
+    if upO and nC
+        f_upg(3, "H4", cH, cL, cC2, cH3, cL3, cC)
+    if upO and nD
+        f_upg(4, "D", dH, dL, dC2, dH3, dL3, dC)
+    if upO and nW
+        f_upg(5, "W", wH, wL, wC2, wH3, wL3, wC)
+
+// boxes / LEZ of an engine → levels (a box that changes = a new level, as tested · a box gone = level gone)
+f_kName(int k, string brk) =>
+    k == 0 ? "internal" : k == 1 ? "P#" : k == 2 ? "R#" : k == 3 ? "T#" : brk
+f_bxSync(array<Bx> A, int src, string tf, int mode) =>
+    // mode: 0 internal only · 1 every box (no LEZ) · 2 break boxes only
+    for v in LVS
+        if v.src == src
+            v.seen := false
+    for b in A
+        bool want = mode == 0 ? b.kind == 0 : mode == 2 ? b.kind == 4 : true
+        if want
+            int d = b.kind == 4 ? (b.brk == "CDL" or b.brk == "LD" ? 1 : -1) : b.pol
+            bool found = false
+            for v in LVS
+                if v.src == src and v.key == b.id and v.kind == b.kind and math.abs(v.top - b.top) < TICK / 2 and math.abs(v.bot - b.bot) < TICK / 2
+                    v.seen := true
+                    found := true
+            if not found
+                f_lvAdd(d, b.top, b.bot, src, b.id, b.kind, tf + " " + f_kName(b.kind, b.brk), na)
+    if LVS.size() > 0
+        for i = LVS.size() - 1 to 0
+            Lv v = LVS.get(i)
+            if v.src == src and not v.seen and v.t0 < time
+                LVS.remove(i)
+    true
+f_lzSync(array<float> zT, array<float> zB, array<int> zD, array<int> zI, int src, string tf) =>
+    for v in LVS
+        if v.src == src
+            v.seen := false
+    if zT.size() > 0
+        for i = 0 to zT.size() - 1
+            bool found = false
+            for v in LVS
+                if v.src == src and v.key == zI.get(i) and math.abs(v.top - zT.get(i)) < TICK / 2 and math.abs(v.bot - zB.get(i)) < TICK / 2
+                    v.seen := true
+                    found := true
+            if not found
+                f_lvAdd(zD.get(i), zT.get(i), zB.get(i), src, zI.get(i), 7, tf + " " + (zD.get(i) == 1 ? "Bu LEZ" : "Be LEZ"), na)
+    if LVS.size() > 0
+        for i = LVS.size() - 1 to 0
+            Lv v = LVS.get(i)
+            if v.src == src and not v.seen and v.t0 < time
+                LVS.remove(i)
+    true
+
+if RUN
+    if LVL == 6 and nA
+        f_bxSync(EA, 11, "M15", 0)
+    if LVL == 8 and nB
+        f_bxSync(EB, 12, "H1", 1)
+        f_lzSync(zBT, zBB, zBD, zBI, 22, "H1")
+    if LVL == 9
+        if nA
+            f_bxSync(EA, 11, "M15", 2)
+        if nB
+            f_bxSync(EB, 12, "H1", 2)
+        if nC
+            f_bxSync(EC, 13, "H4", 2)
+    if LVL == 7
+        if nA
+            f_lzSync(zAT, zAB, zAD, zAI, 21, "M15")
+        if nB
+            f_lzSync(zBT, zBB, zBD, zBI, 22, "H1")
+        if nC
+            f_lzSync(zCT, zCB, zCD, zCI, 23, "H4")
+
+// session highs / lows: live from the window end for 24 hours
+// 0 Asia 18:00–02:00 · 1 London 02:00–08:00 · 2 London OR 02:00–02:30 · 3 pre-open 08:00–09:30 · 4 Globex 18:00–09:30
+// 5 NY OR15 09:30–09:45 · 6 NY OR30 09:30–10:00 · 7 NY AM 09:30–12:00 · 8 NY PM OR 13:30–13:45
+var array<int>   SWA = array.from(1080, 120, 120, 480, 1080, 570, 570, 570, 810)
+var array<int>   SWB = array.from(120, 480, 150, 570, 570, 585, 600, 720, 825)
+var array<string> SWN = array.from("Asia", "London", "London OR", "Pre-open", "Globex", "NY OR15", "NY OR30", "NY AM", "NY PM OR")
+var array<bool>  swIn = array.new<bool>(9, false)
+var array<float> swH  = array.new<float>(9, na)
+var array<float> swL  = array.new<float>(9, na)
+var array<string> swDy = array.new<string>(9, "")
+if RUN and cnf and (LVL == 4 or LVL == 5)
+    // drop expired session levels
+    if LVS.size() > 0
+        for i = LVS.size() - 1 to 0
+            Lv v = LVS.get(i)
+            if v.src == 6 and not na(v.exp) and time >= v.exp
+                LVS.remove(i)
+    int m = f_md(time)
+    string dy = f_dayK(time)
+    for k = (LVL == 4 ? 8 : 0) to 8
+        int a = SWA.get(k)
+        int b = SWB.get(k)
+        bool inw = a > b ? (m >= a or m < b) : (m >= a and m < b)
+        bool was = swIn.get(k)
+        // the window ended (or a new trading day started while it was open): its high and low become levels
+        if was and (not inw or dy != swDy.get(k))
+            f_lvAdd(1, swL.get(k), swL.get(k), 6, -1, 0, SWN.get(k) + " low", time + 86400000)
+            if LVL == 5
+                f_lvAdd(-1, swH.get(k), swH.get(k), 6, -1, 0, SWN.get(k) + " high", time + 86400000)
+            swIn.set(k, false)
+            swH.set(k, na)
+            swL.set(k, na)
+        if inw
+            if not swIn.get(k)
+                swIn.set(k, true)
+                swDy.set(k, dy)
+                swH.set(k, high)
+                swL.set(k, low)
+            else
+                swH.set(k, math.max(swH.get(k), high))
+                swL.set(k, math.min(swL.get(k), low))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THIS CHART: candle types and the reversal (turn) box
+// ═══════════════════════════════════════════════════════════════════════════
+bool bu  = not na(high[1]) and close > high[1]
+bool be  = not na(low[1]) and close < low[1]
+bool nbc = not na(high[1]) and not bu and not be
+var int   tLast = 0
+var float tFnT  = na
+var float tFnB  = na
+var int   tFnTm = na
+var float tSqL  = na
+var float tSqH  = na
+int   tbD = 0
+float tbT = na
+float tbB = na
+int   tbL = na
+bool  tbN = false
+if cnf
+    if bu and tLast == -1
+        float lo = math.min(nz(tSqL, low), low)
+        float tp = na(tFnT) ? open : tFnT
+        tbL := na(tFnTm) ? time : tFnTm
+        tbN := not na(tFnT)
+        if tp <= lo
+            tp := math.max(open, close)
+            tbL := time
+        tbD := 1
+        tbT := tp
+        tbB := lo
+    else if be and tLast == 1
+        float hi = math.max(nz(tSqH, high), high)
+        float bt = na(tFnB) ? open : tFnB
+        tbL := na(tFnTm) ? time : tFnTm
+        tbN := not na(tFnB)
+        if bt >= hi
+            bt := math.min(open, close)
+            tbL := time
+        tbD := -1
+        tbT := hi
+        tbB := bt
+    if bu or be
+        tLast := bu ? 1 : -1
+        tFnT  := na
+        tFnB  := na
+        tFnTm := na
+        tSqL  := low
+        tSqH  := high
+    else if nbc
+        if na(tFnTm)
+            tFnT  := math.max(open, close)
+            tFnB  := math.min(open, close)
+            tFnTm := time
+        tSqL := math.min(nz(tSqL, low), low)
+        tSqH := math.max(nz(tSqH, high), high)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SETUPS AND TRADES
+// ═══════════════════════════════════════════════════════════════════════════
+// st: 0 wait for the retest touch · 1 retest: wait for the 1st BC out · 2 limit order waiting · 3 in a trade · 5 wait 3 candles · 9 done
+type Su
+    int    d
+    float  top
+    float  bot
+    int    tL
+    int    j
+    string lvn
+    int    st
+    int    n2 = 0
+    int    nn = 0
+    int    no = 0
+    int    tk = na
+    bool   cin = false
+    int    nEnt = 0
+    int    cnt = 0
+    float  lim = na
+    int    k0 = na
+    int    last = na
+    float  E = na
+    float  sp = na
+    float  sp0 = na
+    float  tg = na
+    float  risk = na
+    int    fi = na
+    int    ops = 0
+    int    trl = 0
+    bool   opp = false
+    float  pbx = na
+    int    bcp = 0
+    int    eT = na
+    bool   mkt = false
+    line   lE = na
+    line   lS = na
+    line   lT = na
+    box    bR = na
+    box    bW = na
+    label  lb = na
+    box    sb = na
+
+var array<Su> SU = array.new<Su>()
+
+// results on this chart
+var int   rN = 0
+var int   rW = 0
+var float rSum = 0.0
+var float rGW = 0.0
+var float rGL = 0.0
+var float rUsd = 0.0
+var float rPk = 0.0
+var float rDD = 0.0
+var int   rCL = 0
+var int   rML = 0
+var string tdK = ""
+var int   tdN = 0
+var int   tdW = 0
+var int   tdL = 0
+var float tdU = 0.0
+var string lastTx = ""
+var array<line>  FL = array.new<line>()
+var array<label> FB = array.new<label>()
+var array<box>   FX = array.new<box>()
+
+f_lsz() =>
+    lblSz == "Tiny" ? size.tiny : lblSz == "Normal" ? size.normal : size.small
+
+// open trades now
+f_open() =>
+    int n = 0
+    for s in SU
+        if s.st == 3
+            n += 1
+    n
+
+// a trade starts: entry, stops, target and its lines
+f_start(Su s, float e, float stp, bool isMkt, int fillBar) =>
+    s.E    := e
+    s.sp   := stp
+    s.sp0  := stp
+    s.risk := math.abs((isMkt ? e : s.lim) - stp)
+    s.tg   := RRT > 0 ? e + s.d * RRT * math.abs(e - stp) : na
+    s.fi   := fillBar
+    s.ops  := 0
+    s.trl  := TRL
+    s.opp  := false
+    s.pbx  := na
+    s.bcp  := 0
+    s.eT   := time
+    s.mkt  := isMkt
+    s.st   := 3
+    s.nEnt += 1
+    if drOn
+        int x2 = time + 5 * timeframe.in_seconds() * 1000
+        s.lE := line.new(time, e, x2, e, xloc=xloc.bar_time, color=c_en, width=2)
+        s.lS := line.new(time, stp, x2, stp, xloc=xloc.bar_time, color=c_sl, width=1)
+        if not na(s.tg)
+            s.lT := line.new(time, s.tg, x2, s.tg, xloc=xloc.bar_time, color=c_tp, width=1)
+        if shBox
+            s.bR := box.new(time, math.max(e, stp), x2, math.min(e, stp), xloc=xloc.bar_time, border_color=color(na), bgcolor=color.new(c_sl, 85))
+            if not na(s.tg)
+                s.bW := box.new(time, math.max(e, s.tg), x2, math.min(e, s.tg), xloc=xloc.bar_time, border_color=color(na), bgcolor=color.new(c_tp, 85))
+        float rk = math.abs(e - stp)
+        string tx = CODE + (s.d == 1 ? " LONG " : " SHORT ") + str.tostring(szN) + " " + CTN + " · " + (isMkt ? "ENTRY " : "FILLED ") + f_px(e) + "\nSL " + f_px(stp) + " (" + str.tostring(rk, "#.##") + " pts " + f_usd(-rk * USD) + ")" + (na(s.tg) ? " · runner" : " · TP " + f_px(s.tg) + " (+" + f_usd(math.abs(s.tg - e) * USD) + ")")
+        s.lb := label.new(x2, e, tx, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(s.d == 1 ? c_up : c_dn, 20), textcolor=#000000, size=f_lsz())
+    true
+
+// a limit order waits for its fill
+f_limit(Su s, float lp, int k0) =>
+    s.lim  := lp
+    s.k0   := k0
+    s.last := k0 + 100
+    s.sp0  := f_stop(s.d, lp, s.top, s.bot)
+    s.st   := 2
+    if drOn
+        int x2 = time + 5 * timeframe.in_seconds() * 1000
+        s.lE := line.new(time, lp, x2, lp, xloc=xloc.bar_time, color=s.d == 1 ? c_up : c_dn, width=1, style=line.style_dashed)
+        s.lb := label.new(x2, lp, CODE + (s.d == 1 ? " BUY LIMIT " : " SELL LIMIT ") + f_px(lp) + " · SL " + f_px(s.sp0), xloc=xloc.bar_time, style=label.style_label_left, color=color(na), textcolor=s.d == 1 ? c_up : c_dn, size=f_lsz())
+    true
+
+f_clearObj(Su s) =>
+    line.delete(s.lE)
+    line.delete(s.lS)
+    line.delete(s.lT)
+    box.delete(s.bR)
+    box.delete(s.bW)
+    label.delete(s.lb)
+    s.lE := na
+    s.lS := na
+    s.lT := na
+    s.bR := na
+    s.bW := na
+    s.lb := na
+    true
+
+// keep the line objects of finished trades (newest N)
+f_keep(Su s, float px, string why, float R, float usd) =>
+    if drOn and fnOn
+        line.set_x2(s.lE, time)
+        line.set_x2(s.lS, time)
+        if not na(s.lT)
+            line.set_x2(s.lT, time)
+        if not na(s.bR)
+            box.set_right(s.bR, time)
+        if not na(s.bW)
+            box.set_right(s.bW, time)
+        label.delete(s.lb)
+        label lb2 = label.new(time, px, (R >= 0 ? "✔ " : "✖ ") + CODE + " " + why + " " + f_sgn(R, "#.##") + " RR · " + (usd >= 0 ? "+" : "") + f_usd(usd), xloc=xloc.bar_time, style=s.d == 1 ? label.style_label_up : label.style_label_down, color=color(na), textcolor=R >= 0 ? EL_POS : EL_NEG, size=f_lsz())
+        FL.push(s.lE)
+        FL.push(s.lS)
+        FL.push(s.lT)
+        FX.push(s.bR)
+        FX.push(s.bW)
+        FB.push(lb2)
+        while FB.size() > fnN
+            label.delete(FB.shift())
+            for q = 0 to 2
+                if FL.size() > 0
+                    line.delete(FL.shift())
+            for q = 0 to 1
+                if FX.size() > 0
+                    box.delete(FX.shift())
+        s.lE := na
+        s.lS := na
+        s.lT := na
+        s.bR := na
+        s.bW := na
+        s.lb := na
+    else
+        f_clearObj(s)
+    true
+
+// ── every confirmed candle ──
+bool winNow = f_win(time)
+if RUN and cnf
+    string dk = f_dayK(time)
+    if dk != tdK
+        tdK := dk
+        tdN := 0
+        tdW := 0
+        tdL := 0
+        tdU := 0.0
+    bool openBar = (f_md(time) == 1080 or f_md(time) == 120 or f_md(time) == 480 or f_md(time) == 570)
+    // 1. live setups and trades (oldest first)
+    if SU.size() > 0
+        for s in SU
+            if s.st == 9 or s.j >= bar_index
+                continue
+            int d = s.d
+            // ── trade management
+            if s.st == 3 and bar_index > s.fi - (s.mkt ? 1 : 0)
+                float xp = na
+                string why = ""
+                // session rule: losing at a session open → out at the open · winning → trail under each BC · out at the 2nd open
+                if openBar and bar_index > s.fi
+                    s.ops += 1
+                    float prof = (open - s.E) * d
+                    if s.ops >= 2 or prof <= 0
+                        xp := open
+                        why := "session open"
+                    else
+                        s.trl := 2
+                if na(xp)
+                    if d == 1 ? low <= s.sp : high >= s.sp
+                        xp := s.sp
+                        why := math.abs(s.sp - s.sp0) < TICK / 2 ? "stop" : "trail stop"
+                    else if not na(s.tg) and (d == 1 ? high >= s.tg : low <= s.tg)
+                        xp := s.tg
+                        why := "target"
+                if na(xp) and BXX and (d == 1 ? close < s.bot : close > s.top)
+                    xp := close
+                    why := "close past the box"
+                if na(xp)
+                    bool inprof = (close - s.E) * d > 0
+                    bool dirBC = d == 1 ? bu : be
+                    if s.trl == 2 and dirBC and inprof
+                        s.sp := d == 1 ? math.max(s.sp, low) : math.min(s.sp, high)
+                    else if s.trl == 1
+                        if d == 1 ? close < open : close > open
+                            s.opp := true
+                            s.pbx := d == 1 ? low : high
+                        else if s.opp
+                            s.pbx := d == 1 ? math.min(s.pbx, low) : math.max(s.pbx, high)
+                        if s.opp and dirBC and inprof and not na(s.pbx)
+                            s.sp := d == 1 ? math.max(s.sp, s.pbx) : math.min(s.sp, s.pbx)
+                            s.opp := false
+                    else if (s.trl == 3 or s.trl == 4) and dirBC and inprof
+                        s.bcp += 1
+                        if s.bcp >= (s.trl == 3 ? 1 : 2)
+                            s.sp := d == 1 ? math.max(s.sp, s.E + COST) : math.min(s.sp, s.E - COST)
+                    if bar_index >= s.last
+                        xp := close
+                        why := "time out"
+                if not na(xp)
+                    float raw = (xp - s.E) * d
+                    float pts = raw - COST
+                    float R = s.risk > 0 ? pts / s.risk : 0.0
+                    float usd = pts * USD
+                    rN += 1
+                    rW += pts > 0 ? 1 : 0
+                    rSum += R
+                    rGW += R > 0 ? R : 0.0
+                    rGL += R <= 0 ? -R : 0.0
+                    rUsd += usd
+                    rPk := math.max(rPk, rUsd)
+                    rDD := math.max(rDD, rPk - rUsd)
+                    rCL := pts > 0 ? 0 : rCL + 1
+                    rML := math.max(rML, rCL)
+                    tdN += 1
+                    tdW += pts > 0 ? 1 : 0
+                    tdL += pts > 0 ? 0 : 1
+                    tdU += usd
+                    lastTx := str.format_time(time, "dd MMM HH:mm", NY) + " " + (d == 1 ? "long " : "short ") + why + " " + f_sgn(R, "#.##") + " RR " + (usd >= 0 ? "+" : "") + f_usd(usd)
+                    alert("MMM EDGE PRO FVA · " + CODE + " · " + syminfo.ticker + " · EXIT " + (d == 1 ? "LONG " : "SHORT ") + why + " at " + f_px(xp) + " · " + f_sgn(R, "#.##") + " RR · " + f_usd(usd), alert.freq_once_per_bar_close)
+                    f_keep(s, xp, why, R, usd)
+                    // re-entry (retest strategies): only after a losing exit, while the box holds
+                    if TYP == 1 and raw < 0 and s.nEnt < 1 + REN and bar_index < s.j + 100
+                        s.st := 0
+                        s.n2 := 0
+                        s.nn := 0
+                        s.no := 0
+                    else
+                        s.st := 9
+                else if drOn
+                    int x2 = time + 5 * timeframe.in_seconds() * 1000
+                    line.set_x2(s.lE, x2)
+                    line.set_xy1(s.lS, line.get_x1(s.lS), s.sp)
+                    line.set_xy2(s.lS, x2, s.sp)
+                    if not na(s.lT)
+                        line.set_x2(s.lT, x2)
+                    if not na(s.bR)
+                        box.set_right(s.bR, x2)
+                    if not na(s.bW)
+                        box.set_right(s.bW, x2)
+                    float uR = s.risk > 0 ? ((close - s.E) * d - COST) / s.risk : 0.0
+                    label.set_x(s.lb, x2)
+                    label.set_text(s.lb, CODE + (d == 1 ? " LONG " : " SHORT ") + "open " + f_sgn(uR, "#.##") + " RR · " + f_usd(((close - s.E) * d - COST) * USD) + "\nSL " + f_px(s.sp) + (na(s.tg) ? " · runner" : " · TP " + f_px(s.tg)))
+            // ── limit order waiting
+            else if s.st == 2
+                bool dead = bar_index > s.k0 + 60 or (BXX and (d == 1 ? close[1] < s.bot : close[1] > s.top))
+                if dead
+                    f_clearObj(s)
+                    s.st := 9
+                else if d == 1 ? low <= s.lim : high >= s.lim
+                    float e = d == 1 ? math.min(s.lim, open) : math.max(s.lim, open)
+                    float rk = math.abs(e - s.sp0)
+                    f_clearObj(s)
+                    if not f_win(time) or rk < MINR or (maxOp > 0 and f_open() >= maxOp)
+                        s.st := 9
+                    else
+                        f_start(s, e, s.sp0, false, bar_index)
+                        alert("MMM EDGE PRO FVA · " + CODE + " · " + syminfo.ticker + " · LIMIT FILLED " + (d == 1 ? "LONG " : "SHORT ") + f_px(e) + " · SL " + f_px(s.sp0) + (na(s.tg) ? " · runner" : " · TP " + f_px(s.tg)), alert.freq_once_per_bar_close)
+                        // the fill candle: only the stop counts
+                        if d == 1 ? low <= s.sp : high >= s.sp
+                            float pts = (s.sp - e) * d - COST
+                            float R = s.risk > 0 ? pts / s.risk : 0.0
+                            float usd = pts * USD
+                            rN += 1
+                            rSum += R
+                            rGL += -R
+                            rUsd += usd
+                            rPk := math.max(rPk, rUsd)
+                            rDD := math.max(rDD, rPk - rUsd)
+                            rCL += 1
+                            rML := math.max(rML, rCL)
+                            tdN += 1
+                            tdL += 1
+                            tdU += usd
+                            lastTx := str.format_time(time, "dd MMM HH:mm", NY) + " stop on the fill candle " + f_sgn(R, "#.##") + " RR " + f_usd(usd)
+                            f_keep(s, s.sp, "stop", R, usd)
+                            s.st := 9
+            // ── wait 3 candles after the LD / SD: none closes back inside the broken box
+            else if s.st == 5
+                if d == 1 ? close <= s.top : close >= s.bot
+                    s.st := 9
+                else
+                    s.cnt += 1
+                    if s.cnt >= 3
+                        float stp = f_stop(d, close, s.top, s.bot)
+                        if math.abs(close - stp) >= MINR and (maxOp == 0 or f_open() < maxOp)
+                            s.last := bar_index + 1 + 100
+                            f_start(s, close, stp, true, bar_index + 1)
+                            alert("MMM EDGE PRO FVA · " + CODE + " · " + syminfo.ticker + " · ENTRY " + (d == 1 ? "LONG " : "SHORT ") + f_px(close) + " · SL " + f_px(stp) + (na(s.tg) ? " · runner" : " · TP " + f_px(s.tg)), alert.freq_once_per_bar_close)
+                        else
+                            s.st := 9
+            // ── retest: wait for the touch, then the 1st BC out of the box
+            else if s.st == 0 or s.st == 1
+                bool brk = d == 1 ? close < s.bot : close > s.top
+                if s.st == 0
+                    if brk or bar_index >= s.j + 100
+                        s.st := 9
+                    else
+                        bool tNow = d == 1 ? low <= s.top : high >= s.bot
+                        if tNow
+                            bool ok = true
+                            if s.nEnt == 0
+                                ok := PRE == 2 ? bar_index == s.j + 1 : PRE == 1 ? s.n2 >= 1 : PRE == 3 ? (s.nn >= 1 and s.no == 0) : PRE == 4 ? (s.n2 >= 1 and s.nn >= 1 and s.no >= 1) : true
+                            if ok
+                                s.st := 1
+                                s.tk := bar_index
+                                s.cin := false
+                            else
+                                s.st := 9
+                        else
+                            if d == 1 ? bu : be
+                                s.n2 += 1
+                            else if nbc
+                                s.nn += 1
+                            else
+                                s.no += 1
+                if s.st == 1
+                    if brk or bar_index >= s.tk + 60
+                        s.st := 9
+                    else
+                        if close <= s.top and close >= s.bot
+                            s.cin := true
+                        bool out = d == 1 ? (close > s.top and bu) : (close < s.bot and be)
+                        if out
+                            if (TCH == 1 and s.cin) or (TCH == 2 and not s.cin)
+                                s.st := 9
+                            else if AREA == 0
+                                // enter at the next open (= this close)
+                                float stp = f_stop(d, close, s.top, s.bot)
+                                int tNx = f_md(time_close) == 1020 ? time_close + 3600000 : time_close
+                                if not f_win(tNx) or math.abs(close - stp) < MINR or (maxOp > 0 and f_open() >= maxOp)
+                                    s.st := 9
+                                else
+                                    s.last := bar_index + 1 + 100
+                                    f_start(s, close, stp, true, bar_index + 1)
+                                    alert("MMM EDGE PRO FVA · " + CODE + " · " + syminfo.ticker + " · ENTRY " + (d == 1 ? "LONG " : "SHORT ") + f_px(close) + " · SL " + f_px(stp) + (na(s.tg) ? " · runner" : " · TP " + f_px(s.tg)), alert.freq_once_per_bar_close)
+                            else
+                                // limit at 50% of the BC · or at the high / low that BC broke
+                                float lp = AREA == 1 ? (high + low) / 2 : (d == 1 ? high[1] : low[1])
+                                f_limit(s, lp, bar_index + 1)
+                                alert("MMM EDGE PRO FVA · " + CODE + " · " + syminfo.ticker + " · " + (d == 1 ? "BUY LIMIT " : "SELL LIMIT ") + f_px(lp) + " · SL " + f_px(s.sp0), alert.freq_once_per_bar_close)
+            if s.st == 9 and not na(s.sb)
+                box.delete(s.sb)
+                s.sb := na
+        // clean up finished setups
+        for i = SU.size() - 1 to 0
+            if SU.get(i).st == 9
+                SU.remove(i)
+    // 2. armed levels: the first reversal box of the trade direction, edge at the level, within 1 hour
+    bool usedL = false
+    bool usedS = false
+    if LVS.size() > 0 and (TYP == 0 or TYP == 1)
+        for i = LVS.size() - 1 to 0
+            Lv v = LVS.get(i)
+            if v.st == 1
+                bool thr = v.d == 1 ? close < v.bot : close > v.top
+                bool hit = tbD == v.d and bar_index > v.tk and (v.d == 1 ? tbB <= v.top : tbT >= v.bot)
+                if bar_index > v.dl or (HELD and thr)
+                    f_lvDone(i)
+                else if hit
+                    bool ok = (not NBCQ or tbN) and (not H1F or h1Side == v.d) and not (v.d == 1 ? usedL : usedS)
+                    f_lvDone(i)
+                    if ok
+                        if v.d == 1
+                            usedL := true
+                        else
+                            usedS := true
+                        Su s = Su.new(v.d, tbT, tbB, tbL, bar_index, v.nm, TYP == 0 ? 2 : 0)
+                        if sbOn and drOn
+                            s.sb := box.new(tbL, tbT, time + 5 * timeframe.in_seconds() * 1000, tbB, xloc=xloc.bar_time, border_color=color.new(v.d == 1 ? c_up : c_dn, 40), bgcolor=color.new(v.d == 1 ? c_up : c_dn, 88), text=CODE + " · " + v.nm, text_size=size.tiny, text_color=color.new(EL_LBL, 30), text_halign=text.align_right, text_valign=text.align_top)
+                        if TYP == 0
+                            float lp = v.d == 1 ? tbT : tbB
+                            s.j := bar_index
+                            f_limit(s, lp, bar_index + 1)
+                            alert("MMM EDGE PRO FVA · " + CODE + " · " + syminfo.ticker + " · " + v.nm + " · " + (v.d == 1 ? "BUY LIMIT " : "SELL LIMIT ") + f_px(lp) + " · SL " + f_px(s.sp0), alert.freq_once_per_bar_close)
+                        else
+                            alert("MMM EDGE PRO FVA · " + CODE + " · " + syminfo.ticker + " · " + v.nm + " · reversal box " + f_px(tbB) + " – " + f_px(tbT) + " · wait for the retest", alert.freq_once_per_bar_close)
+                        SU.push(s)
+    // 3. first touch of a live level (from the right side · held: no close through it)
+    if LVS.size() > 0 and (TYP == 0 or TYP == 1)
+        for i = LVS.size() - 1 to 0
+            Lv v = LVS.get(i)
+            if v.st == 0
+                bool tch = v.d == 1 ? low <= v.top : high >= v.bot
+                if tch
+                    bool side_ok = v.d == 1 ? close[1] > v.top : close[1] < v.bot
+                    bool held_ok = not HELD or (v.d == 1 ? close >= v.bot : close <= v.top)
+                    if side_ok and held_ok
+                        v.st := 1
+                        v.tk := bar_index
+                        v.dl := bar_index + math.max(1, int(60 / LTF))
+                    else
+                        f_lvDone(i)
+    // 4. LD / SD on this chart (wait 3 · next open)
+    if (TYP == 2 or TYP == 3) and (eX == 3 or eX == 4)
+        int d = eX == 3 ? 1 : -1
+        if SIDE == 0 or d == SIDE
+            Su s = Su.new(d, eXT, eXB, time, bar_index, eX == 3 ? "LD" : "SD", TYP == 2 ? 5 : 3)
+            if TYP == 3
+                float stp = f_stop(d, close, eXT, eXB)
+                if math.abs(close - stp) >= MINR and (maxOp == 0 or f_open() < maxOp)
+                    s.last := bar_index + 1 + 100
+                    f_start(s, close, stp, true, bar_index + 1)
+                    alert("MMM EDGE PRO FVA · " + CODE + " · " + syminfo.ticker + " · ENTRY " + (d == 1 ? "LONG " : "SHORT ") + f_px(close) + " · SL " + f_px(stp) + (na(s.tg) ? " · runner" : " · TP " + f_px(s.tg)), alert.freq_once_per_bar_close)
+                    SU.push(s)
+            else
+                SU.push(s)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TESTED NUMBERS
+// NQ = the strategy book: "p1 n,wr,av,t|p2 n,wr,av,t|both n,wr,av,pf,t,maxL" · ES / gold / crude = rebuilt engine, both periods "n,wr,av,pf,t,maxL|verdict"
+// ═══════════════════════════════════════════════════════════════════════════
+f_nq(int k) =>
+    switch k
+        0 => "1293,35,0.08,2.5|110,46,0.30,2.3|1403,36,0.10,1.22,3.1,15"
+        1 => "1256,46,0.07,3.0|82,61,0.27,2.6|1338,47,0.08,1.34,3.6,11"
+        2 => "866,43,0.12,2.8|67,49,0.32,1.9|933,43,0.13,1.27,3.2,9"
+        3 => "352,48,0.09,2.0|25,60,0.32,1.7|377,49,0.10,1.45,2.4,13"
+        4 => "1779,43,0.09,3.1|129,42,0.15,1.1|1908,43,0.09,1.22,3.3,11"
+        5 => "521,28,0.20,2.2|34,24,0.59,1.1|555,28,0.22,1.42,2.4,16"
+        6 => "185,38,0.10,2.0|31,45,0.33,1.8|216,39,0.14,1.67,2.7,9"
+        7 => "5112,33,0.06,3.6|418,38,0.11,1.7|5530,34,0.06,1.14,4.0,17"
+        8 => "208,15,0.23,2.2|22,18,0.12,0.4|230,16,0.22,1.78,2.2,15"
+        9 => "947,36,0.19,3.3|92,37,0.59,2.2|1039,37,0.23,1.42,3.9,15"
+        10 => "570,36,0.17,2.4|71,39,0.27,1.3|641,37,0.18,1.43,2.7,14"
+        11 => "188,40,0.37,2.9|24,38,0.55,1.4|212,40,0.39,1.87,3.2,10"
+        12 => "288,43,0.21,3.0|29,48,0.52,2.1|317,43,0.23,1.61,3.5,8"
+        13 => "307,36,0.38,2.8|23,44,1.05,1.7|330,36,0.42,1.72,3.2,11"
+        14 => "192,44,0.11,1.8|24,54,0.49,1.8|216,45,0.15,1.63,2.4,11"
+        15 => "362,15,0.20,1.4|30,30,0.81,1.4|392,16,0.25,1.78,1.8,19"
+        16 => "882,37,0.14,3.0|83,32,0.18,1.0|965,37,0.15,1.29,3.2,11"
+        17 => "494,26,0.18,1.7|40,20,0.48,0.9|534,26,0.20,1.30,1.9,22"
+        18 => "567,41,0.14,2.5|46,41,0.17,0.9|613,41,0.14,1.27,2.7,10"
+        19 => "868,35,0.08,1.6|85,28,0.09,0.5|953,35,0.08,1.16,1.6,18"
+        20 => "748,34,0.09,2.3|68,37,0.27,1.4|816,35,0.11,1.29,2.7,14"
+        => "504,15,0.09,3.0|22,9,0.05,0.3|526,14,0.09,1.91,3.0,30"
+f_mk(int k, int m) =>
+    string r = ""
+    if m == 1
+        r := switch k
+            0 => "168,36,0.09,1.26,1.2,11|weak"
+            1 => "143,47,-0.00,1.00,-0.0,6|no edge"
+            2 => "89,42,0.14,1.31,1.1,5|PASS · watch"
+            3 => "57,40,0.03,1.23,0.5,6|weak"
+            4 => "284,35,-0.13,0.67,-2.5,9|no edge"
+            5 => "15,13,-0.32,0.17,-2.8,5|too few trades"
+            6 => "9,33,0.03,1.12,0.1,6|too few trades"
+            7 => "690,35,0.02,1.06,0.6,11|weak"
+            8 => "36,8,-0.19,0.43,-1.6,16|no edge"
+            9 => "82,33,0.05,1.10,0.3,8|weak"
+            10 => "178,34,-0.08,0.78,-1.2,12|no edge"
+            11 => "47,36,0.07,1.17,0.4,6|too few trades"
+            12 => "77,47,0.04,1.11,0.4,4|weak"
+            13 => "51,27,-0.23,0.69,-1.0,9|no edge"
+            14 => "26,58,0.11,2.72,1.5,4|too few trades"
+            15 => "58,14,0.01,1.03,0.1,12|weak"
+            16 => "258,34,-0.16,0.70,-2.3,12|no edge"
+            17 => "186,27,-0.13,0.80,-1.1,15|no edge"
+            18 => "51,51,0.23,1.56,1.3,5|PASS · watch"
+            19 => "202,33,-0.12,0.78,-1.4,10|no edge"
+            20 => "76,38,-0.16,0.60,-1.7,6|no edge"
+            => "20,5,-0.03,0.42,-0.7,17|too few trades"
+    else if m == 2
+        r := switch k
+            0 => "246,41,0.15,1.31,1.8,12|weak"
+            1 => "152,39,-0.08,0.67,-1.7,6|no edge"
+            2 => "105,38,-0.02,0.97,-0.1,6|no edge"
+            3 => "71,34,-0.04,0.85,-0.5,8|no edge"
+            4 => "318,37,-0.08,0.85,-1.2,8|no edge"
+            5 => "42,21,-0.29,0.54,-1.6,10|no edge"
+            6 => "12,17,-0.12,0.59,-0.6,5|too few trades"
+            7 => "882,32,-0.05,0.91,-1.2,21|no edge"
+            8 => "46,7,0.03,1.15,0.2,18|weak"
+            9 => "99,30,0.02,1.02,0.1,9|weak"
+            10 => "136,34,0.18,1.33,1.0,11|weak"
+            11 => "46,28,0.23,1.34,0.7,9|weak"
+            12 => "102,40,0.18,1.31,1.3,8|PASS · watch"
+            13 => "54,35,0.37,1.57,1.1,9|PASS · watch"
+            14 => "30,43,-0.01,0.96,-0.1,6|no edge"
+            15 => "68,12,0.12,1.61,0.8,26|PASS · watch"
+            16 => "271,29,-0.04,0.94,-0.4,27|no edge"
+            17 => "183,14,-0.14,0.84,-0.7,34|no edge"
+            18 => "66,30,-0.12,0.81,-0.8,8|no edge"
+            19 => "206,24,-0.12,0.82,-1.1,14|no edge"
+            20 => "109,32,-0.10,0.83,-0.8,15|no edge"
+            => "44,2,-0.22,0.10,-3.2,35|no edge"
+    else if m == 3
+        r := switch k
+            0 => "158,30,-0.28,0.62,-1.8,10|no edge"
+            1 => "104,33,-0.13,0.56,-2.2,9|no edge"
+            2 => "64,42,0.01,1.02,0.1,8|weak"
+            3 => "54,31,-0.32,0.21,-3.3,12|no edge"
+            4 => "213,31,-0.23,0.65,-2.4,13|no edge"
+            5 => "11,9,-0.80,0.01,-7.2,6|too few trades"
+            6 => "15,33,-0.06,0.84,-0.2,5|too few trades"
+            7 => "600,33,-0.10,0.83,-1.7,11|no edge"
+            8 => "23,13,-0.02,0.82,-0.2,6|no edge"
+            9 => "99,29,-0.14,0.80,-0.9,11|no edge"
+            10 => "143,24,-0.18,0.70,-1.5,17|no edge"
+            11 => "44,25,0.18,1.29,0.6,9|weak"
+            12 => "82,40,0.12,1.22,0.8,5|PASS · watch"
+            13 => "26,27,0.23,1.34,0.5,6|weak"
+            14 => "31,35,0.03,1.06,0.1,9|weak"
+            15 => "29,14,-0.01,0.97,-0.0,7|no edge"
+            16 => "274,33,0.03,1.05,0.3,15|weak"
+            17 => "198,18,-0.11,0.89,-0.5,16|no edge"
+            18 => "74,46,0.18,1.33,1.1,5|PASS · watch"
+            19 => "219,26,-0.21,0.69,-2.0,10|no edge"
+            20 => "89,33,-0.07,0.88,-0.5,8|no edge"
+            => "13,0,-0.39,0.00,-2.7,13|too few trades"
+    r
+f_rule(int k) =>
+    switch k
+        0 => "Price falls into an H1 gap and turns. The turn leaves a small box on 5m. We wait at the edge of that box with a limit, like a goalkeeper on the line. HTF level: Price touches the H1 UPG gap for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: No candle closed through the level before the box printed (the level held). · Entry: Limit order at the reversal box edge: its top for longs, its bottom for shorts. The first touch fills. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:2 RR. · Trail: After the first opposite candle, wait for a BC in profit, then move the stop to that pullback low / high. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        1 => "Same box-edge limit, at any UPG gap, only in the NY afternoon. HTF level: Price touches the UPG gap (M15 · H1 · H4 · D · W) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: Only take fills from 12:00 to 16:00 New York. · Entry: Limit order at the reversal box edge: its top for longs, its bottom for shorts. The first touch fills. · Stop: Fixed 50 pts (ES 20). · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:3 RR. · Trail: Once in profit, move the stop under each new BC (over it for shorts). · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        2 => "Same box-edge limit at an M15 gap, only in the NY morning. HTF level: Price touches the M15 UPG gap for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: Only take fills from 09:30 to 12:00 New York. · Entry: Limit order at the reversal box edge: its top for longs, its bottom for shorts. The first touch fills. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:2 RR. · Trail: Once in profit, move the stop under each new BC (over it for shorts). · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        3 => "The NY afternoon makes its first range at 13:30–13:45. When price comes back to that low and turns, buyers defend it. We wait at the box edge. HTF level: Price touches the NY PM opening range low (13:30–13:45 New York) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Entry: Limit order at the reversal box edge: its top for longs, its bottom for shorts. The first touch fills. · Stop: Fixed 50 pts (ES 20). · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:3 RR. · Trail: Once in profit, move the stop under each new BC (over it for shorts). · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        4 => "Session highs and lows are where stops sit. When price turns there in the H1 trend direction, we wait at the box edge. HTF level: Price touches the session or range high / low (Asia, London, pre-open, Globex, NY AM, NY PM) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: Trade only in the MMM PRO FVA H1 trend direction. · Entry: Limit order at the reversal box edge: its top for longs, its bottom for shorts. The first touch fills. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:3 RR. · Trail: Once in profit, move the stop under each new BC (over it for shorts). · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        5 => "An M15 internal box on the 1m chart, NY morning only, with a 20-point stop and no target. Few wins, but big ones. HTF level: Price touches the MMM PRO FVA M15 internal box for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 1m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: Only take fills from 09:30 to 12:00 New York. · Entry: Limit order at the reversal box edge: its top for longs, its bottom for shorts. The first touch fills. · Stop: Fixed 20 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: No target: a runner. · Trail: After the first opposite candle, wait for a BC in profit, then move the stop to that pullback low / high. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        6 => "The LEZ is the last box before a break: the last place the winners loaded up. In London, when price comes back to it, we wait at the 1m box edge. HTF level: Price touches the MMM PRO FVA Bu / Be LEZ (M15 · H1 · H4) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 1m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: No candle closed through the level before the box printed (the level held). · Filter: Only take fills from 02:00 to 08:00 New York. · Entry: Limit order at the reversal box edge: its top for longs, its bottom for shorts. The first touch fills. · Stop: Fixed 20 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:2 RR. · Trail: After the first opposite candle, wait for a BC in profit, then move the stop to that pullback low / high. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        7 => "The busiest strategy: any UPG gap, level held, limit at the 5m box edge. HTF level: Price touches the UPG gap (M15 · H1 · H4 · D · W) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: No candle closed through the level before the box printed (the level held). · Entry: Limit order at the reversal box edge: its top for longs, its bottom for shorts. The first touch fills. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:2 RR. · Trail: After the first opposite candle, wait for a BC in profit, then move the stop to that pullback low / high. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        8 => "Price comes back to an H1 box, the retest only touches, and a BC closes out. We go with the H1 trend and move to BE after one BC. HTF level: Price touches the MMM PRO FVA H1 box (T#, P#, R#, internal, break box or LEZ) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: No candle closed through the level before the box printed (the level held). · Filter: Trade only in the MMM PRO FVA H1 trend direction. · Retest: Price comes back and touches the reversal box, but no candle closes inside it. · Entry: A BC closes out of the box: enter at the next open. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:5 RR. · Trail: After 1 BC in profit, move the stop to entry. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        9 => "An LD is a break up. If the next 3 candles all stay outside the broken box, the break is real: like a door that stays open. We buy the 4th candle. Wait for: An LD: a 5m candle closes above the last bull box (a continuation break). · Then: Count the next 3 candles. None of them may close back inside the broken box. · Entry: Buy at the open of the 4th candle. · Stop: 1 tick past the broken box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the broken box: out at that close. · Target: 1:10 RR. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        10 => "Same idea on 15m, both sides: the break stays outside for 3 candles, we join it. Wait for: An LD (long) or SD (short): a 15m candle closes past the last box in the trend direction. · Then: Count the next 3 candles. None of them may close back inside the broken box. · Entry: Enter at the open of the 4th candle. · Stop: Fixed 50 pts (ES 20). · Get out early: A candle closes back below the broken box (above it for shorts): out at that close. · Target: 1:10 RR. · Trail: After the first opposite candle, wait for a BC in profit, then move the stop to that pullback low / high. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        11 => "A 1-hour break up. We simply buy the next open and trail under each BC. Wait for: An LD: a 1h candle closes above the last bull box. · Entry: Buy at the open of the next 1h candle. · Stop: 1 tick past the broken box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A 1h candle closes back below the broken box. · Target: 1:5 RR. · Trail: Once in profit, move the stop under each new BC (over it for shorts). · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        12 => "Price falls into a gap, turns, and makes a 15m box. In Asia, price comes back and only wicks into the box. A BC closes out: we are in. HTF level: Price touches the UPG gap (M15 · H1 · H4 · D · W) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 15m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: No candle closed through the level before the box printed (the level held). · Filter: Only take entries from 18:00 to 02:00 New York. · Retest: Price comes back and only wicks into the box: no candle closes inside it. · Entry: A BC closes out of the box: enter at the next open. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:2 RR. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        13 => "The box needs 2 BCs to be trusted. Then price retests it, a BC closes out, and we buy the dip at 50% of that BC. HTF level: Price touches the H1 UPG gap for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. Then a 2nd BC must close in your direction before any retest. · Filter: No candle closed through the level before the box printed (the level held). · Retest: Price comes back and touches the box. · Entry: A BC closes out of the box: place a limit at 50% of that BC. Cancel if price closes back past the box first. · Stop: 1 tick past the reversal box low (long) / high (short), at least 10 pts (ES 4 · gold 2.4 · crude 0.10), no cap. · Target: 1:10 RR. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        14 => "Same as FVA.M14 on 15m at any UPG gap, in London, with a 50-point stop. HTF level: Price touches the UPG gap (M15 · H1 · H4 · D · W) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 15m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. Then a 2nd BC must close in your direction before any retest. · Filter: Only take entries from 02:00 to 08:00 New York. · Retest: Price comes back and only wicks into the box. · Entry: A BC closes out of the box: place a limit at 50% of that BC. · Stop: Fixed 50 pts (ES 20). · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:3 RR. · Trail: Once in profit, move the stop under each new BC (over it for shorts). · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        15 => "Max’s own management: after the 1st BC in profit the stop goes to BE + fees. If we get shaken out and the box still holds, we re-enter on the next touch → BC. HTF level: Price touches the H1 UPG gap for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. Then a 2nd BC must close in your direction before any retest. · Filter: No candle closed through the level before the box printed (the level held). · Retest: Price comes back and touches the box. · Entry: A BC closes out of the box: enter at the next open. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: No target: a runner. · Manage: After the 1st BC in profit, move the stop to entry + 1 pt (fees). · Re-enter: Stopped or out at BE and the box still holds? Wait for touch → BC out again and re-enter. Up to 3 times. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        16 => "The cleanest one: price falls into a gap, turns, comes back and only wicks the box. The 1st BC back out of the box is the entry. HTF level: Price touches the UPG gap (M15 · H1 · H4 · D · W) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 15m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: No candle closed through the level before the box printed (the level held). · Retest: Price comes back and only wicks into the box: no candle closes inside it. · Entry: The 1st BC that closes out of the box: enter at the next open. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:3 RR. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        17 => "Same retest. Then we wait at the high that the entry BC broke, with a small 20-point stop, and aim for 1:10. HTF level: Price touches the M15 UPG gap for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 15m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. · Filter: No candle closed through the level before the box printed (the level held). · Retest: Price comes back and only wicks into the box. · Entry: The 1st BC that closes out of the box: place a limit at the high it broke (low for shorts). · Stop: Fixed 20 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:10 RR. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        18 => "A PRO FVA break box on the higher chart, a 5m box with an NBC inside, the retest, then the 1st BC out. Simple 1:2 target: easy for prop rules. HTF level: Price touches the MMM PRO FVA break box: CDL, CDS, LD or SD on M15 / H1 / H4 for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. The box must hold an NBC inside it (not BC on BC). · Retest: Price comes back and touches the box. · Entry: The 1st BC that closes out of the box: enter at the next open. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:2 RR. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        19 => "Fast retests work best on 15m: the candle right after the break already touches the box. Then the 1st BC out is the entry. HTF level: Price touches the UPG gap (M15 · H1 · H4 · D · W) for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 15m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. The very next candle after the break candle is already the retest: no 2nd BC, NBC or opposite candle in between. · Filter: No candle closed through the level before the box printed (the level held). · Retest: The candle right after the break touches the box. · Entry: The 1st BC that closes out of the box: enter at the next open. · Stop: 1 tick past the reversal box low (long) / high (short), at least 20 and at most 50 pts. · Get out early: A candle closes back below the reversal box (long) / above it (short): out at that close. · Target: 1:5 RR. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        20 => "After the break, a small NBC pauses the push. That pause usually brings price back to the box. Touch, 1st BC out, in. One re-entry allowed. HTF level: Price touches the M15 UPG gap for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 5m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. After the break candle, an NBC prints before price comes back to the box. · Retest: Price comes back and touches the box. · Entry: The 1st BC that closes out of the box: enter at the next open. · Stop: Fixed 50 pts (ES 20). · Target: 1:3 RR. · Re-enter: Stopped out and the box still holds? Wait for touch → BC out again and re-enter once. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+        => "On 1m, price goes back and forth before the retest. After the entry, the stop goes to BE after 2 BCs, so full losses are rare. HTF level: Price touches the MMM PRO FVA M15 internal box for the first time. · Wait for: The first MMM PRO FVA reversal box in your direction prints on 1m: for longs a BuBC that closes above the last bearish candles, with the box low at or inside the level. Before the retest you see a 2nd BC, an NBC and an opposite BC. · Retest: Price comes back and a candle closes inside the box. · Entry: The 1st BC that closes out of the box: enter at the next open. · Stop: Fixed 50 pts (ES 20). · Target: 1:3 RR. · Trail: After 2 BCs in profit, move the stop to entry. · Time out: At the next session open (18:00 · 02:00 · 08:00 · 09:30 New York): losing → out at the open, winning → trail under each BC. Out at the 2nd session open."
+
+f_num(array<string> a, int i) =>
+    i < a.size() ? str.tonumber(a.get(i)) : na
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LEVELS ON THE CHART (nearest live levels, redrawn on the last candle)
+// ═══════════════════════════════════════════════════════════════════════════
+var array<line>  LVL_L = array.new<line>()
+var array<label> LVL_B = array.new<label>()
+if barstate.islast
+    for x in LVL_L
+        line.delete(x)
+    for x in LVL_B
+        label.delete(x)
+    LVL_L.clear()
+    LVL_B.clear()
+    if lvOn and RUN and LVS.size() > 0
+        array<float> dist = array.new<float>()
+        array<int>   idx  = array.new<int>()
+        for i = 0 to LVS.size() - 1
+            Lv v = LVS.get(i)
+            if v.st != 9
+                dist.push(v.st == 1 ? -1.0 : math.min(math.abs(close - v.top), math.abs(close - v.bot)))
+                idx.push(i)
+        int shown = 0
+        while shown < lvN and dist.size() > 0
+            int bj = 0
+            for q = 0 to dist.size() - 1
+                if dist.get(q) < dist.get(bj)
+                    bj := q
+            Lv v = LVS.get(idx.get(bj))
+            dist.remove(bj)
+            idx.remove(bj)
+            color col = v.st == 1 ? EL_GOLD : v.d == 1 ? c_up : c_dn
+            int x1 = v.t0
+            int x2 = time + 15 * timeframe.in_seconds() * 1000
+            LVL_L.push(line.new(x1, v.top, x2, v.top, xloc=xloc.bar_time, color=color.new(col, 30), width=1, style=line.style_dotted))
+            if math.abs(v.top - v.bot) >= TICK / 2
+                LVL_L.push(line.new(x1, v.bot, x2, v.bot, xloc=xloc.bar_time, color=color.new(col, 30), width=1, style=line.style_dotted))
+            LVL_B.push(label.new(x2, v.d == 1 ? v.top : v.bot, (v.st == 1 ? "ARMED · " : "") + v.nm + (v.d == 1 ? " ▲" : " ▼"), xloc=xloc.bar_time, style=label.style_label_left, color=color(na), textcolor=col, size=size.tiny))
+            shown += 1
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TABLES · LIVE (what happens now) · STATISTICS (tested + this chart)
+// ═══════════════════════════════════════════════════════════════════════════
+var table TL = na
+var table TS = na
+if barstate.isfirst
+    if tlOn
+        TL := table.new(f_pos(tlPos), 2, 12, bgcolor=EL_BG, frame_color=#3C3C3C, frame_width=1, border_color=#282828, border_width=1)
+        table.merge_cells(TL, 0, 0, 1, 0)
+    if tsOn
+        TS := table.new(f_pos(tsPos), 7, 9, bgcolor=EL_BG, frame_color=#3C3C3C, frame_width=1, border_color=#282828, border_width=1)
+        table.merge_cells(TS, 0, 0, 6, 0)
+        table.merge_cells(TS, 0, 8, 6, 8)
+
+f_c(table T, int c, int r, string tx, color tc, color bg, string z, string tip = "") =>
+    table.cell(T, c, r, tx, text_color=tc, bgcolor=bg, text_halign=c == 0 ? text.align_left : text.align_left, text_size=f_tsz(z), tooltip=tip)
+    true
+f_lr(int r, string a, string b, color c, string tip = "") =>
+    f_c(TL, 0, r, a, EL_LBL, r % 2 == 0 ? EL_ROW : EL_ALT, tbSz, tip)
+    f_c(TL, 1, r, b, c, r % 2 == 0 ? EL_ROW : EL_ALT, tbSz)
+    r + 1
+
+if barstate.islast and tlOn
+    table.clear(TL, 0, 1, 1, 11)
+    table.cell(TL, 0, 0, "─ MMM EDGE PRO FVA · " + syminfo.ticker + " · " + str.format_time(time, "EEE HH:mm", NY) + " NY ─", text_color=EL_GOLD, bgcolor=EL_BG, text_size=f_tsz(tbSz))
+    int r = 1
+    r := f_lr(r, "Strategy", selIn, EL_GOLD, f_rule(K))
+    string vd = MKT <= 0 ? "PASS" : str.split(f_mk(K, MKT), "|").get(1)
+    r := f_lr(r, "Market", MKTN + " · " + (MKT < 0 ? "not tested: NQ rules" : MKT == 0 ? "PASS (strategy book)" : vd + " on its own data") + (MOK ? "" : " · OFF here (Market Check)"), MOK ? (MKT <= 0 or str.startswith(vd, "PASS") ? EL_POS : EL_WARN) : EL_WARN, "Market Check is " + (mkChk ? "ON" : "OFF") + ". Passed on ES: " + "FVA.M3, FVA.M19" + " · gold: " + "FVA.M13, FVA.M14, FVA.M16" + " · crude: " + "FVA.M13, FVA.M19" + ".")
+    r := f_lr(r, "Chart", TFOK ? str.tostring(LTF) + (LTF == 60 ? "" : "m") + " chart ✔" : "use the " + (LTF == 60 ? "1h" : str.tostring(LTF) + "m") + " chart for " + CODE, TFOK ? EL_LBL : EL_WARN)
+    r := f_lr(r, "Window", WA < 0 ? "any hour" + (H1F ? " · H1 trend " + (h1Side == 1 ? "▲" : h1Side == -1 ? "▼" : "—") : "") : (winNow ? "OPEN" : "closed") + " · " + str.format("{0}:{1}–{2}:{3} NY", str.tostring(int(WA / 60), "00"), str.tostring(WA % 60, "00"), str.tostring(int(WB / 60), "00"), str.tostring(WB % 60, "00")), WA < 0 or winNow ? EL_LBL : EL_MUTE)
+    // what the strategy waits for now
+    int nLv = 0
+    int nArm = 0
+    for v in LVS
+        nLv += v.st == 9 ? 0 : 1
+        nArm += v.st == 1 ? 1 : 0
+    string now = ""
+    color  nowC = EL_LBL
+    int nTr = 0
+    int nLim = 0
+    int nSet = 0
+    float uU = 0.0
+    for s in SU
+        if s.st == 3
+            nTr += 1
+            uU += ((close - s.E) * s.d - COST) * USD
+        else if s.st == 2
+            nLim += 1
+        else if s.st != 9
+            nSet += 1
+    if not RUN
+        now := not TFOK ? "off · wrong chart" : "off · not passed on " + MKTN
+        nowC := EL_WARN
+    else if nTr > 0
+        now := str.tostring(nTr) + " trade" + (nTr > 1 ? "s" : "") + " open · " + (uU >= 0 ? "+" : "") + f_usd(uU)
+        nowC := uU >= 0 ? EL_POS : EL_NEG
+    else if nLim > 0
+        now := str.tostring(nLim) + " limit order" + (nLim > 1 ? "s" : "") + " waiting"
+        nowC := EL_GOLD
+    else if nSet > 0
+        now := TYP == 2 ? "LD / SD printed · waiting 3 candles outside the box" : str.tostring(nSet) + " reversal box" + (nSet > 1 ? "es" : "") + " · waiting for the retest → 1st BC out"
+        nowC := EL_GOLD
+    else if TYP == 2 or TYP == 3
+        now := "waiting for a " + (SIDE == 1 ? "LD" : "LD / SD") + " on this chart"
+    else if nArm > 0
+        now := str.tostring(nArm) + " level" + (nArm > 1 ? "s" : "") + " touched · waiting for the reversal box (1 hour)"
+        nowC := EL_GOLD
+    else
+        now := "waiting for a first touch · " + str.tostring(nLv) + " live level" + (nLv == 1 ? "" : "s")
+    r := f_lr(r, "Now", now, nowC)
+    r := f_lr(r, "Today", str.tostring(tdN) + " trade" + (tdN == 1 ? "" : "s") + " · " + str.tostring(tdW) + " ✔ " + str.tostring(tdL) + " ✖ · Net " + (tdU >= 0 ? "+" : "") + f_usd(tdU), tdN == 0 ? EL_MUTE : tdU >= 0 ? EL_POS : EL_NEG)
+    r := f_lr(r, "Last", lastTx == "" ? "—" : lastTx, EL_LBL)
+    r := f_lr(r, "This chart", rN == 0 ? "no trades yet" : str.tostring(rN) + " trades · WR " + str.tostring(100.0 * rW / rN, "#") + "% · avg RR " + f_sgn(rSum / rN, "#.00") + " · PF " + (rGL > 0 ? str.tostring(rGW / rGL, "#.00") : "—") + " · Net " + (rUsd >= 0 ? "+" : "") + f_usd(rUsd), rN == 0 ? EL_MUTE : rUsd >= 0 ? EL_POS : EL_NEG, "What the indicator traded on this chart's history, at your size, after costs. Max drawdown " + f_usd(-rDD) + " · max losses in a row " + str.tostring(rML) + ".")
+    r := f_lr(r, "Size", str.tostring(szN) + " " + CTN + " · 1 pt = " + f_usd(USD) + " · cost " + str.tostring(COST) + " pts a trade", EL_MUTE)
+
+if barstate.islast and tsOn
+    string z = tbSz
+    table.cell(TS, 0, 0, "─ " + selIn + " · tested numbers · " + (MKT <= 0 ? "NQ" : MKTN) + " ─", text_color=EL_GOLD, bgcolor=EL_BG, text_size=f_tsz(z), tooltip=f_rule(K))
+    array<string> hd = array.from("", "Trades", "WR (win rate)", "avg RR", "PF", "t-score", "Losses in a row")
+    for c = 0 to 6
+        f_c(TS, c, 1, hd.get(c), EL_GOLD, EL_ROW, z)
+    array<string> nq = str.split(f_nq(K), "|")
+    array<string> p1 = str.split(nq.get(0), ",")
+    array<string> p2 = str.split(nq.get(1), ",")
+    array<string> ba = str.split(nq.get(2), ",")
+    f_c(TS, 0, 2, "NQ period 1 · 2022–25", EL_LBL, EL_ALT, z)
+    f_c(TS, 1, 2, p1.get(0), EL_LBL, EL_ALT, z)
+    f_c(TS, 2, 2, p1.get(1) + "%", EL_LBL, EL_ALT, z)
+    f_c(TS, 3, 2, f_sgn(f_num(p1, 2), "#.00"), f_num(p1, 2) > 0 ? EL_POS : EL_NEG, EL_ALT, z)
+    f_c(TS, 4, 2, "—", EL_MUTE, EL_ALT, z)
+    f_c(TS, 5, 2, p1.get(3), EL_LBL, EL_ALT, z)
+    f_c(TS, 6, 2, "—", EL_MUTE, EL_ALT, z)
+    f_c(TS, 0, 3, "NQ period 2 · MNQ 2026", EL_LBL, EL_ROW, z)
+    f_c(TS, 1, 3, p2.get(0), EL_LBL, EL_ROW, z)
+    f_c(TS, 2, 3, p2.get(1) + "%", EL_LBL, EL_ROW, z)
+    f_c(TS, 3, 3, f_sgn(f_num(p2, 2), "#.00"), f_num(p2, 2) > 0 ? EL_POS : EL_NEG, EL_ROW, z)
+    f_c(TS, 4, 3, "—", EL_MUTE, EL_ROW, z)
+    f_c(TS, 5, 3, p2.get(3), EL_LBL, EL_ROW, z)
+    f_c(TS, 6, 3, "—", EL_MUTE, EL_ROW, z)
+    f_c(TS, 0, 4, "NQ both periods ✔ PASS", EL_POS, EL_ALT, z)
+    for c = 1 to 6
+        string v = ba.get(c - 1)
+        f_c(TS, c, 4, c == 2 ? v + "%" : c == 3 ? f_sgn(str.tonumber(v), "#.00") : v, c == 3 ? (str.tonumber(v) > 0 ? EL_POS : EL_NEG) : EL_LBL, EL_ALT, z)
+    // the other markets (rebuilt engine, both periods)
+    for m = 1 to 3
+        array<string> mm = str.split(f_mk(K, m), "|")
+        array<string> a = str.split(mm.get(0), ",")
+        string nmM = m == 1 ? "ES" : m == 2 ? "Gold" : "Crude"
+        string vv = mm.get(1)
+        color bgc = m % 2 == 1 ? EL_ROW : EL_ALT
+        f_c(TS, 0, 4 + m, nmM + " · " + vv, str.startswith(vv, "PASS") ? EL_POS : EL_WARN, bgc, z, "Rebuilt FVA test engine on " + nmM + "'s own data, Dec 2025 – Oct 2026 (1m / 5m charts: fewer months), both periods together.")
+        if a.size() < 6
+            f_c(TS, 1, 4 + m, "no trades", EL_MUTE, bgc, z)
+            for c = 2 to 6
+                f_c(TS, c, 4 + m, "", EL_MUTE, bgc, z)
+        else
+            for c = 1 to 6
+                string v = a.get(c - 1)
+                f_c(TS, c, 4 + m, c == 2 ? v + "%" : c == 3 ? f_sgn(str.tonumber(v), "#.00") : v, c == 3 ? (str.tonumber(v) > 0 ? EL_POS : EL_NEG) : EL_LBL, bgc, z)
+    table.cell(TS, 0, 8, "WR = win rate · avg RR = average result per trade (1 = one stop) · PF = money won ÷ money lost · t-score 2+ = probably not luck · PASS = made money in both periods · research only, not advice", text_color=EL_MUTE, bgcolor=EL_BG, text_size=f_tsz(z), text_halign=text.align_left)

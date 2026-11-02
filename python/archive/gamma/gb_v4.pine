@@ -1,0 +1,1212 @@
+//@version=6
+indicator("Gamma Walls and Institutional Bias @MaxMaserati", shorttitle="Gamma Bias Pro @MaxMaserati", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=500)
+
+import TradingView/LibraryCOT/2 as cot
+
+// v4 (Oct 28 2026)
+//  · Histogram 3 candles from price (Gap From Price moves it) · it always sits between price and the level labels.
+//  · Lines Start At: Source (where the level was born) · Current Price · Histogram · Line Length counted from that start.
+//  · Every level type has its own color, width and style · solid by default, thicker = more important · magnets and the plan dotted.
+//  · Call wall today = deep blue · call wall 90D = green · all labels Tiny by default.
+// v3 · zero gamma line black · Show Prices switch (OFF by default) · short line labels · short table, full text on hover.
+// v2 · typed / pasted walls only from today's 18:00 open · auto walls labeled est. · flip-based market type · OI matched on history
+//      · zones = walls + magnets only · breaks score the fast market · BUY / SELL arrows with "wrong if" and "job done" prices.
+
+// ─── 90-DAY WALLS ───
+grp_g = "1. 90-Day Walls (Big Picture)"
+callWallIn = input.price(0.0, "90D Call Wall (0 = auto)", group=grp_g, tooltip="From your options gamma data: today to +3 months, net view. The longest positive (call) bar. 0 = the indicator estimates it.")
+putWallIn  = input.price(0.0, "90D Put Wall (0 = auto)", group=grp_g, tooltip="The longest negative (put) bar on the 3-month view. Use a split view if the put bars are tiny. 0 = the indicator estimates it.")
+zeroIn     = input.price(0.0, "90D Zero Gamma (0 = auto)", group=grp_g, tooltip="The Zero Gamma level from the 3-month view. 0 = the indicator estimates it.")
+oiDays     = input.int(90, "Auto Estimate Lookback (Days)", minval=20, maxval=250, group=grp_g, tooltip="Only used when a box above is 0. Built from DAILY bars, so it is the same on every timeframe.")
+stepIn     = input.float(0.0, "Auto Estimate Strike Step (0 = Auto)", minval=0.0, group=grp_g)
+roundBoost = input.bool(true, "Auto Estimate: Boost Round Strikes", group=grp_g)
+histDays   = input.int(10, "History Days With Walls", minval=1, maxval=60, group=grp_g)
+
+// ─── TODAY'S LEVELS ───
+grp_d = "2. Today's Levels (0DTE Paste)"
+strikeData = input.text_area("", "Paste Daily Block / 0DTE Strikes", group=grp_d, tooltip="Paste the daily block, one item per line:\nCW90=, PW90=, ZG90=, FLIP=, INDEX=NDX or SPX\nthen today's strikes as strike:value\n30850:192\n30700:21.5\n30475:-17.3\nMinus sign on put (negative) bars.\nThe number boxes above still win when they are not 0.")
+flipIn     = input.price(0.0, "Today GEX Flip (0 = auto)", group=grp_d, tooltip="The GEX Flip level on the same-day (0DTE) view. 0 = estimated from your paste.")
+magnetsN   = input.int(2, "Magnets To Show", minval=0, maxval=5, group=grp_d, tooltip="The next biggest BLUE bars after today's call wall. Price is pulled toward them.")
+
+// ─── INDEX TO FUTURES ───
+grp_x = "3. Index -> Futures"
+idxIn       = input.string("Auto", "Index", options=["Auto", "NDX", "SPX"], group=grp_x, tooltip="Auto = NDX on NQ / MNQ charts, SPX on ES / MES charts.")
+levelType   = input.string("Index Levels (convert to futures)", "Levels Are In", options=["Index Levels (convert to futures)", "Futures Levels (no convert)"], group=grp_x, tooltip="Index levels (NDX / SPX) are moved onto the futures chart with the live futures − index gap.")
+string targetIndex = idxIn == "Auto" ? (str.contains(syminfo.root, "ES") ? "SPX" : "NDX") : idxIn
+
+// ─── COT AND OI ───
+grp_c = "4. COT + Open Interest"
+cftcPreset = input.string("Auto (from chart)", "CFTC Code", options=["Auto (from chart)", "NQ - E-mini Nasdaq (209742)", "ES - E-mini S&P 500 (13874A)", "YM - E-mini Dow (124603)", "RTY - E-mini Russell (239742)", "6E - Euro FX (099741)", "Manual Entry (use text box below)"], group=grp_c, tooltip="The weekly CFTC report with Asset Managers and Leveraged Funds (hedge funds). Gold and oil are not in this report, so they are not listed.")
+manualCftcCode      = input.string("", "Manual CFTC Code", group=grp_c)
+lfHeavyPct          = input.float(30.0, "Hedge Funds Crowded = Net ≥ X% Of Their Positions", minval=5.0, maxval=90.0, group=grp_c)
+absorbDominanceMult = input.float(3.0, "Trap = Asset Mgr Change ≥ X × Hedge Fund Change", minval=1.0, group=grp_c)
+oiSurgeMult         = input.float(2.0, "OI Surge = Change ≥ X × Its 20-Day Average", minval=1.0, group=grp_c)
+useFullOI           = input.bool(true, "Micro / Nano Chart: Use Full-Size COT + OI", group=grp_c, tooltip="On MNQ / NNQ / MES / MYM / M2K charts, read COT and Open Interest from the full-size E-mini (NQ, ES, YM, RTY).\nMicro and nano reports are mostly small traders and can tell the OPPOSITE story. The E-mini is where the institutions are.\nCFTC codes: NQ 209742, ES 13874A, YM 124603, RTY 239742.")
+mmmVelocityThresh   = input.float(0.75, "Strong Candle = Close In The Top / Bottom (1 − X) Of Its Range", minval=0.5, maxval=0.95, group=grp_c, tooltip="0.75 = a bull candle is strong when it closes in its top 25%, a bear candle in its bottom 25%.")
+
+// ─── WALL SIGNALS ───
+grp_s = "5. Wall Signals"
+showSignals    = input.bool(true, "Show Signals", group=grp_s)
+showFade       = input.bool(true, "Wall Held", inline="sg1", group=grp_s, tooltip="Wall Held = price touched a wall and was pushed back (fade).\nTrap = it touched a wall, the footprint shows the other side trapped (absorb).\nBreak = a close through a wall (squeeze).\nFake Break = a close through a wall with no footprint support.")
+showAbsorb     = input.bool(true, "Trap", inline="sg1", group=grp_s)
+showSqueeze    = input.bool(true, "Break", inline="sg1", group=grp_s)
+showWeak       = input.bool(true, "Fake Break", inline="sg1", group=grp_s)
+minGrade       = input.string("B", "Minimum Grade To Show", options=["C", "B", "A"], group=grp_s, tooltip="Each signal checks its own list (bias, big money, footprint, market type). A = 70%+ of the checks agree · B = 50%+ · C = less.")
+sigWalls       = input.string("Today's Walls (0DTE)", "Signals Watch", options=["Today's Walls (0DTE)", "90-Day Walls"], group=grp_s, tooltip="Which walls the signals react to. Falls back to the 90-day walls when nothing is pasted for today.\nTyped or pasted walls only exist from today's session, so signals on them only print from today's 18:00 New York open.")
+zonePts        = input.float(0.0, "Wall Zone (Points, 0 = auto)", minval=0.0, group=grp_s, tooltip="How close price must be to count as AT the wall. NQ: 10-20. ES: 2-5. 0 = half a strike step.")
+sigLabelSizeIn = input.string("Tiny", "Signal Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_s)
+showSigGrade   = input.bool(true, "Show Grade", inline="sl", group=grp_s)
+showSigWhy     = input.bool(true, "Show Reason", inline="sl", group=grp_s, tooltip="Adds a short reason to the arrow, e.g. SELL B · wall held.")
+delMode        = input.string("When Violated or Done", "Auto-Delete Signals", options=["Keep All", "When Violated", "When Violated or Done"], group=grp_s, tooltip="When Violated: a bullish arrow is deleted when a candle CLOSES below its kill level. A bearish arrow is deleted when a candle CLOSES above it.\nWhen Violated or Done: also deleted once price travels the 'Job Done' distance in the signal's direction.\nResult: only live, unfinished signals stay on the chart.")
+delLevel       = input.string("Signal Candle Wick", "Violated = Close Beyond", options=["Signal Candle Wick", "Signal Candle Open", "Signal Candle Close"], group=grp_s, tooltip="Wick: bullish dies on a close below the signal candle LOW, bearish on a close above its HIGH. Open / Close = tighter.")
+doneDist       = input.float(0.0, "Job Done Distance (Points, 0 = auto)", minval=0.0, group=grp_s, tooltip="How far price must travel in the signal's direction to count as DONE. 0 = 3x the Wall Zone. NQ: 30-50. ES: 8-12.")
+
+grp_f = "6. Footprint (Premium)"
+useFootprint = input.bool(true, "Use Footprint Delta", group=grp_f)
+fpTicks      = input.int(4, "Ticks Per Row", minval=1, group=grp_f)
+deltaMinPct  = input.int(10, "Min Delta (% of Bar Volume)", minval=1, maxval=100, group=grp_f)
+
+// ─── LEVEL MAP ───
+grp_m = "7. Level Map"
+showLadder     = input.bool(true, "Show Level Map", group=grp_m)
+show90dLvls    = input.bool(true, "90-Day Levels", inline="lm1", group=grp_m)
+showTodayLvls  = input.bool(true, "Today's Levels", inline="lm1", group=grp_m)
+showRoles      = input.bool(true, "Explain Each Level", group=grp_m, tooltip="Adds what the level means, e.g. 'ceiling: sell rallies here'.")
+lineStart      = input.string("Current Price", "Lines Start At", options=["Source", "Current Price", "Histogram"], group=grp_m, tooltip="Source = where the level was born: today's 18:00 open for pasted / typed levels, the day the estimate last changed for estimated walls.\nCurrent Price = the last candle.\nHistogram = the right edge of the histogram.")
+lineExt        = input.int(46, "Line Length (Candles)", minval=1, maxval=300, group=grp_m, tooltip="Counted from where the lines start: Source and Current Price = candles past the last candle · Histogram = candles past the histogram.\nThe labels always sit to the right of the histogram, so the histogram stays between price and the labels.")
+showPx         = input.bool(false, "Show Prices (labels, price scale, table)", group=grp_m, tooltip="OFF: levels show their distance from price in points (+120 = 120 points above). ON: the price is added too.")
+lvlLabelSizeIn = input.string("Tiny", "Level Label Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_m)
+mergePts       = input.float(0.0, "Merge Levels Closer Than (Points, 0 = auto)", minval=0.0, group=grp_m, tooltip="0 = 40% of the strike step (NQ about 10, ES about 2).")
+showWallLines  = input.bool(true, "90D Wall Lines On History", group=grp_m, tooltip="Estimated walls are drawn for every day they were computed. Typed walls only from today's 18:00 open (that is when you know them).")
+showPlan       = input.bool(true, "Today's Plan Line (from yesterday's candle)", group=grp_m)
+
+// ─── HISTOGRAM ───
+grp_v = "8. Histogram"
+histSrc         = input.string("Today (0DTE)", "Histogram Shows", options=["Today (0DTE)", "90D Estimate", "Off"], group=grp_v, tooltip="Today = the gamma by strike you pasted. With no paste it shows the 90D volume estimate instead.")
+profileGap      = input.int(3, "Gap From Price (Candles)", minval=0, maxval=150, group=grp_v, tooltip="Where the histogram starts: this many candles to the right of the last candle. Move it with this number.")
+profileWidth    = input.int(20, "Max Bar Length (Bars)", minval=5, maxval=150, group=grp_v)
+thickPct        = input.int(80, "Bar Thickness %", minval=10, maxval=100, group=grp_v)
+pocketPct       = input.int(25, "Pocket Threshold (% of Max)", minval=5, maxval=60, group=grp_v)
+showValueLabels = input.bool(false, "Show Bar Values", inline="hv", group=grp_v)
+labelTopN       = input.int(5, "Top", minval=1, maxval=30, inline="hv", group=grp_v)
+valueLabelSzIn  = input.string("Tiny", "Value Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_v)
+
+// ─── COLORS ───
+grp_ls = "9. Lines · Color · Width · Style"
+todayCallC = input.color(#2962FF, "Call Wall Today", inline="l1", group=grp_ls)
+wTC        = input.int(3, "", minval=1, maxval=6, inline="l1", group=grp_ls)
+sTC        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l1", group=grp_ls)
+todayPutC  = input.color(#FF6D00, "Put Wall Today", inline="l2", group=grp_ls)
+wTP        = input.int(3, "", minval=1, maxval=6, inline="l2", group=grp_ls)
+sTP        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l2", group=grp_ls)
+flipC      = input.color(#7E57C2, "Flip Today", inline="l3", group=grp_ls)
+wFL        = input.int(1, "", minval=1, maxval=6, inline="l3", group=grp_ls)
+sFL        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l3", group=grp_ls)
+callWallC  = input.color(#089981, "Call Wall 90D", inline="l4", group=grp_ls)
+wC9        = input.int(2, "", minval=1, maxval=6, inline="l4", group=grp_ls)
+sC9        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l4", group=grp_ls)
+putWallC   = input.color(#F23645, "Put Wall 90D", inline="l5", group=grp_ls)
+wP9        = input.int(2, "", minval=1, maxval=6, inline="l5", group=grp_ls)
+sP9        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l5", group=grp_ls)
+zeroC      = input.color(#000000, "Zero Γ 90D", inline="l6", group=grp_ls)
+wZ9        = input.int(1, "", minval=1, maxval=6, inline="l6", group=grp_ls)
+sZ9        = input.string("Solid", "", options=["Solid", "Dotted", "Dashed"], inline="l6", group=grp_ls)
+magnetC    = input.color(#787B86, "Magnet", inline="l7", group=grp_ls)
+wMG        = input.int(1, "", minval=1, maxval=6, inline="l7", group=grp_ls)
+sMG        = input.string("Dotted", "", options=["Solid", "Dotted", "Dashed"], inline="l7", group=grp_ls)
+planBuyC   = input.color(#089981, "Plan Buy", inline="l8", group=grp_ls)
+planSellC  = input.color(#F23645, "Plan Sell", inline="l8", group=grp_ls)
+wPL        = input.int(1, "", minval=1, maxval=6, inline="l8", group=grp_ls)
+sPL        = input.string("Dotted", "", options=["Solid", "Dotted", "Dashed"], inline="l8", group=grp_ls)
+
+grp_col = "10. Colors"
+posColor   = input.color(color.new(#00E676, 35), "Hist Call", inline="c3", group=grp_col)
+negColor   = input.color(color.new(#FF5252, 35), "Hist Put", inline="c3", group=grp_col)
+pocketC    = input.color(color.new(#787B86, 60), "Pocket", inline="c4", group=grp_col)
+sigBullC   = input.color(#00E676, "Bull Signal", inline="c4", group=grp_col)
+sigBearC   = input.color(#FF3232, "Bear Signal", inline="c4", group=grp_col)
+absorbC    = input.color(#FF9800, "Absorb", inline="c5", group=grp_col)
+weakC      = input.color(#787B86, "Weak", inline="c5", group=grp_col)
+
+// ─── HUD ───
+grp_h = "11. HUD"
+showHud      = input.bool(true, "Show HUD", group=grp_h)
+hudMode      = input.string("Compact", "HUD Mode", options=["Compact", "Detailed"], group=grp_h, tooltip="Compact = what you need to trade: bias, plan, market type, where to sell / buy, big money, crowding, flow now.\nDetailed = the same, plus every level, the COT numbers and the monthly / weekly / daily candles.")
+hudPosIn     = input.string("Top Right", "Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group=grp_h)
+hudSizeIn    = input.string("Small", "Text Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_h)
+
+// ─── HELPERS ───
+sizeOf(string s) =>
+    switch s
+        "Tiny" => size.tiny
+        "Small" => size.small
+        "Normal" => size.normal
+        "Large" => size.large
+        => size.small
+
+string hudPosition = switch hudPosIn
+    "Top Left" => position.top_left
+    "Bottom Right" => position.bottom_right
+    "Bottom Left" => position.bottom_left
+    => position.top_right
+
+string hudSize      = sizeOf(hudSizeIn)
+string lvlLblSize   = sizeOf(lvlLabelSizeIn)
+
+lsOf(string s) =>
+    s == "Dotted" ? line.style_dotted : s == "Dashed" ? line.style_dashed : line.style_solid
+string valueLblSize = sizeOf(valueLabelSzIn)
+string sigLblSize   = sizeOf(sigLabelSizeIn)
+
+fmt(float x) =>
+    na(x) ? "n/a" : (x > 0 ? "+" : "") + str.tostring(math.round(x), "#,###")
+
+fmtP(float x) =>
+    na(x) ? "—" : str.tostring(x, format.mintick)
+
+fmtPts(float x) =>
+    na(x) ? "—" : (x >= 0 ? "+" : "") + str.tostring(x, format.mintick)
+
+netDeltaText(float net, float d) =>
+    string res = "n/a"
+    if not na(net) and not na(d)
+        if d == 0
+            res := "0 (flat)"
+        else if net >= 0
+            res := fmt(d) + (d > 0 ? " (adding longs)" : " (cutting longs)")
+        else
+            res := fmt(d) + (d < 0 ? " (adding shorts)" : " (covering shorts)")
+    res
+
+dateTZ = "America/New_York"
+var weekdayShortNames = array.from("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+
+ordinalSuffix(int d) =>
+    string suf = "th"
+    if d == 1 or d == 21 or d == 31
+        suf := "st"
+    else if d == 2 or d == 22
+        suf := "nd"
+    else if d == 3 or d == 23
+        suf := "rd"
+    suf
+
+shortDateText(int t) =>
+    string res = "n/a"
+    if not na(t)
+        int dayNum = dayofmonth(t, dateTZ)
+        int wkIdx = dayofweek(t, dateTZ)
+        res := "(" + array.get(weekdayShortNames, wkIdx - 1) + " " + str.tostring(dayNum) + ordinalSuffix(dayNum) + ")"
+    res
+
+classifyMMM(float o, float h, float l, float c, float h2, float l2, float velocityThresh) =>
+    string t = "No Data"
+    bool isBull = false
+    bool isBear = false
+    if not na(o) and not na(h) and not na(l) and not na(c) and not na(h2) and not na(l2)
+        float rs = h - l
+        float pir = rs > 0 ? (c - l) / rs : 0.5
+        bool bH = h > h2
+        bool bL = l < l2
+        if bH and bL
+            t := pir > 0.5 ? "S&D Bull" : "S&D Bear"
+            isBull := pir > 0.5
+            isBear := pir <= 0.5
+        else if not bH and not bL
+            t := pir > 0.5 ? "Coiling Bull" : "Coiling Bear"
+            isBull := pir > 0.5
+            isBear := pir <= 0.5
+        else if bH and not bL
+            if c > h2
+                t := pir >= velocityThresh ? "BuBC+" : "BuBC-"
+            else
+                t := pir <= (1 - velocityThresh) ? "BeAFs+" : "BeAFs-"
+            isBull := t == "BuBC+" or t == "BuBC-"
+            isBear := not isBull
+        else if bL and not bH
+            if c < l2
+                t := pir <= (1 - velocityThresh) ? "BeBC+" : "BeBC-"
+            else
+                t := pir >= velocityThresh ? "BuAFs+" : "BuAFs-"
+            isBull := t == "BuAFs+" or t == "BuAFs-"
+            isBear := not isBull
+    [t, isBull, isBear]
+
+niceStep(float raw) =>
+    float p10 = math.pow(10, math.floor(math.log10(raw)))
+    float m = raw / p10
+    float s = m <= 1 ? 1.0 : m <= 2 ? 2.0 : m <= 2.5 ? 2.5 : m <= 5 ? 5.0 : 10.0
+    s * p10
+
+numStr(float x) =>
+    na(x) ? "" : str.tostring(x)
+
+parseStrikes(string raw) =>
+    array<float> pk = array.new<float>()
+    array<float> pv = array.new<float>()
+    string clean = str.replace_all(raw, "\r", "")
+    clean := str.replace_all(clean, ";", "\n")
+    clean := str.replace_all(clean, ":", ",")
+    clean := str.replace_all(clean, " ", "")
+    for ln in str.split(clean, "\n")
+        array<string> bits = str.split(ln, ",")
+        int nBits = array.size(bits)
+        if nBits >= 2
+            for p = 0 to nBits - 2 by 2
+                float pKey = str.tonumber(array.get(bits, p))
+                float pVal = str.tonumber(array.get(bits, p + 1))
+                if not na(pKey) and not na(pVal) and array.size(pk) < 400
+                    array.push(pk, pKey)
+                    array.push(pv, pVal)
+    [pk, pv]
+
+// grade = share of this signal's checks that agree: A 70%+ · B 50%+ · C less
+gradeOf(int s, int mx) =>
+    float r = mx > 0 ? s * 1.0 / mx : 0.0
+    r >= 0.7 ? "A" : r >= 0.5 ? "B" : "C"
+
+gradeRank(string g) =>
+    g == "A" ? 3 : g == "B" ? 2 : 1
+
+gradeColor(string g, color base) =>
+    g == "A" ? base : g == "B" ? color.new(base, 25) : color.new(base, 50)
+
+chk(bool b, string t) =>
+    (b ? "✓ " : "✕ ") + t + "\n"
+
+sigAdd(array<label> lbls, array<float> kills, array<float> dones, label lb, float kill, float done) =>
+    lbls.push(lb)
+    kills.push(kill)
+    dones.push(done)
+    if lbls.size() > 60
+        label.delete(lbls.shift())
+        kills.shift()
+        dones.shift()
+
+sigPurge(array<label> lbls, array<float> kills, array<float> dones, bool isBull, bool kOn, bool dOn) =>
+    if lbls.size() > 0
+        for i = lbls.size() - 1 to 0
+            bool violated = kOn and (isBull ? close < kills.get(i) : close > kills.get(i))
+            bool finished = dOn and (isBull ? high >= dones.get(i) : low <= dones.get(i))
+            if violated or finished
+                label.delete(lbls.get(i))
+                lbls.remove(i)
+                kills.remove(i)
+                dones.remove(i)
+
+sigLabel(bool isUp, string txt, color c, string tip) =>
+    label.new(bar_index, isUp ? low : high, txt, yloc=isUp ? yloc.belowbar : yloc.abovebar, style=isUp ? label.style_arrowup : label.style_arrowdown, color=c, textcolor=c, size=sigLblSize, tooltip=tip)
+
+hudRow(table t, int r, string k, string v, color vc, string ts, string tip = "") =>
+    table.cell(t, 0, r, k, text_color=color.silver, text_size=ts, bgcolor=color.black, text_halign=text.align_left, tooltip=tip)
+    table.cell(t, 1, r, v, text_color=vc, text_size=ts, bgcolor=color.black, text_halign=text.align_left, tooltip=tip)
+
+hudHead(table t, int r, string txt, string ts) =>
+    table.cell(t, 0, r, txt, text_color=color.white, text_size=ts, bgcolor=color.rgb(35, 35, 35), text_halign=text.align_center)
+    table.merge_cells(t, 0, r, 1, r)
+
+hudRead(table t, int r, string k, string txt, color c, string ts, string tip = "") =>
+    table.cell(t, 0, r, k, text_color=c, text_size=ts, bgcolor=color.rgb(20, 20, 20), text_halign=text.align_left, tooltip=tip)
+    table.cell(t, 1, r, txt, text_color=c, text_size=ts, bgcolor=color.rgb(20, 20, 20), text_halign=text.align_left, tooltip=tip)
+
+roleOf(string kind, float p, float px) =>
+    bool above = p > px
+    switch kind
+        "C90" => above ? "big ceiling" : "broken = floor"
+        "P90" => above ? "broken = ceiling" : "big floor"
+        "Z90" => "above = calm"
+        "CT" => above ? "sell rallies" : "broken = buy retest"
+        "PT" => above ? "broken = sell retest" : "buy dips"
+        "FT" => "above = calm"
+        "MG" => above ? "pulls price up" : "pulls price down"
+        => ""
+
+// MMM candle in plain words
+descr(string t) =>
+    switch t
+        "BuBC+" => "BuBC+ · broke up, strong close"
+        "BuBC-" => "BuBC− · broke up, weak close"
+        "BeBC+" => "BeBC+ · broke down, strong close"
+        "BeBC-" => "BeBC− · broke down, weak close"
+        "BuAFs+" => "BuAFs+ · swept the low, closed back up (strong)"
+        "BuAFs-" => "BuAFs− · swept the low, closed back up (weak)"
+        "BeAFs+" => "BeAFs+ · swept the high, closed back down (strong)"
+        "BeAFs-" => "BeAFs− · swept the high, closed back down (weak)"
+        "S&D Bull" => "Outside candle, closed high"
+        "S&D Bear" => "Outside candle, closed low"
+        "Coiling Bull" => "Inside candle, closed high"
+        "Coiling Bear" => "Inside candle, closed low"
+        => "No data"
+
+arrowOf(bool up, bool dn) =>
+    up ? "▲" : dn ? "▼" : "–"
+
+// distance from price in points: +120 = 120 points above
+dist(float p) =>
+    na(p) ? "—" : (p - close >= 0 ? "+" : "−") + str.tostring(math.abs(p - close), "#.#")
+// price + distance, the price only when Show Prices is on
+pxd(float p) =>
+    na(p) ? "—" : (showPx ? fmtP(p) + " " : "") + dist(p)
+
+// zone = a wall or a magnet (a level to buy or sell at) · false = a regime line or the plan line
+addLvl(array<float> ps, array<string> ts, array<string> ns, array<color> cs, array<int> prs, array<string> sts, array<int> ws, array<bool> zs, array<int> bs, float p, string nm, string role, color c, int pr, string st, int w, float mergeD, bool zone, int sb) =>
+    if not na(p)
+        string piece = nm + (str.length(role) > 0 ? " · " + role : "")
+        int found = -1
+        if array.size(ps) > 0
+            for i = 0 to array.size(ps) - 1
+                if found == -1 and math.abs(array.get(ps, i) - p) <= mergeD
+                    found := i
+        if found >= 0
+            if zone
+                array.set(zs, found, true)
+            if not na(sb) and (na(array.get(bs, found)) or sb < array.get(bs, found))
+                array.set(bs, found, sb)
+            array.set(ts, found, array.get(ts, found) + "  &  " + piece)
+            array.set(ns, found, array.get(ns, found) + " & " + nm)
+            if pr > array.get(prs, found)
+                array.set(cs, found, c)
+                array.set(prs, found, pr)
+                array.set(sts, found, st)
+                array.set(ws, found, w)
+        else
+            array.push(ps, p)
+            array.push(ts, piece)
+            array.push(ns, nm)
+            array.push(cs, c)
+            array.push(prs, pr)
+            array.push(sts, st)
+            array.push(ws, w)
+            array.push(zs, zone)
+            array.push(bs, sb)
+
+gexProxy(int days, float stepUser, bool rBoost, int hDays) =>
+    string res = ""
+    if bar_index > days and time >= timenow - hDays * 86400000
+        float hiP = high[1]
+        float loP = low[1]
+        for i = 1 to days
+            hiP := math.max(hiP, high[i])
+            loP := math.min(loP, low[i])
+        float rngP = math.max(hiP - loP, syminfo.mintick * 10)
+        float stp = stepUser > 0 ? stepUser : niceStep(rngP / 60.0)
+        stp := math.max(stp, syminfo.mintick)
+        if rngP / stp > 150
+            stp := niceStep(rngP / 150.0)
+        float base = math.floor(loP / stp) * stp
+        int nb = math.min(152, math.ceil((hiP - base) / stp) + 1)
+
+        array<float> wts = array.new<float>(nb, 0.0)
+        float pvSum = 0.0
+        float wSum = 0.0
+        for i = 1 to days
+            float bh = high[i]
+            float bl = low[i]
+            float bVol = nz(volume[i], 1.0)
+            bVol := bVol <= 0 ? 1.0 : bVol
+            pvSum += hlc3[i] * bVol
+            wSum += bVol
+            int iS = math.max(0, math.min(nb - 1, math.floor((bl - base + stp / 2) / stp)))
+            int iE = math.max(0, math.min(nb - 1, math.floor((bh - base + stp / 2) / stp)))
+            float bRng = bh - bl
+            if bRng <= 0 or iS == iE
+                array.set(wts, iS, array.get(wts, iS) + bVol)
+            else
+                for bi = iS to iE
+                    float binLo = base + bi * stp - stp / 2
+                    float ov = math.max(0.0, math.min(bh, binLo + stp) - math.max(bl, binLo))
+                    if ov > 0
+                        array.set(wts, bi, array.get(wts, bi) + bVol * ov / bRng)
+
+        float piv = wSum > 0 ? pvSum / wSum : close[1]
+        float spot = close[1]
+        float cwP = na
+        float pwP = na
+        float bestUp = 0.0
+        float bestDn = 0.0
+        float maxW = 0.0
+        for bj = 0 to nb - 1
+            float kk = base + bj * stp
+            float wt = array.get(wts, bj)
+            if rBoost
+                float r4 = kk / (stp * 4)
+                float r2 = kk / (stp * 2)
+                if math.abs(r4 - math.round(r4)) < 1e-6
+                    wt *= 1.5
+                else if math.abs(r2 - math.round(r2)) < 1e-6
+                    wt *= 1.2
+            array.set(wts, bj, wt)
+            maxW := math.max(maxW, wt)
+            if kk > spot and wt > bestUp
+                bestUp := wt
+                cwP := kk
+            if kk < spot and wt > bestDn
+                bestDn := wt
+                pwP := kk
+
+        string lst = ""
+        if maxW > 0
+            for bk = 0 to nb - 1
+                float wv = array.get(wts, bk)
+                if wv > 0
+                    float kk2 = base + bk * stp
+                    int sc = math.round(wv / maxW * 1000)
+                    lst += (str.length(lst) > 0 ? "," : "") + str.tostring(kk2) + ":" + str.tostring(kk2 >= piv ? sc : -sc)
+        res := numStr(cwP) + "|" + numStr(pwP) + "|" + numStr(piv) + "|" + str.tostring(stp) + "|" + lst
+    res
+
+// ─── 90-DAY WALLS ENGINE ───
+string enc = request.security(syminfo.tickerid, "D", gexProxy(oiDays, stepIn, roundBoost, histDays), lookahead=barmerge.lookahead_on)
+array<string> parts = str.split(enc, "|")
+bool hasProxy = array.size(parts) >= 5
+
+string idxSym = targetIndex == "NDX" ? "NASDAQ:NDX" : "SP:SPX"
+string futSym = targetIndex == "NDX" ? "CME_MINI:NQ1!" : "CME_MINI:ES1!"
+float idxC = request.security(idxSym, timeframe.period, close, gaps=barmerge.gaps_on, ignore_invalid_symbol=true)
+float futC = request.security(futSym, timeframe.period, close, gaps=barmerge.gaps_on, ignore_invalid_symbol=true)
+bool doConvert = levelType == "Index Levels (convert to futures)" and syminfo.type != "index"
+var float liveSpread = na
+if not na(idxC) and not na(futC)
+    float sNow = futC - idxC
+    liveSpread := na(liveSpread) ? sNow : liveSpread + (sNow - liveSpread) * 0.1
+float spread = doConvert ? nz(liveSpread) : 0.0
+
+// today's session (18:00 New York open of the last bar's trading day): typed / pasted walls only exist from here
+int  lbt        = last_bar_time
+int  day18      = timestamp(dateTZ, year(lbt, dateTZ), month(lbt, dateTZ), dayofmonth(lbt, dateTZ), 18, 0)
+int  todayStart = lbt >= day18 ? day18 : day18 - 86400000
+bool isToday    = time >= todayStart
+
+var float txtCW90 = na
+var float txtPW90 = na
+var float txtZG90 = na
+var float txtFlip = na
+var string txtIndex = ""
+if barstate.isfirst
+    string rawTxt = str.replace_all(str.replace_all(strikeData, "\r", ""), " ", "")
+    for ln in str.split(rawTxt, "\n")
+        if str.contains(ln, "=")
+            array<string> kv = str.split(ln, "=")
+            if array.size(kv) == 2
+                string k = str.upper(array.get(kv, 0))
+                string vs = str.upper(array.get(kv, 1))
+                float v = str.tonumber(vs)
+                if k == "INDEX"
+                    txtIndex := vs
+                if not na(v) and v > 0
+                    if k == "90DCALLWALL" or k == "CW90"
+                        txtCW90 := v
+                    else if k == "90DPUTWALL" or k == "PW90"
+                        txtPW90 := v
+                    else if k == "90DZEROGAMMA" or k == "ZG90"
+                        txtZG90 := v
+                    else if k == "TODAYGEXFLIP" or k == "FLIP"
+                        txtFlip := v
+
+float cwIdx = callWallIn > 0 ? callWallIn : txtCW90
+float pwIdx = putWallIn > 0 ? putWallIn : txtPW90
+float zgIdx = zeroIn > 0 ? zeroIn : txtZG90
+bool cwManual = not na(cwIdx)
+bool pwManual = not na(pwIdx)
+bool zgManual = not na(zgIdx)
+float cw = cwManual ? cwIdx + spread : hasProxy ? str.tonumber(array.get(parts, 0)) : na
+float pw = pwManual ? pwIdx + spread : hasProxy ? str.tonumber(array.get(parts, 1)) : na
+float zg = zgManual ? zgIdx + spread : hasProxy ? str.tonumber(array.get(parts, 2)) : na
+float stpNow = hasProxy ? str.tonumber(array.get(parts, 3)) : na
+bool manual90 = cwManual or pwManual or zgManual
+var int tsBar = na
+if isToday and not isToday[1]
+    tsBar := bar_index
+float cwEst = hasProxy ? str.tonumber(array.get(parts, 0)) : na
+float pwEst = hasProxy ? str.tonumber(array.get(parts, 1)) : na
+float zgEst = hasProxy ? str.tonumber(array.get(parts, 2)) : na
+var int cwEstBar = na
+var int pwEstBar = na
+var int zgEstBar = na
+if nz(cwEst, -1) != nz(cwEst[1], -1)
+    cwEstBar := bar_index
+if nz(pwEst, -1) != nz(pwEst[1], -1)
+    pwEstBar := bar_index
+if nz(zgEst, -1) != nz(zgEst[1], -1)
+    zgEstBar := bar_index
+int cwSrc = cwManual ? tsBar : cwEstBar
+int pwSrc = pwManual ? tsBar : pwEstBar
+int zgSrc = zgManual ? tsBar : zgEstBar
+float zoneBuf90 = zonePts > 0 ? zonePts : (na(stpNow) ? na : stpNow * 0.5)
+
+plot(showWallLines and (not cwManual or isToday) ? cw : na, "90D Call Wall", color=callWallC, linewidth=wC9, style=plot.style_stepline, display=showPx ? display.all : display.all - display.price_scale)
+plot(showWallLines and (not pwManual or isToday) ? pw : na, "90D Put Wall", color=putWallC, linewidth=wP9, style=plot.style_stepline, display=showPx ? display.all : display.all - display.price_scale)
+plot(showWallLines and (not zgManual or isToday) ? zg : na, "90D Zero Gamma", color=zeroC, linewidth=wZ9, style=plot.style_stepline, display=showPx ? display.all : display.all - display.price_scale)
+
+// ─── TODAY'S LEVELS ENGINE ───
+var array<float> mK = array.new<float>()
+var array<float> mV = array.new<float>()
+var float tCWraw = na
+var float tPWraw = na
+var float tFlipRaw = na
+var float tStep = na
+if barstate.isfirst
+    [pk, pv] = parseStrikes(strikeData)
+    if array.size(pk) > 0
+        for j in array.sort_indices(pk, order.ascending)
+            array.push(mK, array.get(pk, j))
+            array.push(mV, array.get(pv, j))
+        float bp = 0.0
+        float bn = 0.0
+        float cumV = 0.0
+        float minG = na
+        for i = 0 to array.size(mK) - 1
+            float mv = array.get(mV, i)
+            if mv > bp
+                bp := mv
+                tCWraw := array.get(mK, i)
+            if mv < bn
+                bn := mv
+                tPWraw := array.get(mK, i)
+            float prevC = cumV
+            cumV += mv
+            if i > 0 and prevC < 0 and cumV >= 0 and na(tFlipRaw)
+                tFlipRaw := array.get(mK, i)
+            if i > 0
+                float dg = array.get(mK, i) - array.get(mK, i - 1)
+                if dg > 0
+                    minG := na(minG) ? dg : math.min(minG, dg)
+        tStep := nz(minG, syminfo.mintick * 40)
+bool hasToday = array.size(mK) > 0
+
+float tCW   = hasToday ? tCWraw + spread : na
+float tPW   = hasToday ? tPWraw + spread : na
+float tFlip = flipIn > 0 ? flipIn + spread : not na(txtFlip) ? txtFlip + spread : hasToday ? tFlipRaw + spread : na
+
+// ─── COT WEEKLY ───
+string rootNow = syminfo.root
+string famFull = str.contains(rootNow, "NQ") ? "NQ" : str.contains(rootNow, "ES") ? "ES" : str.contains(rootNow, "YM") ? "YM" : (str.contains(rootNow, "RTY") or str.contains(rootNow, "2K")) ? "RTY" : ""
+bool isSmallContract = syminfo.type == "futures" and str.length(famFull) > 0 and rootNow != famFull
+bool usingFull = useFullOI and isSmallContract
+string famCode = famFull == "NQ" ? "209742" : famFull == "ES" ? "13874A" : famFull == "YM" ? "124603" : famFull == "RTY" ? "239742" : ""
+
+cftcCodeRaw = switch cftcPreset
+    "Auto (from chart)" => cot.convertRootToCOTCode("Auto")
+    "NQ - E-mini Nasdaq (209742)" => "209742"
+    "ES - E-mini S&P 500 (13874A)" => "13874A"
+    "YM - E-mini Dow (124603)" => "124603"
+    "RTY - E-mini Russell (239742)" => "239742"
+    "6E - Euro FX (099741)" => "099741"
+    "Manual Entry (use text box below)" => manualCftcCode
+    => cot.convertRootToCOTCode("Auto")
+cftcCode = cftcPreset == "Auto (from chart)" and usingFull ? famCode : cftcCodeRaw
+string cotSrcName = cftcPreset == "Auto (from chart)" ? (usingFull ? famFull + " E-mini" : syminfo.root) : str.substring(cftcPreset, 0, str.pos(cftcPreset, " "))
+
+amLongTicker  = cot.COTTickerid("Financial", cftcCode, false, "Asset Manager Positions", "Long", "All")
+amShortTicker = cot.COTTickerid("Financial", cftcCode, false, "Asset Manager Positions", "Short", "All")
+lfLongTicker  = cot.COTTickerid("Financial", cftcCode, false, "Leveraged Funds Positions", "Long", "All")
+lfShortTicker = cot.COTTickerid("Financial", cftcCode, false, "Leveraged Funds Positions", "Short", "All")
+
+[amLongW, amLongWPrev]   = request.security(amLongTicker, "1W", [close, close[1]], ignore_invalid_symbol=true)
+[amShortW, amShortWPrev] = request.security(amShortTicker, "1W", [close, close[1]], ignore_invalid_symbol=true)
+[lfLongW, lfLongWPrev]   = request.security(lfLongTicker, "1W", [close, close[1]], ignore_invalid_symbol=true)
+[lfShortW, lfShortWPrev] = request.security(lfShortTicker, "1W", [close, close[1]], ignore_invalid_symbol=true)
+
+float amNet   = amLongW - amShortW
+float lfNet   = lfLongW - lfShortW
+float amDelta = amNet - (amLongWPrev - amShortWPrev)
+float lfDelta = lfNet - (lfLongWPrev - lfShortWPrev)
+float lfGross = lfLongW + lfShortW
+float lfNetPct = not na(lfGross) and lfGross > 0 ? lfNet / lfGross * 100 : na
+bool hasCOT = not na(amNet) or not na(lfNet)
+
+// ─── DAILY OI AND DAILY CANDLE ───
+string fullSym = famFull == "NQ" ? "CME_MINI:NQ1!" : famFull == "ES" ? "CME_MINI:ES1!" : famFull == "YM" ? "CBOT_MINI:YM1!" : famFull == "RTY" ? "CME_MINI:RTY1!" : ""
+bool usingFullOI = usingFull and str.length(fullSym) > 0
+oiTicker = usingFullOI ? fullSym + "_OI" : str.format("{0}_OI", ticker.standard(syminfo.tickerid))
+string oiSrcName = usingFullOI ? str.replace(str.replace(fullSym, "CME_MINI:", ""), "CBOT_MINI:", "") : syminfo.ticker
+[oiClose, oiPrevClose, oiTimeC, oiAvgChg, oiPrev2, oiTimeC1] = request.security(oiTicker, "1D", [close, close[1], time_close, ta.sma(math.abs(ta.change(close)), 20), close[2], time_close[1]], ignore_invalid_symbol=true)
+
+[dOpen, dHigh, dLow, dClose, dHigh2, dLow2, dTimeC, dVolume, dVolAvg, dClose2] = request.security(syminfo.tickerid, "1D", [open[1], high[1], low[1], close[1], high[2], low[2], time_close[1], volume[1], ta.sma(volume, 20)[1], close[2]], lookahead=barmerge.lookahead_on, ignore_invalid_symbol=true)
+[todayHigh, todayLow] = request.security(syminfo.tickerid, "1D", [high, low], ignore_invalid_symbol=true)
+
+bool priceMatchFound = not na(dClose)
+string oiAsOfDate = shortDateText(dTimeC)
+// live: the newest OI bar is yesterday's (today's is not published yet) · history: today's bar already exists, so use the one before it
+bool oiNowMatch  = not na(oiTimeC) and not na(dTimeC) and math.abs(oiTimeC - dTimeC) < 43200000
+bool oiPrevMatch = not oiNowMatch and not na(oiTimeC1) and not na(dTimeC) and math.abs(oiTimeC1 - dTimeC) < 43200000
+bool hasRealOI   = oiNowMatch or oiPrevMatch
+float oiDeltaReal = oiNowMatch ? oiClose - oiPrevClose : oiPrevMatch ? oiPrevClose - oiPrev2 : na
+bool dVolHigh = not na(dVolume) and not na(dVolAvg) and dVolume > dVolAvg * 1.2
+
+bool oiIsPos = false
+bool oiIsMassive = false
+string oiSourceTag = ""
+if hasRealOI
+    oiIsPos := oiDeltaReal > 0
+    oiIsMassive := oiDeltaReal > 0 and not na(oiAvgChg) and oiDeltaReal >= oiAvgChg * oiSurgeMult
+else
+    oiIsPos := dVolHigh
+    oiIsMassive := false
+    oiSourceTag := " (est.)"
+string oiDeltaDisplay = hasRealOI ? fmt(oiDeltaReal) : (oiIsPos ? "up (est. from volume)" : "down (est. from volume)")
+
+float rangeSize = dHigh - dLow
+float posInRange = rangeSize > 0 ? (dClose - dLow) / rangeSize : 0.5
+bool brokeHigh = dHigh > dHigh2
+bool brokeLow = dLow < dLow2
+bool closedAboveHigh = dClose > dHigh2
+bool closedBelowLow = dClose < dLow2
+bool isGreen = dClose > dClose2
+bool isRed = dClose < dClose2
+
+[dailyType, dailyIsBull, dailyIsBear] = classifyMMM(dOpen, dHigh, dLow, dClose, dHigh2, dLow2, mmmVelocityThresh)
+
+// ─── YESTERDAY'S CANDLE + OI → TODAY'S PLAN ───
+string biasText  = "Waiting for data"
+string planTxt   = "No plan yet"
+int    planSide  = 0
+float  planPx    = na
+color  biasColor = color.gray
+bool   confirmed = false
+bool   coilPlan  = false
+float  vt        = mmmVelocityThresh
+float  bodyHi    = math.max(dOpen, dClose)
+float  bodyLo    = math.min(dOpen, dClose)
+string rngTxt    = fmtP(dLow) + " – " + fmtP(dHigh)
+string planWhere = ""
+string planS     = "No plan yet"
+
+if priceMatchFound
+    if brokeHigh and brokeLow
+        biasText  := oiIsPos ? "Big fight: new money on both sides" : "Messy day: money leaving"
+        planTxt   := oiIsPos ? "Wait for a daily close outside " + rngTxt : "No trade today (account killer)"
+        planS     := oiIsPos ? "Wait: daily close outside the range" : "No trade (chaos day)"
+        biasColor := oiIsPos ? color.orange : color.red
+        confirmed := oiIsPos
+    else if not brokeHigh and not brokeLow
+        if oiIsMassive
+            biasText  := "Coiled spring: big new money"
+            planTxt   := "Wait for a 1H / 4H close outside " + rngTxt
+            planS     := "Wait: 1H / 4H close outside the range"
+            biasColor := color.yellow
+            coilPlan  := true
+            confirmed := true
+        else if oiIsPos
+            biasText := "Money building, no surge yet"
+            planTxt  := "Watch the range " + rngTxt + ", no trigger yet"
+            planS    := "Watch the range, no trigger yet"
+        else
+            biasText := "Dead market: little money"
+            planTxt  := "No trade today (chop)"
+            planS    := "No trade (chop)"
+    else if brokeHigh
+        if closedAboveHigh
+            bool st1 = posInRange >= vt
+            biasText  := oiIsPos ? (st1 ? "Real breakout: new buyers" : "Buyers building") : (st1 ? "Shorts covering, not new buyers" : "Tired push up")
+            biasColor := oiIsPos ? color.green : color.red
+            confirmed := oiIsPos
+            if oiIsPos
+                planSide := 1
+                planPx   := st1 ? dClose : dOpen
+                planTxt  := "BUY limit " + fmtP(planPx) + (st1 ? " (yesterday's close)" : " (yesterday's open)")
+                planWhere := st1 ? "yest. close" : "yest. open"
+            else
+                planTxt := st1 ? "No long: expect a pullback" : "No trade: choppy"
+                planS   := st1 ? "No long: pullback likely" : "No trade (chop)"
+        else
+            bool st2 = posInRange <= 1 - vt
+            biasText  := oiIsPos ? (st2 ? "Sellers took over: buyers trapped" : "Grinding top: heavy shorting") : "Profit-taking: weak bounce"
+            biasColor := oiIsPos ? color.red : color.orange
+            confirmed := oiIsPos
+            if oiIsPos
+                planSide := -1
+                planPx   := st2 ? dOpen : bodyHi + (dHigh - bodyHi) * 0.5
+                planTxt  := "SELL limit " + fmtP(planPx) + (st2 ? " (yesterday's open)" : " (50% of the top wick)")
+                planWhere := st2 ? "yest. open" : "50% of the top wick"
+            else
+                planTxt := "No short at the open"
+                planS   := "No short at the open"
+    else
+        if closedBelowLow
+            bool st3 = posInRange <= 1 - vt
+            biasText  := oiIsPos ? (st3 ? "Real breakdown: new sellers" : "Sellers building") : (st3 ? "Longs panicking, not new sellers" : "Tired push down")
+            biasColor := oiIsPos ? color.red : color.green
+            confirmed := oiIsPos
+            if oiIsPos
+                planSide := -1
+                planPx   := st3 ? dClose : dOpen
+                planTxt  := "SELL limit " + fmtP(planPx) + (st3 ? " (yesterday's close)" : " (yesterday's open)")
+                planWhere := st3 ? "yest. close" : "yest. open"
+            else
+                planTxt := st3 ? "No short: expect a bounce" : "No trade: choppy"
+                planS   := st3 ? "No short: bounce likely" : "No trade (chop)"
+        else
+            bool  st4    = posInRange >= vt
+            float halfLo = bodyLo - (bodyLo - dLow) * 0.5
+            biasText  := oiIsPos ? (st4 ? "Buyers took over: sellers trapped" : "Grinding bottom: heavy buying") : "Profit-taking: weak drop"
+            biasColor := oiIsPos ? color.green : color.orange
+            confirmed := oiIsPos
+            if oiIsPos
+                planSide := 1
+                planPx   := st4 ? dOpen : halfLo
+                planTxt  := "BUY limit " + fmtP(planPx) + (st4 ? " (yesterday's open)" : " (50% of the bottom wick)")
+                planWhere := st4 ? "yest. open" : "50% of the bottom wick"
+            else
+                planTxt := "Only buy at 50% of the bottom wick " + fmtP(halfLo)
+                planS   := "Buy only at 50% of the bottom wick (" + dist(halfLo) + ")"
+if planSide != 0
+    planS := (planSide == 1 ? "Buy" : "Sell") + " limit at " + planWhere + " " + pxd(planPx)
+color planColor = planSide == 1 ? color.lime : planSide == -1 ? color.red : coilPlan ? color.yellow : color.gray
+
+// what OI says about yesterday's candle
+string oiWord = oiIsPos ? (isGreen ? "OI up + up day = new buyers" : isRed ? "OI up + down day = new sellers" : "OI up = new money") : (isGreen ? "OI down + up day = shorts covering" : isRed ? "OI down + down day = longs leaving" : "OI down = money leaving")
+oiWord := oiWord + (hasRealOI ? "" : " (OI est. from volume)") + (oiIsMassive ? " · SURGE" : "")
+
+string oiShort = (oiIsPos ? (isGreen ? "OI ↑ new buyers" : isRed ? "OI ↑ new sellers" : "OI ↑ new money") : (isGreen ? "OI ↓ shorts covering" : isRed ? "OI ↓ longs leaving" : "OI ↓ money leaving")) + (hasRealOI ? "" : " (est.)") + (oiIsMassive ? " SURGE" : "")
+
+// target = yesterday's own extreme, for a break or a sweep candle that OI confirms
+bool  tgtApplies = confirmed and brokeHigh != brokeLow
+float tgtLevel   = tgtApplies ? (dailyIsBull ? dHigh : dLow) : na
+bool  tgtTouched = tgtApplies and (dailyIsBull ? (not na(todayHigh) and todayHigh >= tgtLevel) : (not na(todayLow) and todayLow <= tgtLevel))
+string tgtShort  = tgtApplies ? " · TGT yest. " + (dailyIsBull ? "high " : "low ") + (tgtTouched ? "hit ✓" : dist(tgtLevel)) : ""
+string tgtText   = tgtApplies ? "target " + fmtP(tgtLevel) + (dailyIsBull ? " (yesterday's high)" : " (yesterday's low)") + (tgtTouched ? ": hit ✓" : ": not hit yet") : ""
+
+// ─── WEEKLY AND MONTHLY CANDLES ───
+[wOpen, wHigh, wLow, wClose, wHigh2, wLow2] = request.security(syminfo.tickerid, "1W", [open[1], high[1], low[1], close[1], high[2], low[2]], lookahead=barmerge.lookahead_on, ignore_invalid_symbol=true)
+[weeklyType, weeklyIsBull, weeklyIsBear] = classifyMMM(wOpen, wHigh, wLow, wClose, wHigh2, wLow2, mmmVelocityThresh)
+[mOpen, mHigh, mLow, mClose, mHigh2, mLow2] = request.security(syminfo.tickerid, "1M", [open[1], high[1], low[1], close[1], high[2], low[2]], lookahead=barmerge.lookahead_on, ignore_invalid_symbol=true)
+[monthlyType, monthlyIsBull, monthlyIsBear] = classifyMMM(mOpen, mHigh, mLow, mClose, mHigh2, mLow2, mmmVelocityThresh)
+bool   weeklyAgreesWithCOT = not na(amNet) and weeklyIsBull == (amNet >= 0)
+string weeklyAgreeText = weeklyType == "No Data" or na(amNet) ? "" : (weeklyAgreesWithCOT ? " · agrees with asset mgrs" : " · against asset mgrs")
+
+// ─── CROWDING AND TRAPS (weekly COT + daily OI) ───
+bool lfHeavyShort = not na(lfNetPct) and lfNetPct <= -lfHeavyPct
+bool lfHeavyLong  = not na(lfNetPct) and lfNetPct >= lfHeavyPct
+bool amAbsorbingBuys  = not na(amDelta) and not na(lfDelta) and amDelta > 0 and amDelta >= math.abs(lfDelta) * absorbDominanceMult
+bool amAbsorbingSells = not na(amDelta) and not na(lfDelta) and amDelta < 0 and math.abs(amDelta) >= math.abs(lfDelta) * absorbDominanceMult
+bool shortsTrapped = lfHeavyShort and amAbsorbingBuys and oiIsPos
+bool longsTrapped  = lfHeavyLong and amAbsorbingSells and oiIsPos
+string lfPctTxt = na(lfNetPct) ? "" : " (hedge funds " + str.tostring(math.abs(lfNetPct), "#") + "% net " + (lfNetPct < 0 ? "short)" : "long)")
+string trapText = shortsTrapped ? "SHORTS TRAPPED" + lfPctTxt + ", asset mgrs buying, OI up · an up-break can explode" : longsTrapped ? "LONGS TRAPPED" + lfPctTxt + ", asset mgrs selling, OI up · a down-break can explode" : lfHeavyShort ? "Shorts crowded" + lfPctTxt + " · up-breaks run fast" : lfHeavyLong ? "Longs crowded" + lfPctTxt + " · down-breaks run fast" : "Nobody crowded · walls should hold"
+string lfPctS = na(lfNetPct) ? "" : " " + str.tostring(math.abs(lfNetPct), "#") + "%"
+string trapShort = shortsTrapped ? "Shorts TRAPPED · up-break can explode" : longsTrapped ? "Longs TRAPPED · down-break can explode" : lfHeavyShort ? "Shorts crowded" + lfPctS + " · up-breaks run" : lfHeavyLong ? "Longs crowded" + lfPctS + " · down-breaks run" : "No crowding · walls hold"
+color  trapColor = shortsTrapped ? color.lime : longsTrapped ? color.red : (lfHeavyShort or lfHeavyLong) ? color.orange : color.gray
+
+// ─── FOOTPRINT DELTA (this candle) ───
+footprint fpData = request.footprint(fpTicks, 70)
+float deltaPct = na
+if useFootprint and not na(fpData)
+    float fpVolT = fpData.buy_volume() + fpData.sell_volume()
+    deltaPct := fpVolT > 0 ? fpData.delta() / fpVolT * 100 : na
+bool hasFp      = not na(deltaPct)
+bool sellersWin = hasFp and deltaPct <= -deltaMinPct
+bool buyersWin  = hasFp and deltaPct >= deltaMinPct
+
+// a check line of a signal tooltip (the footprint line says when there is no data)
+chkFp(bool b, string t) =>
+    hasFp ? chk(b, t) : "– " + t + " (no footprint data)\n"
+
+// ─── MARKET TYPE: today's flip when pasted, else the 90D zero gamma ───
+float  regLvl  = not na(tFlip) ? tFlip : zg
+string regName = not na(tFlip) ? "today's flip" : zgManual ? "90D zero γ" : "90D VWAP (est. zero γ)"
+bool   longGamma = not na(regLvl) and close >= regLvl
+
+// ─── WALL SIGNALS ───
+bool useTodaySig = sigWalls == "Today's Walls (0DTE)" and hasToday
+float sCW   = useTodaySig ? tCW : cw
+float sPW   = useTodaySig ? tPW : pw
+float sStep = useTodaySig ? tStep : stpNow
+float sigBuf = zonePts > 0 ? zonePts : (na(sStep) ? na : math.max(sStep * 0.5, syminfo.mintick * 4))
+string sigName = useTodaySig ? "today's" : "90D"
+// typed or pasted walls are only known from today's open: no signals on older candles (they would be fake)
+bool sigLive = useTodaySig or manual90 ? isToday : true
+
+bool okC = sigLive and not na(sCW) and not na(sigBuf)
+bool okP = sigLive and not na(sPW) and not na(sigBuf)
+
+bool fadeShortRaw = okC and high >= sCW - sigBuf and close < sCW and close < open
+bool squeezeUpRaw = okC and close > sCW + sigBuf and nz(close[1]) <= sCW + sigBuf
+bool fadeLongRaw  = okP and low <= sPW + sigBuf and close > sPW and close > open
+bool squeezeDnRaw = okP and close < sPW - sigBuf and nz(close[1]) >= sPW - sigBuf
+
+bool fadeShortNew = fadeShortRaw and not fadeShortRaw[1]
+bool fadeLongNew  = fadeLongRaw and not fadeLongRaw[1]
+
+bool fadeShortSig   = barstate.isconfirmed and fadeShortNew and (not hasFp or sellersWin)
+bool absorbShortSig = barstate.isconfirmed and fadeShortNew and buyersWin
+bool fadeLongSig    = barstate.isconfirmed and fadeLongNew and (not hasFp or buyersWin)
+bool absorbLongSig  = barstate.isconfirmed and fadeLongNew and sellersWin
+bool squeezeUpSig   = barstate.isconfirmed and squeezeUpRaw and (not hasFp or buyersWin)
+bool squeezeDnSig   = barstate.isconfirmed and squeezeDnRaw and (not hasFp or sellersWin)
+bool weakBreakUp    = barstate.isconfirmed and squeezeUpRaw and hasFp and not buyersWin
+bool weakBreakDn    = barstate.isconfirmed and squeezeDnRaw and hasFp and not sellersWin
+
+bool amBuying  = not na(amDelta) and amDelta > 0
+bool amSelling = not na(amDelta) and amDelta < 0
+
+// scores: wall held / trap = 5 checks (calm market helps) · break = 7 points (fast market helps, a trap counts 2)
+int fsScore = (dailyIsBear ? 1 : 0) + (weeklyIsBear ? 1 : 0) + (amSelling ? 1 : 0) + ((sellersWin or buyersWin) ? 1 : 0) + (longGamma ? 1 : 0)
+int flScore = (dailyIsBull ? 1 : 0) + (weeklyIsBull ? 1 : 0) + (amBuying ? 1 : 0) + ((sellersWin or buyersWin) ? 1 : 0) + (longGamma ? 1 : 0)
+int suScore = (dailyIsBull and confirmed ? 1 : 0) + (weeklyIsBull ? 1 : 0) + (shortsTrapped ? 2 : lfHeavyShort ? 1 : 0) + (buyersWin ? 1 : 0) + (amBuying ? 1 : 0) + (not na(regLvl) and not longGamma ? 1 : 0)
+int sdScore = (dailyIsBear and confirmed ? 1 : 0) + (weeklyIsBear ? 1 : 0) + (longsTrapped ? 2 : lfHeavyLong ? 1 : 0) + (sellersWin ? 1 : 0) + (amSelling ? 1 : 0) + (not na(regLvl) and not longGamma ? 1 : 0)
+
+int minRank = gradeRank(minGrade)
+
+var string lastSigTxt = "none yet"
+var string lastSigS   = "none yet"
+var color  lastSigCol = color.gray
+
+// ─── AUTO-DELETE ───
+var array<label> bullSigs  = array.new<label>()
+var array<float> bullKills = array.new<float>()
+var array<float> bullDones = array.new<float>()
+var array<label> bearSigs  = array.new<label>()
+var array<float> bearKills = array.new<float>()
+var array<float> bearDones = array.new<float>()
+
+bool  useKill  = delMode != "Keep All"
+bool  useDone  = delMode == "When Violated or Done"
+float lowKill  = delLevel == "Signal Candle Wick" ? low : delLevel == "Signal Candle Open" ? open : close
+float highKill = delLevel == "Signal Candle Wick" ? high : delLevel == "Signal Candle Open" ? open : close
+float jobDist  = doneDist > 0 ? doneDist : nz(sigBuf, syminfo.mintick * 20) * 3
+
+if barstate.isconfirmed and (useKill or useDone)
+    sigPurge(bullSigs, bullKills, bullDones, true, useKill, useDone)
+    sigPurge(bearSigs, bearKills, bearDones, false, useKill, useDone)
+
+// arrow text: BUY / SELL + grade + short reason
+sigTxt(bool up, string g, string why) =>
+    (up ? "BUY" : "SELL") + (showSigGrade and g != "" ? " " + g : "") + (showSigWhy ? " · " + why : "")
+// the end of every tooltip: when the idea is wrong and when it is done
+sigEnd(bool up, string g, int s, int mx) =>
+    (mx > 0 ? "\nGrade " + g + " = " + str.tostring(s) + " of " + str.tostring(mx) + " points agree" : "") + "\nWrong if a candle closes " + (up ? "below " + fmtP(lowKill) : "above " + fmtP(highKill)) + "\nJob done at " + fmtP(up ? close + jobDist : close - jobDist) + " (" + (up ? "+" : "−") + str.tostring(jobDist, "#.##") + " pts)"
+string hm = str.format_time(time, "HH:mm", dateTZ)
+
+if showSignals
+    if fadeShortSig and showFade and gradeRank(gradeOf(fsScore, 5)) >= minRank
+        string g1 = gradeOf(fsScore, 5)
+        string tip1 = "SELL · " + sigName + " call wall " + fmtP(sCW) + " held (price touched it and was pushed back)\n" + chk(dailyIsBear, "Daily candle bearish") + chk(weeklyIsBear, "Weekly candle bearish") + chk(amSelling, "Asset mgrs selling (COT)") + chkFp(sellersWin, "Footprint: sellers win") + chk(longGamma, "Calm market (walls hold)") + sigEnd(false, g1, fsScore, 5)
+        sigAdd(bearSigs, bearKills, bearDones, sigLabel(false, sigTxt(false, g1, "wall held"), gradeColor(g1, sigBearC), tip1), highKill, close - jobDist)
+        lastSigTxt := "SELL " + g1 + " · call wall held · " + fmtP(sCW) + " · " + hm
+        lastSigS   := "SELL " + g1 + " " + hm
+        lastSigCol := sigBearC
+    if absorbShortSig and showAbsorb and gradeRank(gradeOf(fsScore, 5)) >= minRank
+        string g2 = gradeOf(fsScore, 5)
+        string tip2 = "SELL · buyers trapped at the " + sigName + " call wall " + fmtP(sCW) + " (red candle, but the footprint shows buyers: they got absorbed)\n" + chk(dailyIsBear, "Daily candle bearish") + chk(weeklyIsBear, "Weekly candle bearish") + chk(amSelling, "Asset mgrs selling (COT)") + chk(true, "Footprint: buyers absorbed") + chk(longGamma, "Calm market (walls hold)") + sigEnd(false, g2, fsScore, 5)
+        sigAdd(bearSigs, bearKills, bearDones, sigLabel(false, sigTxt(false, g2, "buyers trapped"), gradeColor(g2, absorbC), tip2), highKill, close - jobDist)
+        lastSigTxt := "SELL " + g2 + " · buyers trapped · " + fmtP(sCW) + " · " + hm
+        lastSigS   := "SELL " + g2 + " " + hm
+        lastSigCol := absorbC
+    if fadeLongSig and showFade and gradeRank(gradeOf(flScore, 5)) >= minRank
+        string g3 = gradeOf(flScore, 5)
+        string tip3 = "BUY · " + sigName + " put wall " + fmtP(sPW) + " held (price touched it and was pushed back)\n" + chk(dailyIsBull, "Daily candle bullish") + chk(weeklyIsBull, "Weekly candle bullish") + chk(amBuying, "Asset mgrs buying (COT)") + chkFp(buyersWin, "Footprint: buyers win") + chk(longGamma, "Calm market (walls hold)") + sigEnd(true, g3, flScore, 5)
+        sigAdd(bullSigs, bullKills, bullDones, sigLabel(true, sigTxt(true, g3, "wall held"), gradeColor(g3, sigBullC), tip3), lowKill, close + jobDist)
+        lastSigTxt := "BUY " + g3 + " · put wall held · " + fmtP(sPW) + " · " + hm
+        lastSigS   := "BUY " + g3 + " " + hm
+        lastSigCol := sigBullC
+    if absorbLongSig and showAbsorb and gradeRank(gradeOf(flScore, 5)) >= minRank
+        string g4 = gradeOf(flScore, 5)
+        string tip4 = "BUY · sellers trapped at the " + sigName + " put wall " + fmtP(sPW) + " (green candle, but the footprint shows sellers: they got absorbed)\n" + chk(dailyIsBull, "Daily candle bullish") + chk(weeklyIsBull, "Weekly candle bullish") + chk(amBuying, "Asset mgrs buying (COT)") + chk(true, "Footprint: sellers absorbed") + chk(longGamma, "Calm market (walls hold)") + sigEnd(true, g4, flScore, 5)
+        sigAdd(bullSigs, bullKills, bullDones, sigLabel(true, sigTxt(true, g4, "sellers trapped"), gradeColor(g4, absorbC), tip4), lowKill, close + jobDist)
+        lastSigTxt := "BUY " + g4 + " · sellers trapped · " + fmtP(sPW) + " · " + hm
+        lastSigS   := "BUY " + g4 + " " + hm
+        lastSigCol := absorbC
+    if squeezeUpSig and showSqueeze and gradeRank(gradeOf(suScore, 7)) >= minRank
+        string g5 = gradeOf(suScore, 7)
+        string tip5 = "BUY · closed above the " + sigName + " call wall " + fmtP(sCW) + " (dealers may have to chase price up)\n" + chk(dailyIsBull and confirmed, "Daily candle bullish + OI confirms") + chk(weeklyIsBull, "Weekly candle bullish") + chk(lfHeavyShort, "Hedge funds crowded short" + (shortsTrapped ? " AND trapped (+2)" : " (+1, +2 if trapped)")) + chkFp(buyersWin, "Footprint: buyers win") + chk(amBuying, "Asset mgrs buying (COT)") + chk(not na(regLvl) and not longGamma, "Fast market (breaks run)") + sigEnd(true, g5, suScore, 7)
+        sigAdd(bullSigs, bullKills, bullDones, sigLabel(true, sigTxt(true, g5, "wall broke"), gradeColor(g5, sigBullC), tip5), lowKill, close + jobDist)
+        lastSigTxt := "BUY " + g5 + " · call wall broke · " + fmtP(sCW) + " · " + hm
+        lastSigS   := "BUY " + g5 + " " + hm
+        lastSigCol := sigBullC
+    if squeezeDnSig and showSqueeze and gradeRank(gradeOf(sdScore, 7)) >= minRank
+        string g6 = gradeOf(sdScore, 7)
+        string tip6 = "SELL · closed below the " + sigName + " put wall " + fmtP(sPW) + " (dealers may have to chase price down)\n" + chk(dailyIsBear and confirmed, "Daily candle bearish + OI confirms") + chk(weeklyIsBear, "Weekly candle bearish") + chk(lfHeavyLong, "Hedge funds crowded long" + (longsTrapped ? " AND trapped (+2)" : " (+1, +2 if trapped)")) + chkFp(sellersWin, "Footprint: sellers win") + chk(amSelling, "Asset mgrs selling (COT)") + chk(not na(regLvl) and not longGamma, "Fast market (breaks run)") + sigEnd(false, g6, sdScore, 7)
+        sigAdd(bearSigs, bearKills, bearDones, sigLabel(false, sigTxt(false, g6, "wall broke"), gradeColor(g6, sigBearC), tip6), highKill, close - jobDist)
+        lastSigTxt := "SELL " + g6 + " · put wall broke · " + fmtP(sPW) + " · " + hm
+        lastSigS   := "SELL " + g6 + " " + hm
+        lastSigCol := sigBearC
+    if weakBreakUp and showWeak
+        sigAdd(bearSigs, bearKills, bearDones, sigLabel(false, "FAKE BREAK?" + (showSigWhy ? " · no buyers" : ""), weakC, "Closed above the " + sigName + " call wall " + fmtP(sCW) + " WITHOUT buyers winning the footprint.\nLikely a fake breakout: do not chase it." + sigEnd(false, "–", 0, 0)), highKill, close - jobDist)
+        lastSigTxt := "FAKE BREAK? up · no buyers · " + hm
+        lastSigS   := "FAKE? " + hm
+        lastSigCol := weakC
+    if weakBreakDn and showWeak
+        sigAdd(bullSigs, bullKills, bullDones, sigLabel(true, "FAKE BREAK?" + (showSigWhy ? " · no sellers" : ""), weakC, "Closed below the " + sigName + " put wall " + fmtP(sPW) + " WITHOUT sellers winning the footprint.\nLikely a fake breakdown: do not chase it." + sigEnd(true, "–", 0, 0)), lowKill, close + jobDist)
+        lastSigTxt := "FAKE BREAK? down · no sellers · " + hm
+        lastSigS   := "FAKE? " + hm
+        lastSigCol := weakC
+
+alertcondition(fadeShortSig or absorbShortSig, "SELL at the call wall (held / trap)", "Gamma Bias: SELL · the call wall held")
+alertcondition(fadeLongSig or absorbLongSig, "BUY at the put wall (held / trap)", "Gamma Bias: BUY · the put wall held")
+alertcondition(squeezeUpSig, "BUY · call wall broke", "Gamma Bias: BUY · closed above the call wall")
+alertcondition(squeezeDnSig, "SELL · put wall broke", "Gamma Bias: SELL · closed below the put wall")
+alertcondition(weakBreakUp or weakBreakDn, "Fake break (no footprint support)", "Gamma Bias: FAKE BREAK? · no footprint support")
+
+// ─── LEVEL MAP, HISTOGRAM, HUD ───
+var array<box>   gBoxes  = array.new<box>()
+var array<line>  gLines  = array.new<line>()
+var array<label> gLabels = array.new<label>()
+var table hud = table.new(hudPosition, 2, 34, bgcolor=color.black, border_color=color.rgb(60, 60, 60), border_width=1)
+
+if barstate.islast
+    for bx in gBoxes
+        box.delete(bx)
+    array.clear(gBoxes)
+    for ln in gLines
+        line.delete(ln)
+    array.clear(gLines)
+    for lb in gLabels
+        label.delete(lb)
+    array.clear(gLabels)
+
+    bool histOn = histSrc != "Off"
+    int histLeft  = bar_index + profileGap
+    int anchorX   = histLeft + profileWidth
+    int histRight = anchorX + profileWidth
+    float mergeD = mergePts > 0 ? mergePts : nz(nz(tStep, stpNow) * 0.4, 5.0)
+
+    // ─── BUILD LEVEL MAP ───
+    array<float>  lvP  = array.new<float>()
+    array<string> lvT  = array.new<string>()
+    array<string> lvN  = array.new<string>()
+    array<color>  lvC  = array.new<color>()
+    array<int>    lvPr = array.new<int>()
+    array<string> lvS  = array.new<string>()
+    array<int>    lvW  = array.new<int>()
+    array<int>    lvB  = array.new<int>()
+    array<bool>   lvZ  = array.new<bool>()
+
+    if showTodayLvls and hasToday
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, tCW, "Call wall today", showRoles ? roleOf("CT", tCW, close) : "", todayCallC, 6, lsOf(sTC), wTC, mergeD, true, tsBar)
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, tPW, "Put wall today", showRoles ? roleOf("PT", tPW, close) : "", todayPutC, 6, lsOf(sTP), wTP, mergeD, true, tsBar)
+    if showTodayLvls and not na(tFlip)
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, tFlip, "Flip today", showRoles ? roleOf("FT", tFlip, close) : "", flipC, 4, lsOf(sFL), wFL, mergeD, false, tsBar)
+    if show90dLvls
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, cw, "Call wall 90D" + (cwManual ? "" : " est."), showRoles ? roleOf("C90", cw, close) : "", callWallC, 5, lsOf(sC9), wC9, mergeD, true, cwSrc)
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, pw, "Put wall 90D" + (pwManual ? "" : " est."), showRoles ? roleOf("P90", pw, close) : "", putWallC, 5, lsOf(sP9), wP9, mergeD, true, pwSrc)
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, zg, zgManual ? "Zero γ 90D" : "VWAP 90D (est. zero γ)", showRoles ? roleOf("Z90", zg, close) : "", zeroC, 3, lsOf(sZ9), wZ9, mergeD, false, zgSrc)
+
+    if showTodayLvls and hasToday and magnetsN > 0
+        array<float> posVals = array.new<float>()
+        array<int>   posIdx  = array.new<int>()
+        for i = 0 to array.size(mK) - 1
+            float vv = array.get(mV, i)
+            float kF = array.get(mK, i) + spread
+            if vv > 0 and math.abs(kF - tCW) > mergeD
+                array.push(posVals, vv)
+                array.push(posIdx, i)
+        if array.size(posVals) > 0
+            array<int> ord2 = array.sort_indices(posVals, order.descending)
+            for r = 0 to math.min(magnetsN, array.size(ord2)) - 1
+                float mP = array.get(mK, array.get(posIdx, array.get(ord2, r))) + spread
+                addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, mP, "Magnet", showRoles ? roleOf("MG", mP, close) : "", magnetC, 2, lsOf(sMG), wMG, mergeD, true, tsBar)
+
+    // nearest wall / magnet above and below = where to sell / buy (regime lines and the plan line are not zones)
+    float buyP = na
+    float sellP = na
+    string buyN = ""
+    string sellN = ""
+    if array.size(lvP) > 0
+        for i = 0 to array.size(lvP) - 1
+            float lp = array.get(lvP, i)
+            if array.get(lvZ, i)
+                if lp < close and (na(buyP) or lp > buyP)
+                    buyP := lp
+                    buyN := array.get(lvN, i)
+                if lp > close and (na(sellP) or lp < sellP)
+                    sellP := lp
+                    sellN := array.get(lvN, i)
+
+    if showPlan and planSide != 0 and not na(planPx)
+        addLvl(lvP, lvT, lvN, lvC, lvPr, lvS, lvW, lvZ, lvB, planPx, planSide == 1 ? "Plan: buy limit" : "Plan: sell limit", showRoles ? planWhere : "", planSide == 1 ? planBuyC : planSellC, 7, lsOf(sPL), wPL, mergeD, false, tsBar)
+
+    // ─── HISTOGRAM (between price and the level labels) ───
+    bool histDrawn = false
+    if histOn
+        bool useT = histSrc == "Today (0DTE)" and hasToday
+        array<float> hk = array.new<float>()
+        array<float> hv = array.new<float>()
+        if useT
+            for i = 0 to array.size(mK) - 1
+                array.push(hk, array.get(mK, i) + spread)
+                array.push(hv, array.get(mV, i))
+        else if hasProxy
+            [dk, dv] = parseStrikes(array.get(parts, 4))
+            hk := dk
+            hv := dv
+
+        int n = array.size(hk)
+        float hCW = useT ? tCW : cw
+        float hPW = useT ? tPW : pw
+        float gapH = useT ? nz(tStep, syminfo.mintick * 40) : nz(stpNow, syminfo.mintick * 40)
+        if n > 0
+            float maxAbs = 0.0
+            for x in hv
+                maxAbs := math.max(maxAbs, math.abs(x))
+            float halfH = gapH * thickPct / 200.0
+            if maxAbs > 0
+                histDrawn := true
+                array.push(gLines, line.new(anchorX, array.first(hk) - gapH, anchorX, array.last(hk) + gapH, color=color.new(color.gray, 60), style=line.style_dashed))
+                array.push(gLabels, label.new(anchorX, array.last(hk) + gapH, useT ? "Gamma by strike · today" : histSrc == "Today (0DTE)" ? "No paste · 90D volume est." : "90D volume by price (est.)", style=label.style_label_down, color=color.new(color.black, 100), textcolor=color.gray, size=valueLblSize))
+                for i = 0 to n - 1
+                    float dk2 = array.get(hk, i)
+                    float dv2 = array.get(hv, i)
+                    if dv2 != 0
+                        float pct = math.abs(dv2) / maxAbs * 100
+                        int len = math.max(1, math.round(pct / 100 * profileWidth))
+                        bool isPos = dv2 > 0
+                        bool inPocket = not na(hCW) and not na(hPW) and dk2 < math.max(hCW, hPW) and dk2 > math.min(hCW, hPW) and pct < pocketPct
+                        bool isCW = not na(hCW) and math.abs(dk2 - hCW) < gapH / 2
+                        bool isPW = not na(hPW) and math.abs(dk2 - hPW) < gapH / 2
+                        color c = isCW ? (useT ? todayCallC : callWallC) : isPW ? (useT ? todayPutC : putWallC) : inPocket ? pocketC : isPos ? posColor : negColor
+                        int lft = isPos ? anchorX : anchorX - len
+                        int rgt = isPos ? anchorX + len : anchorX
+                        array.push(gBoxes, box.new(lft, dk2 + halfH, rgt, dk2 - halfH, border_color=color.new(c, 100), bgcolor=c))
+
+                if showValueLabels
+                    array<float> absV = array.new<float>()
+                    for av in hv
+                        array.push(absV, math.abs(av))
+                    array<int> rankIdx = array.sort_indices(absV, order.descending)
+                    for r = 0 to math.min(labelTopN, n) - 1
+                        int j = array.get(rankIdx, r)
+                        float lv = array.get(hv, j)
+                        int lLen = math.max(1, math.round(math.abs(lv) / maxAbs * profileWidth))
+                        int lx = lv > 0 ? anchorX + lLen : anchorX - lLen
+                        string lTxt = useT ? str.tostring(lv) : str.tostring(math.abs(lv) / maxAbs * 100, "#") + "%"
+                        array.push(gLabels, label.new(lx, array.get(hk, j), lTxt, style=lv > 0 ? label.style_label_left : label.style_label_right, color=color.new(color.black, 100), textcolor=lv > 0 ? posColor : negColor, size=valueLblSize))
+
+    // ─── DRAW LEVEL MAP: name · what it means · distance (price only with Show Prices) ───
+    // start: Source / Current Price / Histogram · length counted from that start · labels right of the histogram
+    int fromX = lineStart == "Histogram" and histDrawn ? histRight + 1 : bar_index
+    int endX  = math.min(fromX + lineExt, bar_index + 490)
+    int lblX  = histDrawn ? math.min(math.max(endX, histRight + 2), bar_index + 495) : endX
+    if showLadder and array.size(lvP) > 0
+        for i = 0 to array.size(lvP) - 1
+            float lp = array.get(lvP, i)
+            color lc = array.get(lvC, i)
+            int   sb = array.get(lvB, i)
+            int   x1 = lineStart == "Source" ? math.max(nz(sb, bar_index), bar_index - 4999) : fromX
+            array.push(gLines, line.new(x1, lp, endX, lp, color=lc, width=array.get(lvW, i), style=array.get(lvS, i)))
+            array.push(gLabels, label.new(lblX, lp, (showPx ? fmtP(lp) + " · " : "") + array.get(lvT, i) + " · " + dist(lp), style=label.style_label_left, color=color.new(color.black, 100), textcolor=lc, size=lvlLblSize))
+
+    // ─── READS ───
+    int bullVotes = (monthlyIsBull ? 1 : 0) + (weeklyIsBull ? 1 : 0) + (dailyIsBull ? 1 : 0)
+    int bearVotes = (monthlyIsBear ? 1 : 0) + (weeklyIsBear ? 1 : 0) + (dailyIsBear ? 1 : 0)
+    int netVotes  = bullVotes - bearVotes
+    string biasWord = bullVotes + bearVotes == 0 ? "NO DATA" : netVotes >= 3 ? "STRONG LONG" : netVotes >= 1 ? "LEAN LONG" : netVotes <= -3 ? "STRONG SHORT" : netVotes <= -1 ? "LEAN SHORT" : "MIXED"
+    color biasWordC = netVotes >= 1 ? color.lime : netVotes <= -1 ? color.red : color.gray
+
+    string locTxt = "type your 90D walls"
+    if not na(cw) and not na(pw) and not na(zoneBuf90)
+        if close > cw + zoneBuf90
+            locTxt := "above the big ceiling"
+        else if close >= cw - zoneBuf90
+            locTxt := "at the big ceiling"
+        else if close < pw - zoneBuf90
+            locTxt := "below the big floor"
+        else if close <= pw + zoneBuf90
+            locTxt := "at the big floor"
+        else
+            locTxt := "between the 90D walls"
+
+    int  cDir = netVotes >= 1 ? 1 : netVotes <= -1 ? -1 : 0
+    bool cPocket = locTxt == "between the 90D walls"
+    string cPlay = "Load the walls first"
+    color  cPlayC = color.gray
+    if not na(regLvl)
+        if cDir == 1
+            cPlay  := longGamma ? "BUY dips at floors · take profit at ceilings" : "BUY breakouts and pullbacks · let it run"
+            cPlayC := color.lime
+        else if cDir == -1
+            cPlay  := longGamma ? "SELL rallies at ceilings · take profit at floors" : "SELL breakdowns and pullbacks · let it run"
+            cPlayC := color.red
+        else
+            cPlay  := longGamma ? "NO BIAS · fade both walls, small size" : "NO BIAS · stand aside"
+            cPlayC := color.orange
+        if cDir != 0 and cPocket and not hasToday
+            cPlay := "WAIT · between the walls · " + (cDir == 1 ? "buy at a floor" : "sell at a ceiling")
+        if cDir != 0 and not confirmed
+            cPlay += " · OI does not confirm: smaller size"
+
+    string regS   = not na(tFlip) ? "flip" : zgManual ? "zero γ" : "VWAP est."
+    string locS   = locTxt == "above the big ceiling" ? "above ceiling" : locTxt == "at the big ceiling" ? "at ceiling" : locTxt == "below the big floor" ? "below floor" : locTxt == "at the big floor" ? "at floor" : locTxt == "between the 90D walls" ? "between walls" : "no 90D walls"
+    string cPlayS = "Load the walls first"
+    if not na(regLvl)
+        cPlayS := cDir == 1 ? (longGamma ? "Buy dips at floors" : "Buy breakouts, let it run") : cDir == -1 ? (longGamma ? "Sell rallies at ceilings" : "Sell breakdowns, let it run") : (longGamma ? "No bias · fade both walls, small" : "No bias · stand aside")
+        if cDir != 0 and cPocket and not hasToday
+            cPlayS := "Wait · " + (cDir == 1 ? "buy at a floor" : "sell at a ceiling")
+        if cDir != 0 and not confirmed
+            cPlayS += " · half size"
+    string cBias   = biasWord + " · M" + arrowOf(monthlyIsBull, monthlyIsBear) + " W" + arrowOf(weeklyIsBull, weeklyIsBear) + " D" + arrowOf(dailyIsBull, dailyIsBear) + " · OI " + (confirmed ? "✓" : "✕")
+    string cMarket = na(regLvl) ? "—" : (longGamma ? "CALM · above " : "FAST · below ") + regS + (longGamma ? " · walls hold" : " · breaks run") + " · " + locS
+    string cMktTip = na(regLvl) ? "" : (longGamma ? "CALM: price is above " : "FAST: price is below ") + regName + " " + fmtP(regLvl) + ". " + (longGamma ? "Dealers slow price down: reversals at the walls work." : "Dealers push price: breakouts run.") + " Location vs the 90D walls: " + locTxt + "."
+    string cSell = na(sellP) ? "—" : pxd(sellP) + " · " + sellN
+    string cBuy  = na(buyP) ? "—" : pxd(buyP) + " · " + buyN
+    string cAM = na(amNet) ? "AM —" : "AM " + (amNet >= 0 ? "long" : "short") + (amBuying ? " ▲" : amSelling ? " ▼" : "")
+    string cLF = na(lfNet) ? "" : " · HF " + (lfNet >= 0 ? "long" : "short") + (not na(lfDelta) and lfDelta > 0 ? " ▲" : not na(lfDelta) and lfDelta < 0 ? " ▼" : "")
+    string cAMt = na(amNet) ? "Asset managers: no COT data" : "Asset managers " + (amNet >= 0 ? "LONG" : "SHORT") + (amBuying ? ", buying" : amSelling ? ", selling" : ", flat")
+    string cLFt = na(lfNet) ? "" : " · Hedge funds " + (lfNet >= 0 ? "LONG" : "SHORT") + (not na(lfDelta) and lfDelta > 0 ? (lfNet < 0 ? ", covering shorts" : ", buying") : not na(lfDelta) and lfDelta < 0 ? (lfNet < 0 ? ", adding shorts" : ", selling") : ", flat")
+    color  cMoneyC = amBuying ? color.lime : amSelling ? color.red : color.gray
+    string cNow = (not useFootprint or not hasFp ? "No footprint" : (buyersWin ? "Buyers " : sellersWin ? "Sellers " : "Even ") + str.tostring(deltaPct, "#") + "%") + " · last " + lastSigS
+    color  cNowC = buyersWin ? color.lime : sellersWin ? color.red : color.gray
+    string srcS  = "today " + (hasToday ? "✓" : "✕") + " · 90D " + (manual90 ? "✓" : "est.") + " · COT " + cotSrcName
+    bool   idxMismatch = str.length(txtIndex) > 0 and txtIndex != targetIndex
+
+    if showHud
+        table.clear(hud, 0, 0, 1, 33)
+        int row = 0
+        table.cell(hud, 0, row, "GAMMA · " + syminfo.ticker, text_color=color.white, text_size=hudSize, bgcolor=color.rgb(35, 35, 35), text_halign=text.align_left)
+        table.cell(hud, 1, row, srcS, text_color=hasToday and manual90 ? color.aqua : color.yellow, text_size=hudSize, bgcolor=color.rgb(35, 35, 35), text_halign=text.align_left, tooltip="Data: today = 0DTE strikes pasted · 90D ✓ = walls typed (est. = estimated from volume) · COT = the weekly report used.")
+        row += 1
+        hudRow(hud, row, "BIAS", cBias, biasWordC, hudSize, "Month, week and day = the direction of the last closed candle of each. OI ✓ = yesterday's open interest confirms the daily candle.")
+        row += 1
+        hudRead(hud, row, "DO", cPlayS, cPlayC, hudSize, cPlay)
+        row += 1
+        hudRow(hud, row, "MARKET", cMarket, na(regLvl) ? color.gray : longGamma ? color.lime : color.red, hudSize, cMktTip)
+        row += 1
+        hudRow(hud, row, "SELL AT", cSell, color.red, hudSize, "The nearest wall or magnet ABOVE price, in points from price" + (na(sellP) ? "." : ": " + fmtP(sellP) + "."))
+        row += 1
+        hudRow(hud, row, "BUY AT", cBuy, color.lime, hudSize, "The nearest wall or magnet BELOW price, in points from price" + (na(buyP) ? "." : ": " + fmtP(buyP) + "."))
+        row += 1
+        hudRow(hud, row, "YESTERDAY", dailyType + " · " + oiShort, biasColor, hudSize, descr(dailyType) + " · " + biasText + " · " + oiWord)
+        row += 1
+        hudRow(hud, row, "PLAN", planS + tgtShort, planColor, hudSize, planTxt + (tgtText != "" ? " · " + tgtText : "") + ". From yesterday's candle and its OI.")
+        row += 1
+        hudRow(hud, row, "MONEY", cAM + cLF, cMoneyC, hudSize, cAMt + cLFt + ". AM = asset managers, HF = hedge funds (weekly COT). ▲ = adding longs or covering shorts, ▼ = selling or adding shorts.")
+        row += 1
+        hudRow(hud, row, "CROWD", trapShort, trapColor, hudSize, trapText)
+        row += 1
+        hudRow(hud, row, "FLOW", cNow, cNowC, hudSize, "Footprint delta of this candle (buyers − sellers, % of its volume) · last signal: " + lastSigTxt)
+        row += 1
+
+        if hudMode == "Detailed"
+            hudHead(hud, row, "LEVELS (points from price)", hudSize)
+            row += 1
+            hudRow(hud, row, "Call wall 90D" + (cwManual ? "" : " (est.)"), pxd(cw), callWallC, hudSize)
+            row += 1
+            hudRow(hud, row, "Put wall 90D" + (pwManual ? "" : " (est.)"), pxd(pw), putWallC, hudSize)
+            row += 1
+            hudRow(hud, row, zgManual ? "Zero γ 90D" : "90D VWAP (est. zero γ)", pxd(zg), color.silver, hudSize)
+            row += 1
+            hudRow(hud, row, "Today (0DTE)", hasToday ? "call " + pxd(tCW) + " · put " + pxd(tPW) + " · flip " + pxd(tFlip) : "paste today's levels", hasToday ? todayCallC : color.gray, hudSize)
+            row += 1
+            hudRow(hud, row, "Signals watch", sigName + " walls" + (sigLive ? "" : " · waiting for today's open"), color.silver, hudSize)
+            row += 1
+            hudHead(hud, row, "COT · WEEKLY · " + cotSrcName + " report", hudSize)
+            row += 1
+            hudRow(hud, row, "Asset managers", hasCOT ? "net " + fmt(amNet) + " · change " + netDeltaText(amNet, amDelta) : "no COT data", amBuying ? color.green : amSelling ? color.red : color.gray, hudSize)
+            row += 1
+            hudRow(hud, row, "Hedge funds", hasCOT ? "net " + fmt(lfNet) + (na(lfNetPct) ? "" : " (" + str.tostring(lfNetPct, "#") + "% of their positions)") + " · change " + netDeltaText(lfNet, lfDelta) : "no COT data", lfHeavyShort or lfHeavyLong ? color.orange : color.gray, hudSize)
+            row += 1
+            hudHead(hud, row, "CANDLES (last closed)", hudSize)
+            row += 1
+            hudRow(hud, row, "Month", descr(monthlyType), monthlyIsBull ? color.green : monthlyIsBear ? color.red : color.gray, hudSize)
+            row += 1
+            hudRow(hud, row, "Week", descr(weeklyType) + weeklyAgreeText, weeklyIsBull ? color.green : weeklyIsBear ? color.red : color.gray, hudSize)
+            row += 1
+            hudRow(hud, row, "Day", descr(dailyType) + " · " + biasText, biasColor, hudSize)
+            row += 1
+            hudRow(hud, row, "Daily OI (" + oiSrcName + ")", oiAsOfDate + " " + oiDeltaDisplay + (oiIsMassive ? " · SURGE" : ""), biasColor, hudSize)
+            row += 1
+
+        string note = idxMismatch ? "! Pasted " + txtIndex + " levels, but this chart uses " + targetIndex : not hasCOT and na(oiClose) ? "No COT / OI here: use NQ1!, ES1! or MNQ1!" : not hasToday ? "Paste today's levels for the full map" : ""
+        if note != ""
+            table.cell(hud, 0, row, note, text_color=idxMismatch ? color.orange : color.gray, text_size=idxMismatch ? hudSize : size.tiny, bgcolor=color.black)
+            table.merge_cells(hud, 0, row, 1, row)

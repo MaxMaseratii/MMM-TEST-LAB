@@ -1,0 +1,1039 @@
+//@version=6
+indicator("MMM Perfect Entry: Fair Value Area Break @MaxMaserati 4.1", "FVA Break 4.1", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════
+// MMM FAIR VALUE AREA BREAK 4.1
+//  FVA        = the body range of the neutral candles (NBC) before a body close (BC).
+//  FLIP ZONE  = the body of the last opposite BC before a flip:
+//               PEL+ (bull) after a bearish run, PES+ (bear) after a bullish run.
+//  STRATEGIES = the only setups that passed the honest test (1h chart):
+//   FVA.M1 · Flip Zone Fail · LONG       a 1h close ABOVE a PES+ zone -> buy · daily ATR stop · 1:4
+//   FVA.M2 · Asia Flip Zone Fail · BOTH  in Asia (18:00-02:00 NY) a 1h close through a flip zone
+//                                        -> trade the break · zone stop · 1:1.5 · WR 56%
+//  The old entries (① – ⑥, nested, LQG, BuX / BeX) are removed: none of them passed.
+//  Drawing = MMM Pro style: everything is redrawn from state on the last bar,
+//  max per side, newest first, an item and its lines / labels die together.
+// ═══════════════════════════════════════════════════════════════════════
+
+max_bars_back(high,   300)
+max_bars_back(low,    300)
+max_bars_back(volume, 300)
+
+// ═══════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════
+grp_risk  = "1. Account & Risk"
+contracts = input.int(1, "Contracts", minval=1, group=grp_risk, tooltip="Contracts per trade. Used for the money (W: +$ · L: −$ · Net) on this chart.")
+pvIn      = input.float(0.0, "Point Value $ (0 = auto)", minval=0.0, step=0.5, group=grp_risk, tooltip="$ per 1 point per contract.\n0 = auto: MNQ 2 · NQ 20 · MES 5 · ES 50 · else 1.")
+costIn    = input.float(-1.0, "Cost per Trade, pts (-1 = auto)", minval=-1.0, step=0.25, group=grp_risk, tooltip="Commission + slippage in points, taken off every trade (the test used 1 pt on NQ).\n-1 = auto: NQ / MNQ 1 · ES / MES 0.5.")
+useIb     = input.bool(true, "Grade With 1m Intrabar Data", inline="ib", group=grp_risk, tooltip="Reads the small candles inside each chart candle, in order: the stop is read first, then the target (same rules as the test).\nWith no intrabar data (old history) the chart candle is used: stop first.")
+ibTF      = input.timeframe("1", "", inline="ib", group=grp_risk)
+histBars  = input.int(6000, "History Bars", minval=300, maxval=20000, group=grp_risk, tooltip="How many candles back the engine starts. More = more trades in the stats, slower load. 6000 × 1h ≈ 1 year.")
+
+grp_st   = "2. Strategies (tested · 1h)"
+sM1      = input.bool(true, "FVA.M1 · Flip Zone Fail · LONG · 1:4", group=grp_st, tooltip="RULE\nA bearish flip zone (PES+ box) = the body of the last bullish BC before sellers flipped the trend.\nWhen a 1h candle CLOSES ABOVE the top of that box, the sellers failed → BUY at that close.\nStop = yesterday's daily ATR(14) × 0.15 (≈ 46 pts in 2023–25, ≈ 82 pts in 2026).\nTarget = 1:4.\nEarly exit = at the close of the 2nd neutral candle (NBC) in a row when both close in their upper half (the push stalls).\nTime limit = 100 candles. One trade per candle.\n\nTESTED (1h · market at the close · stop first on 1m data · 1 pt cost)\nNQ 2023–25: 402 trades · WR 36% · PF 1.47 · avg RR +0.30 · t-score 3.1 (2023 +0.25 · 2024 +0.40 · 2025 +0.23)\nMNQ 2026: 51 trades · WR 45% · PF 2.22 · avg RR +0.63 · t-score 2.2\nBoth: 453 trades · WR 37% · PF 1.54 · avg RR +0.33 · t-score 3.7\nRandom 1h longs with the same stop / target / exit: about 0.")
+sM2      = input.bool(true, "FVA.M2 · Asia Flip Zone Fail · BOTH · 1:1.5 · WR 56%", group=grp_st, tooltip="RULE (Asia only: the 1h candle that opens 18:00 – 01:00 New York)\nA 1h candle CLOSES THROUGH a flip zone:\n• close ABOVE a PES+ zone = sellers failed → BUY at that close\n• close BELOW a PEL+ zone = buyers failed → SELL at that close\nStop = the far side of the zone ± 4 ticks (Zone stop), or a fixed stop.\nTarget = 1:1.5. Time limit = 100 candles. One trade per candle per side.\n\nTESTED (1h · market at the close · stop first on 1m data · 1 pt cost)\nZone stop, no early exit:\nNQ 2023–25: 119 trades · WR 55% · PF 1.73 · avg RR +0.34 · t 3.0 (2023 +0.18 · 2024 +0.23 · 2025 +0.50)\nMNQ 2026: 34 trades · WR 59% · PF 2.08 · avg RR +0.45 · t 2.1\nBoth: 153 trades · WR 56% · PF 1.81 · avg RR +0.37 · t 3.6\nFixed 50 pt stop + stall exit (2 NBC both leaning with the trade):\nBoth: 153 trades · WR 56% · PF 1.86 · avg RR +0.34 · t 3.6 (2026: WR 65%, +0.56)\nLongs and shorts both made money in both periods. Outside Asia the short side does NOT work.")
+m2Stop   = input.string("Zone (tested best)", "M2 Stop", options=["Zone (tested best)", "Fixed 50 NQ / 20 ES"], group=grp_st, tooltip="Zone = the far side of the broken zone ± 4 ticks (≈ 46 pts 2023–25, ≈ 99 pts 2026), no early exit.\nFixed = 50 pts NQ / MNQ (20 pts ES / MES, untested) with the 2-NBC stall exit, as tested.")
+m1AnyTF  = input.bool(false, "Run on Any Timeframe (untested)", group=grp_st, tooltip="OFF = the strategies only trade on a 1h chart (how they were tested). The zones still draw on every chart.")
+m1Lines  = input.bool(true, "Trigger Lines on Flip Zones", group=grp_st, tooltip="PES+ zones: a line at the top = a 1h CLOSE above it is the buy (M1 always, M2 in Asia).\nPEL+ zones: a line at the bottom = a 1h CLOSE below it in Asia is the M2 sell.")
+
+grp_tr    = "3. Trades on Chart"
+trLines   = input.bool(true, "Entry / Stop / Target Lines", inline="tr1", group=grp_tr)
+trLbls    = input.bool(true, "Labels", inline="tr1", group=grp_tr)
+keepWin   = input.int(3, "Keep Winners", minval=0, maxval=50, inline="tr2", group=grp_tr, tooltip="How many closed WINNING trades stay drawn (newest first).")
+keepLoss  = input.int(3, "Keep Losers", minval=0, maxval=50, inline="tr2", group=grp_tr, tooltip="How many closed LOSING trades stay drawn (newest first).")
+c_entry   = input.color(#E0E0E0, "Entry", inline="trc", group=grp_tr)
+c_stop    = input.color(#FF5252, "Stop", inline="trc", group=grp_tr)
+c_tgt     = input.color(#00E676, "Target", inline="trc", group=grp_tr)
+
+grp_fz    = "4. Flip Zones (PEL+ / PES+)"
+fzBear    = input.bool(true, "PES+ (Bear Flip Zones · M1 / M2 buy trigger)", inline="fz1", group=grp_fz)
+c_fzBear  = input.color(#e91e63, "", inline="fz1", group=grp_fz)
+fzBull    = input.bool(true, "PEL+ (Bull Flip Zones · M2 sell trigger)", inline="fz2", group=grp_fz)
+c_fzBull  = input.color(#09a579, "", inline="fz2", group=grp_fz)
+fzMax     = input.int(3, "Max per Side", minval=0, maxval=20, inline="fz3", group=grp_fz, tooltip="Live zones drawn per side, newest first. A zone dies with its lines and labels when a candle closes through it.")
+fzTransp  = input.int(85, "Transparency", minval=0, maxval=100, inline="fz3", group=grp_fz)
+fzName    = input.bool(true, "Name Inside Box", inline="fz4", group=grp_fz)
+fzPoc     = input.bool(false, "POC Line", inline="fz4", group=grp_fz, tooltip="The volume POC of the zone (highest-volume price). Information only: POC entries did not pass the honest test.")
+fzBreak   = input.bool(true, "Flip Label (CDL+ / CDS+)", inline="fz5", group=grp_fz)
+fzTgt     = input.bool(false, "Flip Candle High / Low", inline="fz5", group=grp_fz, tooltip="The high (PEL+) / low (PES+) of the flip candle.")
+fzSwing   = input.bool(false, "Swing Level (CDL SL / CDS SH)", group=grp_fz, tooltip="The swing low (PEL+) / swing high (PES+) behind the flip.")
+
+grp_fva   = "5. Fair Value Areas (NBC Boxes)"
+fvaLive   = input.bool(true, "Forming FVA (Live NBC Box)", group=grp_fva)
+fvaPast   = input.bool(true, "Past FVA Boxes", inline="fv1", group=grp_fva)
+fvaMax    = input.int(2, "Max per Side", minval=0, maxval=20, inline="fv1", group=grp_fva, tooltip="Live FVA boxes per side, newest first. A box dies when a candle closes through it.")
+fvaMid    = input.bool(false, "Mid Line", inline="fv2", group=grp_fva)
+c_fvaBull = input.color(#4caf50, "Bull", inline="fv3", group=grp_fva)
+c_fvaBear = input.color(#f44336, "Bear", inline="fv3", group=grp_fva)
+c_fvaLive = input.color(#9e9e9e, "Forming", inline="fv3", group=grp_fva)
+fvaTransp = input.int(88, "Transparency", minval=0, maxval=100, group=grp_fva)
+
+grp_cndl  = "6. Candles"
+cColor    = input.bool(true, "Color BuX / BeX / NBC", inline="cc", group=grp_cndl, tooltip="BuX = close above the previous high · BeX = close below the previous low · NBC = neither (neutral candle).")
+c_bux     = input.color(#27ffc3, "BuX", inline="cc", group=grp_cndl)
+c_bex     = input.color(#9c27b0, "BeX", inline="cc", group=grp_cndl)
+c_nbc     = input.color(color.white, "NBC", inline="cc", group=grp_cndl)
+
+grp_lbl   = "7. Labels & Lines"
+lbl_all   = input.string("per item", "ALL Labels", options=["per item", "tiny", "small", "normal", "large"], group=grp_lbl, tooltip="One switch for every label and line text. \"per item\" = use each size below.")
+zone_size = input.string("tiny", "Box Names", options=["tiny", "small", "normal", "large"], inline="s1", group=grp_lbl)
+lvl_size  = input.string("small", "Levels", options=["tiny", "small", "normal", "large"], inline="s1", group=grp_lbl)
+brk_size  = input.string("small", "Flip Labels", options=["tiny", "small", "normal", "large"], inline="s2", group=grp_lbl)
+trd_size  = input.string("small", "Trades", options=["tiny", "small", "normal", "large"], inline="s2", group=grp_lbl)
+line_ext  = input.int(10, "Line Extension (Candles)", minval=0, maxval=50, group=grp_lbl)
+
+grp_tbl   = "8. Tables"
+liveOn    = input.bool(true, "LIVE Table", inline="t1", group=grp_tbl, tooltip="Shows a strategy only when it is ARMED (a live trigger, M2 only in Asia), IN A TRADE, or TRADED TODAY.")
+livePos   = input.string("Top Right", "", options=["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], inline="t1", group=grp_tbl)
+infoOn    = input.bool(false, "INFO Table", inline="t2", group=grp_tbl, tooltip="The full numbers of FVA.M1 and FVA.M2: tested (2023–26) and this chart.")
+infoPos   = input.string("Middle Right", "", options=["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], inline="t2", group=grp_tbl)
+guideOn   = input.bool(false, "GUIDE Table", inline="t3", group=grp_tbl, tooltip="How to read the chart and the tables.")
+guidePos  = input.string("Bottom Left", "", options=["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], inline="t3", group=grp_tbl)
+tblSize   = input.string("Small", "Table Text", options=["Tiny", "Small", "Normal"], group=grp_tbl)
+
+// ═══════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+const color T_BG   = #000000
+const color T_ROW  = #141414
+const color T_ALT  = #1E1E1E
+const color T_GOLD = #F2C230
+const color T_LBL  = #E0E0E0
+const color T_VAL  = #FFFFFF
+const color T_POS  = #00E676
+const color T_NEG  = #FF5252
+const color T_MUTE = #9E9E9E
+const color T_WARN = #FFB300
+const color T_SEC2 = #262626
+
+f_lsz(string item) =>
+    lbl_all == "per item" ? item : lbl_all
+
+f_szs(string s) =>
+    s == "large" ? size.large : s == "normal" ? size.normal : s == "small" ? size.small : size.tiny
+
+f_tsz() =>
+    tblSize == "Tiny" ? size.tiny : tblSize == "Normal" ? size.normal : size.small
+
+f_pos(string p) =>
+    switch p
+        "Top Left"      => position.top_left
+        "Top Center"    => position.top_center
+        "Top Right"     => position.top_right
+        "Middle Left"   => position.middle_left
+        "Middle Right"  => position.middle_right
+        "Bottom Left"   => position.bottom_left
+        "Bottom Center" => position.bottom_center
+        => position.bottom_right
+
+f_sgn(float v, string fmt) =>
+    na(v) ? "—" : (v > 0 ? "+" : "") + str.tostring(v, fmt)
+
+f_usd(float v) =>
+    na(v) ? "—" : (v >= 0 ? "+$" : "−$") + str.tostring(math.abs(v), "#,###")
+
+f_cell(table tb, int c, int r, string txt, color tc, color bg, string al) =>
+    table.cell(tb, c, r, txt, text_color=tc, bgcolor=bg, text_size=f_tsz(), text_halign=al)
+    true
+
+var int bar_ms = timeframe.in_seconds() * 1000
+f_future_time(int ext) =>
+    int diff = time - nz(time[1], time)
+    if diff <= 0
+        diff := bar_ms
+    if diff <= 0
+        diff := 60000
+    time + math.round(diff * ext)
+
+string ROOT  = syminfo.root
+bool   isES  = str.contains(ROOT, "ES")
+float  PV    = pvIn > 0 ? pvIn : ROOT == "MNQ" ? 2.0 : ROOT == "NQ" ? 20.0 : ROOT == "MES" ? 5.0 : ROOT == "ES" ? 50.0 : 1.0
+float  COST  = costIn >= 0 ? costIn : isES ? 0.5 : 1.0
+bool   tf1h  = timeframe.period == "60"
+bool   tfOk  = tf1h or m1AnyTF
+bool   m1Run = sM1 and tfOk
+bool   m2Run = sM2 and tfOk
+bool   m2Fix = m2Stop != "Zone (tested best)"
+float  FIXP  = isES ? 20.0 : 50.0
+int    nyMin = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+bool   inAsia = nyMin >= 1080 or nyMin < 120
+bool   inRange = last_bar_index - bar_index <= histBars
+
+// ═══════════════════════════════════════════════════════════════════════
+// DATA (unconditional requests)
+// ═══════════════════════════════════════════════════════════════════════
+string ibUse = timeframe.in_seconds(ibTF) < timeframe.in_seconds(timeframe.period) ? ibTF : timeframe.period
+[ibO, ibH, ibL] = request.security_lower_tf(syminfo.tickerid, ibUse, [open, high, low])
+float dAtr = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead=barmerge.lookahead_on)
+
+// candle types
+bool isBux = close > high[1]
+bool isBex = close < low[1]
+bool isNbc = not isBux and not isBex
+// exit candle types (open rule, same as the test engine)
+bool xBu = close > high[1] or (open > high[1] and not (close < low[1]))
+bool xBe = close < low[1] or (open < low[1] and not (close > high[1]))
+var int nbcRun = 0
+float cPos = high > low ? (close - low) / (high - low) : 0.5
+
+barcolor(cColor and barstate.isconfirmed ? (isBux ? c_bux : isBex ? c_bex : c_nbc) : na)
+
+// ═══════════════════════════════════════════════════════════════════════
+// VOLUME PROFILE POC (same math as 3.x: 20 rows, up to 200 candles back)
+// ═══════════════════════════════════════════════════════════════════════
+f_poc(float swingH, float swingL, int lb) =>
+    float res = na
+    if not na(swingH) and not na(swingL) and swingH > swingL and lb >= 0
+        int   bins = 20
+        float step = math.max((swingH - swingL) / bins, syminfo.mintick)
+        array<float> vols = array.new_float(bins, 0.0)
+        array<float> lv   = array.new_float(bins, 0.0)
+        for b = 0 to bins - 1
+            lv.set(b, swingL + b * step)
+        int safeStart = math.min(200, lb)
+        for i = 0 to safeStart
+            float cH = high[i]
+            float cL = low[i]
+            float cV = nz(volume[i])
+            if cV > 0 and cH >= swingL and cL <= swingH
+                float pr = math.max(cH - cL, syminfo.mintick)
+                int sB = math.max(0, array.binary_search_rightmost(lv, cL - step))
+                int eB = math.min(bins - 1, array.binary_search_leftmost(lv, cH + step))
+                if sB <= eB
+                    for b = sB to eB
+                        float bb = lv.get(b)
+                        float bt = bb + step
+                        if cH >= bb and cL <= bt
+                            float oF = (math.min(cH, bt) - math.max(cL, bb)) / pr
+                            if oF > 0
+                                vols.set(b, vols.get(b) + cV * oF)
+        float mx = 0.0
+        int   pi = 0
+        for b = 0 to bins - 1
+            if vols.get(b) > mx
+                mx := vols.get(b)
+                pi := b
+        if mx > 0
+            res := swingL + pi * step + step / 2
+    res
+
+// ═══════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════
+// FVA structure: kind 1 = FVA box broken by a BC (CDL / CDS) · kind 2 = flip structure
+type FS
+    int   kind
+    bool  isBull
+    bool  slDrawn
+    int   breakBar
+    int   originBar
+    float swing
+    bool  cbViol = false
+    float poc
+    bool  pocDel = false
+    float top
+    float bot
+    bool  filled = false
+    bool  slViol = false
+    bool  isSig = false
+    int   sigState = 0
+    int   grey = 0
+    bool  hasSwingLine
+    bool  isNested
+    int   tStart
+    int   tBreak
+
+// Flip zone: PEL+ (bull) / PES+ (bear)
+type FZ
+    bool  isBull
+    float delLevel
+    bool  viol = false
+    float poc
+    bool  pocDel = false
+    float top
+    float bot
+    bool  filled = false
+    bool  slViol = false
+    int   creationBar
+    bool  isSig = false
+    int   sigState = 0
+    int   grey = 0
+    bool  hasSwingLine
+    bool  isNested
+    float flipHi
+    float flipLo
+    int   tBox
+    int   tFlip
+    int   tSwing
+
+type Trd
+    int   k
+    int   side
+    int   xm
+    int   eBar
+    int   eT
+    float e
+    float stp
+    float tp
+    float d
+    int   xBar = na
+    int   xT = na
+    float xPx = na
+    float R = na
+    int   res = 0
+    int   xDay = na
+
+// stats per strategy (this chart)
+type St
+    int   n = 0
+    int   w = 0
+    float sR = 0.0
+    float sR2 = 0.0
+    float gW = 0.0
+    float gL = 0.0
+    float wUsd = 0.0
+    float lUsd = 0.0
+    float cum = 0.0
+    float pk = 0.0
+    float dd = 0.0
+    int   curW = 0
+    int   curL = 0
+    int   maxW = 0
+    int   maxL = 0
+    int   t0 = na
+
+var array<FS>  bulls = array.new<FS>()
+var array<FS>  bears = array.new<FS>()
+var array<FZ>  zones = array.new<FZ>()
+var array<Trd> trOpen = array.new<Trd>()
+var array<Trd> trDone = array.new<Trd>()
+
+var int   state       = -999
+var float runTop      = na
+var float runBot      = na
+var float runHigh     = na
+var float runLow      = na
+var int   startBar    = na
+var int   startT      = na
+var float lastNbcHigh = na
+var float lastNbcLow  = na
+var float lastBcHigh  = na
+var float lastBcLow   = na
+var float lastBcOpen  = na
+var float lastBcClose = na
+var int   lastBcBar   = na
+var int   lastBcT     = na
+var float rsl         = na
+var int   rslBar      = na
+var int   rslT        = na
+var float rsh         = na
+var int   rshBar      = na
+var int   rshT        = na
+var int   lastBcDir   = 0
+var bool  curNested   = false
+var int   parStart    = na
+var float parHigh     = na
+var float parLow      = na
+
+var array<St> ST = array.from(St.new(), St.new())
+var array<string> SN = array.from("FVA.M1", "FVA.M2")
+bool  sigL     = false
+float sigLStop = na
+bool  sigS     = false
+float sigSStop = na
+
+f_book(St s, float R, float usd) =>
+    s.n   += 1
+    s.sR  += R
+    s.sR2 += R * R
+    if R > 0
+        s.w    += 1
+        s.gW   += R
+        s.wUsd += usd
+        s.curW += 1
+        s.curL := 0
+    else
+        s.gL   -= R
+        s.lUsd += usd
+        s.curL += 1
+        s.curW := 0
+    s.maxW := math.max(s.maxW, s.curW)
+    s.maxL := math.max(s.maxL, s.curL)
+    s.cum  += usd
+    s.pk   := math.max(s.pk, s.cum)
+    s.dd   := math.max(s.dd, s.pk - s.cum)
+    true
+
+// ═══════════════════════════════════════════════════════════════════════
+// TRADE ENGINE (FVA.M1 · FVA.M2) — runs on every closed candle
+//  entry = market at the signal close · stop / target read on 1m intrabars, stop first
+//  stall exit (xm 1) at a close: 2 NBC in a row both closing on the trade's side of their
+//  middle (from the 2nd candle after the entry) · time limit 100 candles · cost on every trade
+// ═══════════════════════════════════════════════════════════════════════
+if barstate.isconfirmed and inRange
+    nbcRun := (not xBu and not xBe) ? nbcRun + 1 : 0
+    if trOpen.size() > 0
+        for k = trOpen.size() - 1 to 0
+            Trd t = trOpen.get(k)
+            if bar_index > t.eBar
+                bool  lg  = t.side == 1
+                float px  = na
+                int   res = 0
+                int   n   = useIb and not na(ibH) ? array.size(ibH) : 0
+                if n > 0
+                    for q = 0 to n - 1
+                        float qh = array.get(ibH, q)
+                        float ql = array.get(ibL, q)
+                        float qo = array.get(ibO, q)
+                        if na(qh) or na(ql)
+                            continue
+                        if lg ? ql <= t.stp : qh >= t.stp
+                            px  := lg ? math.min(nz(qo, t.stp), t.stp) : math.max(nz(qo, t.stp), t.stp)
+                            res := -1
+                            break
+                        if lg ? qh >= t.tp : ql <= t.tp
+                            px  := t.tp
+                            res := 1
+                            break
+                else
+                    if lg ? low <= t.stp : high >= t.stp
+                        px  := lg ? math.min(open, t.stp) : math.max(open, t.stp)
+                        res := -1
+                    else if lg ? high >= t.tp : low <= t.tp
+                        px  := t.tp
+                        res := 1
+                if res == 0
+                    bool lean  = lg ? (cPos >= 0.5 and nz(cPos[1], 0.5) >= 0.5) : (cPos <= 0.5 and nz(cPos[1], 0.5) <= 0.5)
+                    bool stall = t.xm == 1 and bar_index >= t.eBar + 2 and nbcRun >= 2 and lean
+                    if stall
+                        px  := close
+                        res := 2
+                    else if bar_index >= t.eBar + 100
+                        px  := close
+                        res := 3
+                if res != 0
+                    float R = t.side * (px - t.e) / t.d - COST / t.d
+                    t.xBar := bar_index
+                    t.xT   := time
+                    t.xPx  := px
+                    t.R    := R
+                    t.res  := res
+                    t.xDay := time_tradingday
+                    f_book(ST.get(t.k), R, (t.side * (px - t.e) - COST) * PV * contracts)
+                    trDone.push(t)
+                    trOpen.remove(k)
+                    alert(SN.get(t.k) + " EXIT " + syminfo.ticker + " @ " + str.tostring(px, format.mintick) + " · " + f_sgn(R, "0.00") + " avg RR", alert.freq_once_per_bar_close)
+    while trDone.size() > 300
+        trDone.shift()
+
+// ═══════════════════════════════════════════════════════════════════════
+// STRUCTURE ENGINE (closed candles) — same logic as 3.0 – 3.2 (the tested replica)
+// ═══════════════════════════════════════════════════════════════════════
+if barstate.isconfirmed and inRange and bar_index > 2
+    float c = close
+    float h = high
+    float l = low
+    // swings (3 candles)
+    if low[1] < low[2] and low[1] < low
+        rsl    := low[1]
+        rslBar := bar_index - 1
+        rslT   := time[1]
+    if high[1] > high[2] and high[1] > high
+        rsh    := high[1]
+        rshBar := bar_index - 1
+        rshT   := time[1]
+
+    // nested FVA: an NBC that closes inside an older live box makes it "significant"
+    if isNbc
+        curNested := false
+        if bulls.size() > 0
+            for k = bulls.size() - 1 to 0
+                FS s = bulls.get(k)
+                if not s.cbViol and not s.isSig and s.bot <= c and c <= s.top
+                    s.isSig    := true
+                    s.sigState := 0
+                    curNested  := true
+                    parStart   := s.originBar
+                    parHigh    := s.top
+                    parLow     := s.bot
+        if not curNested and bears.size() > 0
+            for k = bears.size() - 1 to 0
+                FS s = bears.get(k)
+                if not s.cbViol and not s.isSig and s.bot <= c and c <= s.top
+                    s.isSig    := true
+                    s.sigState := 0
+                    curNested  := true
+                    parStart   := s.originBar
+                    parHigh    := s.top
+                    parLow     := s.bot
+        if not curNested and zones.size() > 0
+            for k = zones.size() - 1 to 0
+                FZ z = zones.get(k)
+                if not z.viol and not z.isSig and z.bot <= c and c <= z.top
+                    z.isSig    := true
+                    z.sigState := 0
+                    curNested  := true
+                    parStart   := z.creationBar
+                    parHigh    := z.top
+                    parLow     := z.bot
+
+    // bull structures
+    if bulls.size() > 0
+        for k = bulls.size() - 1 to 0
+            FS s = bulls.get(k)
+            if bar_index > s.breakBar and not na(s.swing) and l <= s.swing and not s.slViol
+                s.slViol := true
+            if not s.filled and bar_index > s.breakBar and l <= s.bot
+                s.filled := true
+            if s.filled and not s.cbViol and not s.isSig
+                if s.grey == 0 and c > s.top
+                    s.grey := 1
+                else if s.grey == 1 and l <= s.top
+                    s.grey := 2
+                else if s.grey == 2 and c > s.top
+                    s.grey := 3
+            if s.isSig and s.sigState == 0
+                if c > s.top
+                    s.sigState := 1
+                else if c < s.bot
+                    s.sigState := -1
+            bool brk = s.isSig ? ((s.sigState == 1 and c < s.bot) or (s.sigState == -1 and c > s.top)) : (not s.cbViol and c < s.bot)
+            if brk
+                s.cbViol := true
+                if not s.hasSwingLine and not s.slViol
+                    s.slViol := true
+            if s.slViol and s.cbViol and s.pocDel
+                bulls.remove(k)
+                continue
+            if not s.pocDel and not na(s.poc) and l <= s.poc
+                s.pocDel := true
+
+    // bear structures
+    if bears.size() > 0
+        for k = bears.size() - 1 to 0
+            FS s = bears.get(k)
+            if bar_index > s.breakBar and not na(s.swing) and h >= s.swing and not s.slViol
+                s.slViol := true
+            if not s.filled and bar_index > s.breakBar and h >= s.top
+                s.filled := true
+            if s.filled and not s.cbViol and not s.isSig
+                if s.grey == 0 and c < s.bot
+                    s.grey := 1
+                else if s.grey == 1 and h >= s.bot
+                    s.grey := 2
+                else if s.grey == 2 and c < s.bot
+                    s.grey := 3
+            if s.isSig and s.sigState == 0
+                if c > s.top
+                    s.sigState := 1
+                else if c < s.bot
+                    s.sigState := -1
+            bool brk = s.isSig ? ((s.sigState == 1 and c < s.bot) or (s.sigState == -1 and c > s.top)) : (not s.cbViol and c > s.top)
+            if brk
+                s.cbViol := true
+                if not s.hasSwingLine and not s.slViol
+                    s.slViol := true
+            if s.slViol and s.cbViol and s.pocDel
+                bears.remove(k)
+                continue
+            if not s.pocDel and not na(s.poc) and h >= s.poc
+                s.pocDel := true
+
+    // flip zones · a close ABOVE a live PES+ zone = FVA.M1 long
+    if zones.size() > 0
+        for k = zones.size() - 1 to 0
+            FZ z = zones.get(k)
+            bool slTouch = not na(z.delLevel) and (z.isBull ? l <= z.delLevel : h >= z.delLevel)
+            if slTouch and not z.slViol
+                z.slViol := true
+            if not z.filled and bar_index > z.creationBar
+                if z.isBull and l <= z.bot
+                    z.filled := true
+                else if not z.isBull and h >= z.top
+                    z.filled := true
+            if z.filled and not z.viol and not z.isSig
+                if z.isBull
+                    if z.grey == 0 and c > z.top
+                        z.grey := 1
+                    else if z.grey == 1 and l <= z.top
+                        z.grey := 2
+                    else if z.grey == 2 and c > z.top
+                        z.grey := 3
+                else
+                    if z.grey == 0 and c < z.bot
+                        z.grey := 1
+                    else if z.grey == 1 and h >= z.bot
+                        z.grey := 2
+                    else if z.grey == 2 and c < z.bot
+                        z.grey := 3
+            if z.isSig and z.sigState == 0
+                if c > z.top
+                    z.sigState := 1
+                else if c < z.bot
+                    z.sigState := -1
+            bool inv = z.isSig ? ((z.sigState == 1 and c < z.bot) or (z.sigState == -1 and c > z.top)) : (z.isBull ? c < z.bot : c > z.top)
+            if inv and not z.viol
+                if not z.isBull and c > z.top and not sigL
+                    sigL     := true
+                    sigLStop := z.bot - 4 * syminfo.mintick
+                if z.isBull and c < z.bot and not sigS
+                    sigS     := true
+                    sigSStop := z.top + 4 * syminfo.mintick
+                z.viol := true
+                if not z.hasSwingLine and not z.slViol
+                    z.slViol := true
+            if not z.pocDel and not na(z.poc) and (z.isBull ? l <= z.poc : h >= z.poc)
+                z.pocDel := true
+            if z.slViol and z.viol and z.pocDel
+                zones.remove(k)
+                continue
+
+    // state machine: NBC run -> BC break (FVA box) · opposite BC = flip (flip zone)
+    if isNbc and (state == 1 or state == -1 or state == -999)
+        runTop      := math.max(open, close)
+        runBot      := math.min(open, close)
+        runHigh     := high
+        runLow      := low
+        startBar    := bar_index
+        startT      := time
+        lastNbcHigh := high
+        lastNbcLow  := low
+        state       := 0
+    else if state == 0
+        if isBux and c > lastNbcHigh
+            bool first = lastBcDir != 1
+            float slp = na(rsl) ? low : rsl
+            int   slb = na(rsl) ? bar_index : rslBar
+            bool slEx = false
+            if bulls.size() > 0
+                for s in bulls
+                    if s.swing == slp and s.slDrawn
+                        slEx := true
+                        break
+            int   vps = curNested ? parStart : startBar
+            float vpH = curNested ? math.max(runHigh, parHigh) : math.max(runHigh, high)
+            float vpL = curNested ? math.min(runLow, parLow) : math.min(runLow, low)
+            float poc = f_poc(vpH, vpL, math.min(bar_index - vps, 200))
+            bulls.push(FS.new(1, true, not slEx and first, bar_index, slb, slp, false, poc, false, runTop, runBot, false, false, false, 0, 0, not slEx, curNested, startT, time))
+            state       := 1
+            lastBcDir   := 1
+            lastBcHigh  := high
+            lastBcLow   := low
+            lastBcOpen  := open
+            lastBcClose := close
+            lastBcBar   := bar_index
+            lastBcT     := time
+        else if isBex and c < lastNbcLow
+            bool first = lastBcDir != -1
+            float shp = na(rsh) ? high : rsh
+            int   shb = na(rsh) ? bar_index : rshBar
+            bool shEx = false
+            if bears.size() > 0
+                for s in bears
+                    if s.swing == shp and s.slDrawn
+                        shEx := true
+                        break
+            int   vps = curNested ? parStart : startBar
+            float vpH = curNested ? math.max(runHigh, parHigh) : math.max(runHigh, high)
+            float vpL = curNested ? math.min(runLow, parLow) : math.min(runLow, low)
+            float poc = f_poc(vpH, vpL, math.min(bar_index - vps, 200))
+            bears.push(FS.new(1, false, not shEx and first, bar_index, shb, shp, false, poc, false, runTop, runBot, false, false, false, 0, 0, not shEx, curNested, startT, time))
+            state       := -1
+            lastBcDir   := -1
+            lastBcHigh  := high
+            lastBcLow   := low
+            lastBcOpen  := open
+            lastBcClose := close
+            lastBcBar   := bar_index
+            lastBcT     := time
+        else if isNbc
+            if high > runHigh
+                runHigh := high
+            if low < runLow
+                runLow := low
+            runTop      := math.max(runTop, math.max(open, close))
+            runBot      := math.min(runBot, math.min(open, close))
+            lastNbcHigh := high
+            lastNbcLow  := low
+    else if isBux
+        if state == -1
+            float pelT = math.max(lastBcOpen, lastBcClose)
+            float pelB = math.min(lastBcOpen, lastBcClose)
+            int   vps  = lastBcBar
+            float vpH  = math.max(lastBcHigh, high)
+            float vpL  = math.min(lastBcLow, low)
+            bool  fn   = false
+            if bears.size() > 0
+                for b in bears
+                    if b.breakBar == lastBcBar
+                        if b.isNested or b.grey >= 3
+                            vps := b.originBar
+                            vpH := math.max(b.top, vpH)
+                            vpL := math.min(b.bot, vpL)
+                            fn  := true
+                        break
+            float poc = f_poc(vpH, vpL, math.min(bar_index - vps, 200))
+            float slp = na(rsl) ? low : rsl
+            int   slT = na(rsl) ? time : rslT
+            bool slEx = false
+            if bulls.size() > 0
+                for s in bulls
+                    if s.swing == slp and s.slDrawn
+                        slEx := true
+                        break
+            zones.push(FZ.new(true, slp, false, poc, false, pelT, pelB, false, false, bar_index, false, 0, 0, not slEx, fn, high, low, lastBcT, time, slT))
+            bulls.push(FS.new(2, true, not slEx, bar_index, bar_index - 1, slp, false, na, false, pelT, pelB, false, false, false, 0, 0, not slEx, fn, lastBcT, time))
+        state       := 1
+        lastBcDir   := 1
+        lastBcHigh  := high
+        lastBcLow   := low
+        lastBcOpen  := open
+        lastBcClose := close
+        lastBcBar   := bar_index
+        lastBcT     := time
+    else if isBex
+        if state == 1
+            float pesT = math.max(lastBcOpen, lastBcClose)
+            float pesB = math.min(lastBcOpen, lastBcClose)
+            int   vps  = lastBcBar
+            float vpH  = math.max(lastBcHigh, high)
+            float vpL  = math.min(lastBcLow, low)
+            bool  fn   = false
+            if bulls.size() > 0
+                for b in bulls
+                    if b.breakBar == lastBcBar
+                        if b.isNested or b.grey >= 3
+                            vps := b.originBar
+                            vpH := math.max(b.top, vpH)
+                            vpL := math.min(b.bot, vpL)
+                            fn  := true
+                        break
+            float poc = f_poc(vpH, vpL, math.min(bar_index - vps, 200))
+            float shp = na(rsh) ? high : rsh
+            int   shT = na(rsh) ? time : rshT
+            bool shEx = false
+            if bears.size() > 0
+                for s in bears
+                    if s.swing == shp and s.slDrawn
+                        shEx := true
+                        break
+            zones.push(FZ.new(false, shp, false, poc, false, pesT, pesB, false, false, bar_index, false, 0, 0, not shEx, fn, high, low, lastBcT, time, shT))
+            bears.push(FS.new(2, false, not shEx, bar_index, bar_index - 1, shp, false, na, false, pesT, pesB, false, false, false, 0, 0, not shEx, fn, lastBcT, time))
+        state       := -1
+        lastBcDir   := -1
+        lastBcHigh  := high
+        lastBcLow   := low
+        lastBcOpen  := open
+        lastBcClose := close
+        lastBcBar   := bar_index
+        lastBcT     := time
+
+    while bulls.size() > 100
+        bulls.shift()
+    while bears.size() > 100
+        bears.shift()
+    while zones.size() > 100
+        zones.shift()
+
+    // entries (one trade per candle per strategy per side)
+    if m1Run and sigL and not na(dAtr)
+        float e   = close
+        float stp = e - 0.15 * dAtr
+        float d   = e - stp
+        if d >= 2.0
+            trOpen.push(Trd.new(0, 1, 1, bar_index, time, e, stp, e + 4.0 * d, d))
+            St s0 = ST.get(0)
+            if na(s0.t0)
+                s0.t0 := time
+            alert("FVA.M1 BUY " + syminfo.ticker + " @ " + str.tostring(e, format.mintick) + " · SL " + str.tostring(stp, format.mintick) + " · TP " + str.tostring(e + 4.0 * d, format.mintick) + " (1:4)", alert.freq_once_per_bar_close)
+    if m2Run and inAsia
+        for sd = 0 to 1
+            bool go = sd == 0 ? sigL : sigS
+            int  sg = sd == 0 ? 1 : -1
+            if go
+                float e   = close
+                float stp = m2Fix ? e - sg * FIXP : (sd == 0 ? sigLStop : sigSStop)
+                float d   = sg * (e - stp)
+                if d >= 2.0
+                    float tp = e + sg * 1.5 * d
+                    trOpen.push(Trd.new(1, sg, m2Fix ? 1 : 0, bar_index, time, e, stp, tp, d))
+                    St s1 = ST.get(1)
+                    if na(s1.t0)
+                        s1.t0 := time
+                    alert("FVA.M2 " + (sg == 1 ? "BUY " : "SELL ") + syminfo.ticker + " @ " + str.tostring(e, format.mintick) + " · SL " + str.tostring(stp, format.mintick) + " · TP " + str.tostring(tp, format.mintick) + " (1:1.5)", alert.freq_once_per_bar_close)
+
+alertcondition(m1Run and sigL, "FVA.M1 Buy", "FVA.M1 BUY on {{ticker}} at {{close}} (flip zone fail)")
+alertcondition(m2Run and inAsia and sigL, "FVA.M2 Buy", "FVA.M2 BUY on {{ticker}} at {{close}} (Asia flip zone fail)")
+alertcondition(m2Run and inAsia and sigS, "FVA.M2 Sell", "FVA.M2 SELL on {{ticker}} at {{close}} (Asia flip zone fail)")
+
+// ═══════════════════════════════════════════════════════════════════════
+// RENDER — on the last bar everything is deleted and redrawn from state
+// ═══════════════════════════════════════════════════════════════════════
+var array<line>  dLines  = array.new<line>()
+var array<label> dLabels = array.new<label>()
+var array<box>   dBoxes  = array.new<box>()
+
+f_clear() =>
+    if dLines.size() > 0
+        for x in dLines
+            line.delete(x)
+        dLines.clear()
+    if dLabels.size() > 0
+        for x in dLabels
+            label.delete(x)
+        dLabels.clear()
+    if dBoxes.size() > 0
+        for x in dBoxes
+            box.delete(x)
+        dBoxes.clear()
+
+f_lvl(int t1, int t2, float p, color col, int w, string st, string txt, string sz, string tip) =>
+    dLines.push(line.new(t1, p, t2, p, xloc=xloc.bar_time, color=col, width=w, style=st))
+    if str.length(txt) > 0
+        dLabels.push(label.new(t2, p, txt, xloc=xloc.bar_time, style=label.style_label_left, color=color(na), textcolor=col, size=f_szs(sz), tooltip=tip))
+    true
+
+f_resTxt(int r) =>
+    r == 1 ? "target" : r == -1 ? "stop" : r == 2 ? "stall exit (2 NBC)" : r == 3 ? "time exit (100 candles)" : "open"
+
+if barstate.islast
+    f_clear()
+    int futT = f_future_time(line_ext)
+
+    // 1. FLIP ZONES (newest first, max per side) — box + name + POC + flip label + levels die together
+    if zones.size() > 0 and fzMax > 0
+        int nBu = 0
+        int nBe = 0
+        for k = zones.size() - 1 to 0
+            FZ z = zones.get(k)
+            if z.viol
+                continue
+            bool want = z.isBull ? (fzBull and nBu < fzMax) : (fzBear and nBe < fzMax)
+            if not want
+                continue
+            if z.isBull
+                nBu += 1
+            else
+                nBe += 1
+            color zc  = z.isBull ? c_fzBull : c_fzBear
+            bool  armL = not z.isBull and (not z.isSig or z.sigState == -1)
+            bool  armS = z.isBull and (not z.isSig or z.sigState == 1)
+            string tg  = armL ? ((sM1 ? " · M1" : "") + (sM2 ? (sM1 ? "·M2" : " · M2") : "")) : armS and sM2 ? " · M2" : ""
+            string nm  = (z.isBull ? "PEL+" : "PES+") + tg
+            dBoxes.push(box.new(z.tBox, z.top, futT, z.bot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(zc, fzTransp), text=fzName ? nm : "", text_color=color.new(zc, 10), text_size=f_szs(f_lsz(zone_size)), text_halign=text.align_right, text_valign=text.align_center))
+            if armL and (sM1 or sM2) and m1Lines
+                f_lvl(z.tBox, futT, z.top, zc, 1, line.style_dashed, (sM1 ? "M1" : "") + (sM1 and sM2 ? "·" : "") + (sM2 ? "M2" : "") + " ▲ close > " + str.tostring(z.top, format.mintick), f_lsz(lvl_size), "BUY trigger: a 1h candle CLOSING above this line.\nFVA.M1 (any session): stop daily ATR × 0.15 · 1:4 · stall exit.\nFVA.M2 (Asia 18:00–02:00 only): stop = zone bottom − 4 ticks (or fixed) · 1:1.5.")
+            if armS and sM2 and m1Lines
+                f_lvl(z.tBox, futT, z.bot, zc, 1, line.style_dashed, "M2 ▼ close < " + str.tostring(z.bot, format.mintick) + " (Asia)", f_lsz(lvl_size), "SELL trigger (FVA.M2, Asia 18:00–02:00 only): a 1h candle CLOSING below this line.\nStop = zone top + 4 ticks (or fixed) · Target 1:1.5.")
+            if fzPoc and not na(z.poc) and not z.pocDel
+                f_lvl(z.tBox, futT, z.poc, color.new(zc, 30), 1, line.style_dotted, "POC", f_lsz(lvl_size), "Volume POC of the zone. Information only (POC entries did not pass).")
+            if fzBreak
+                dLabels.push(label.new(z.tFlip, z.isBull ? z.flipLo : z.flipHi, z.isBull ? "CDL+" : "CDS+", xloc=xloc.bar_time, style=z.isBull ? label.style_label_up : label.style_label_down, color=color(na), textcolor=zc, size=f_szs(f_lsz(brk_size)), tooltip=z.isBull ? "Bullish flip: a BuX after a bearish run. The zone = the body of the last bearish BC." : "Bearish flip: a BeX after a bullish run. The zone = the body of the last bullish BC (PES+)."))
+            if fzTgt
+                float tp = z.isBull ? z.flipHi : z.flipLo
+                f_lvl(z.tFlip, futT, tp, color.new(zc, 20), 1, line.style_dotted, z.isBull ? "Buyers TGT" : "Sellers TGT", f_lsz(lvl_size), "High (PEL+) / low (PES+) of the flip candle.")
+            if fzSwing and not na(z.delLevel) and not z.slViol
+                f_lvl(nz(z.tSwing, z.tBox), futT, z.delLevel, color.new(zc, 40), 1, line.style_dotted, z.isBull ? "CDL SL" : "CDS SH", f_lsz(lvl_size), "Swing level behind the flip.")
+
+    // 2. FAIR VALUE AREAS — past boxes (newest first, max per side) + the forming one
+    if fvaPast and fvaMax > 0
+        for side = 0 to 1
+            array<FS> arr = side == 0 ? bulls : bears
+            int nn = 0
+            if arr.size() > 0
+                for k = arr.size() - 1 to 0
+                    if nn >= fvaMax
+                        break
+                    FS s = arr.get(k)
+                    if s.kind != 1 or s.cbViol
+                        continue
+                    nn += 1
+                    color fc = s.isBull ? c_fvaBull : c_fvaBear
+                    dBoxes.push(box.new(s.tStart, s.top, futT, s.bot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(fc, fvaTransp), text=fzName ? (s.isBull ? "BuFVA" : "BeFVA") : "", text_color=color.new(fc, 20), text_size=f_szs(f_lsz(zone_size)), text_halign=text.align_left, text_valign=text.align_center))
+                    if fvaMid
+                        f_lvl(s.tStart, futT, (s.top + s.bot) / 2, color.new(fc, 40), 1, line.style_dotted, "", f_lsz(lvl_size), "")
+    if fvaLive and state == 0 and not na(runTop)
+        dBoxes.push(box.new(startT, runTop, time, runBot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(c_fvaLive, fvaTransp), text=fzName ? "FVA" : "", text_color=color.new(c_fvaLive, 10), text_size=f_szs(f_lsz(zone_size)), text_halign=text.align_left, text_valign=text.align_top))
+
+    // 3. TRADES — open trades always, closed: keep winners / losers separately
+    if trLines or trLbls
+        array<Trd> show = array.new<Trd>()
+        if trOpen.size() > 0
+            for t in trOpen
+                show.push(t)
+        int kW = 0
+        int kL = 0
+        if trDone.size() > 0
+            for k = trDone.size() - 1 to 0
+                Trd t = trDone.get(k)
+                bool win = t.R > 0
+                if win and kW < keepWin
+                    show.push(t)
+                    kW += 1
+                else if not win and kL < keepLoss
+                    show.push(t)
+                    kL += 1
+                if kW >= keepWin and kL >= keepLoss
+                    break
+        if show.size() > 0
+            for t in show
+                bool  open_ = na(t.xT)
+                int   t2    = open_ ? futT : t.xT
+                if trLines
+                    dLines.push(line.new(t.eT, t.e, t2, t.e, xloc=xloc.bar_time, color=c_entry, width=1, style=line.style_solid))
+                    dLines.push(line.new(t.eT, t.stp, t2, t.stp, xloc=xloc.bar_time, color=c_stop, width=1, style=line.style_solid))
+                    dLines.push(line.new(t.eT, t.tp, t2, t.tp, xloc=xloc.bar_time, color=c_tgt, width=1, style=line.style_solid))
+                if trLbls
+                    float live = open_ ? t.side * (close - t.e) / t.d : t.R
+                    string tx  = (t.k == 0 ? "M1" : "M2") + (t.side == 1 ? " ▲ " : " ▼ ") + (open_ ? "live " : "") + f_sgn(live, "0.0") + " avg RR"
+                    string tip = (t.k == 0 ? "FVA.M1 · Flip Zone Fail · LONG" : "FVA.M2 · Asia Flip Zone Fail · " + (t.side == 1 ? "LONG" : "SHORT")) + "\nEntry " + str.tostring(t.e, format.mintick) + " · Stop " + str.tostring(t.stp, format.mintick) + " (−" + str.tostring(t.d, "#.##") + " pts) · Target " + str.tostring(t.tp, format.mintick) + (t.k == 0 ? " (1:4)" : " (1:1.5)") + (open_ ? "\nOPEN" : "\nExit " + str.tostring(t.xPx, format.mintick) + " · " + f_resTxt(t.res) + " · " + f_usd((t.side * (t.xPx - t.e) - COST) * PV * contracts))
+                    color lc   = open_ ? T_GOLD : t.R > 0 ? c_tgt : c_stop
+                    dLabels.push(label.new(t.eT, t.stp, tx, xloc=xloc.bar_time, style=t.side == 1 ? label.style_label_up : label.style_label_down, color=color(na), textcolor=lc, size=f_szs(f_lsz(trd_size)), tooltip=tip))
+
+// ═══════════════════════════════════════════════════════════════════════
+// TABLES — LIVE (only when armed / in a trade / traded today) · INFO · GUIDE
+// ═══════════════════════════════════════════════════════════════════════
+var table tLive  = table.new(f_pos(livePos), 2, 16, bgcolor=T_BG, frame_color=#333333, frame_width=1, border_color=T_BG, border_width=1)
+var table tInfo  = table.new(f_pos(infoPos), 3, 32, bgcolor=T_BG, frame_color=#333333, frame_width=1, border_color=T_BG, border_width=1)
+var table tGuide = table.new(f_pos(guidePos), 1, 9, bgcolor=T_BG, frame_color=#333333, frame_width=1, border_color=T_BG, border_width=0)
+
+f_avg(St s) =>
+    s.n > 0 ? s.sR / s.n : na
+
+f_tsc(St s) =>
+    float a  = f_avg(s)
+    float sd = s.n > 1 ? math.sqrt(math.max((s.sR2 - s.n * a * a) / (s.n - 1), 0)) : na
+    s.n > 1 and sd > 0 ? a / sd * math.sqrt(s.n) : na
+
+f_wr(St s) =>
+    s.n > 0 ? s.w * 100.0 / s.n : na
+
+if barstate.islast
+    // live triggers
+    float trigL = na
+    float trigS = na
+    if zones.size() > 0
+        for z in zones
+            if not z.viol
+                if not z.isBull and (not z.isSig or z.sigState == -1)
+                    trigL := na(trigL) ? z.top : math.min(trigL, z.top)
+                if z.isBull and (not z.isSig or z.sigState == 1)
+                    trigS := na(trigS) ? z.bot : math.max(trigS, z.bot)
+    array<int>   nOpen  = array.from(0, 0)
+    array<float> openR  = array.from(0.0, 0.0)
+    array<int>   nToday = array.from(0, 0)
+    array<float> rToday = array.from(0.0, 0.0)
+    if trOpen.size() > 0
+        for t in trOpen
+            nOpen.set(t.k, nOpen.get(t.k) + 1)
+            openR.set(t.k, openR.get(t.k) + t.side * (close - t.e) / t.d)
+    if trDone.size() > 0
+        for k = trDone.size() - 1 to 0
+            Trd t = trDone.get(k)
+            if t.xDay != time_tradingday
+                break
+            nToday.set(t.k, nToday.get(t.k) + 1)
+            rToday.set(t.k, rToday.get(t.k) + t.R)
+    float stopNow = na(dAtr) ? na : 0.15 * dAtr
+    array<bool> on    = array.from(sM1, sM2)
+    array<bool> armed = array.from(not na(trigL), inAsia and (not na(trigL) or not na(trigS)))
+
+    // LIVE
+    table.clear(tLive, 0, 0, 1, 15)
+    if liveOn
+        f_cell(tLive, 0, 0, "─ FVA BREAK · LIVE ─", T_GOLD, T_BG, text.align_center)
+        table.merge_cells(tLive, 0, 0, 1, 0)
+        int r = 1
+        if not tfOk
+            f_cell(tLive, 0, r, "FVA.M1 / M2 trade on the 1h chart", T_WARN, T_ROW, text.align_left)
+            table.merge_cells(tLive, 0, r, 1, r)
+        else
+            for k = 0 to 1
+                bool show = on.get(k) and (armed.get(k) or nOpen.get(k) > 0 or nToday.get(k) > 0)
+                if show
+                    St s = ST.get(k)
+                    string stTx = nOpen.get(k) > 0 ? "IN TRADE" : armed.get(k) ? "ARMED" : "DONE TODAY"
+                    color  stC  = nOpen.get(k) > 0 ? T_GOLD : armed.get(k) ? T_POS : T_LBL
+                    f_cell(tLive, 0, r, k == 0 ? "FVA.M1 · Flip Zone Fail ▲" : "FVA.M2 · Asia Flip Zone Fail ▲▼", T_VAL, T_SEC2, text.align_left)
+                    f_cell(tLive, 1, r, stTx, stC, T_SEC2, text.align_right)
+                    r += 1
+                    string trTx = k == 0 ? (na(trigL) ? "—" : "buy > " + str.tostring(trigL, format.mintick)) : (na(trigL) ? "" : "buy > " + str.tostring(trigL, format.mintick)) + (not na(trigL) and not na(trigS) ? " · " : "") + (na(trigS) ? "" : "sell < " + str.tostring(trigS, format.mintick))
+                    f_cell(tLive, 0, r, k == 0 ? "1h close" : "1h close (Asia 18–02)", T_LBL, T_ROW, text.align_left)
+                    f_cell(tLive, 1, r, str.length(trTx) > 0 ? trTx : "—", armed.get(k) ? T_POS : T_MUTE, T_ROW, text.align_right)
+                    r += 1
+                    string spTx = k == 0 ? (na(stopNow) ? "—" : "−" + str.tostring(stopNow, "#.#") + " pts") + " · 1:4" : (m2Fix ? "−" + str.tostring(FIXP, "#") + " pts" : "zone ± 4 ticks") + " · 1:1.5"
+                    f_cell(tLive, 0, r, "Stop · Target", T_LBL, T_ALT, text.align_left)
+                    f_cell(tLive, 1, r, spTx, T_VAL, T_ALT, text.align_right)
+                    r += 1
+                    string otTx = (nOpen.get(k) > 0 ? str.tostring(nOpen.get(k)) + " open " + f_sgn(openR.get(k), "0.0") : "no open") + " · " + (nToday.get(k) > 0 ? str.tostring(nToday.get(k)) + " today " + f_sgn(rToday.get(k), "0.0") : "none today")
+                    f_cell(tLive, 0, r, "Open · Today (avg RR)", T_LBL, T_ROW, text.align_left)
+                    f_cell(tLive, 1, r, otTx, nOpen.get(k) > 0 ? (openR.get(k) >= 0 ? T_POS : T_NEG) : T_LBL, T_ROW, text.align_right)
+                    r += 1
+                    f_cell(tLive, 0, r, "Tested 2023–26", T_LBL, T_ALT, text.align_left)
+                    f_cell(tLive, 1, r, k == 0 ? "WR 37% · avg RR +0.33 · t 3.7" : m2Fix ? "WR 56% · avg RR +0.34 · t 3.6" : "WR 56% · avg RR +0.37 · t 3.6", T_GOLD, T_ALT, text.align_right)
+                    r += 1
+                    float a = f_avg(s)
+                    f_cell(tLive, 0, r, "This chart", T_LBL, T_ROW, text.align_left)
+                    f_cell(tLive, 1, r, s.n > 0 ? str.tostring(s.n) + " trades · WR " + str.tostring(f_wr(s), "#") + "% · avg RR " + f_sgn(a, "0.00") : "no trades yet", s.n > 0 ? (a >= 0 ? T_POS : T_NEG) : T_MUTE, T_ROW, text.align_right)
+                    r += 1
+            if r == 1
+                f_cell(tLive, 0, r, "Nothing armed · M2 waits for Asia (18:00–02:00 NY)", T_MUTE, T_ROW, text.align_left)
+                table.merge_cells(tLive, 0, r, 1, r)
+
+    // INFO (rows = numbers, one column per strategy)
+    table.clear(tInfo, 0, 0, 2, 31)
+    if infoOn
+        f_cell(tInfo, 0, 0, "─ FVA BREAK · STRATEGIES ─", T_GOLD, T_BG, text.align_center)
+        table.merge_cells(tInfo, 0, 0, 2, 0)
+        f_cell(tInfo, 0, 1, "", T_LBL, T_SEC2, text.align_left)
+        f_cell(tInfo, 1, 1, "FVA.M1", sM1 ? T_GOLD : T_MUTE, T_SEC2, text.align_center)
+        f_cell(tInfo, 2, 1, "FVA.M2", sM2 ? T_GOLD : T_MUTE, T_SEC2, text.align_center)
+        array<string> rl = array.from("Entry (1h close)", "Side · Session", "Stop", "Target · Exit")
+        array<string> v1 = array.from("above a PES+ zone", "LONG · all", "daily ATR × 0.15 (" + (na(stopNow) ? "—" : str.tostring(stopNow, "#.#")) + " pts)", "1:4 · 2-NBC stall")
+        array<string> v2 = array.from("through a flip zone", "BOTH · Asia 18–02", m2Fix ? "fixed " + str.tostring(FIXP, "#") + " pts" : "zone ± 4 ticks", m2Fix ? "1:1.5 · 2-NBC stall" : "1:1.5 · none")
+        int r = 2
+        for i = 0 to 3
+            color bg = i % 2 == 0 ? T_ROW : T_ALT
+            f_cell(tInfo, 0, r, rl.get(i), T_LBL, bg, text.align_left)
+            f_cell(tInfo, 1, r, v1.get(i), T_VAL, bg, text.align_right)
+            f_cell(tInfo, 2, r, v2.get(i), T_VAL, bg, text.align_right)
+            r += 1
+        f_cell(tInfo, 0, r, "─ TESTED 2023–26 (NQ + MNQ) ─", T_GOLD, T_BG, text.align_center)
+        table.merge_cells(tInfo, 0, r, 2, r)
+        r += 1
+        array<string> tl = array.from("Trades", "WR (win rate)", "PF (profit factor)", "avg RR", "t-score", "Max wins / losses in a row", "Max DD (avg RR)", "1 MNQ · W:", "1 MNQ · L:", "1 MNQ · Net:")
+        array<string> t1 = array.from("453", "37%", "1.54", "+0.33", "3.7", "8 / 15", "−18.8", "+$43,885", "−$27,492", "+$16,393")
+        array<string> t2 = m2Fix ? array.from("153", "56%", "1.86", "+0.34", "3.6", "8 / 5", "−5.1", "+$11,428", "−$6,152", "+$5,275") : array.from("153", "56%", "1.81", "+0.37", "3.6", "6 / 6", "−8.0", "+$14,206", "−$8,313", "+$5,893")
+        for i = 0 to 9
+            color bg = i % 2 == 0 ? T_ROW : T_ALT
+            f_cell(tInfo, 0, r, tl.get(i), T_LBL, bg, text.align_left)
+            f_cell(tInfo, 1, r, t1.get(i), T_GOLD, bg, text.align_right)
+            f_cell(tInfo, 2, r, t2.get(i), T_GOLD, bg, text.align_right)
+            r += 1
+        f_cell(tInfo, 0, r, "─ THIS CHART ─", T_GOLD, T_BG, text.align_center)
+        table.merge_cells(tInfo, 0, r, 2, r)
+        r += 1
+        array<string> cl = array.from("Since", "Trades (open)", "WR (win rate)", "PF (profit factor)", "avg RR", "t-score", "Max wins / losses in a row", "Max DD", "W:", "L:", "Net:")
+        for i = 0 to 10
+            color bg = i % 2 == 0 ? T_ROW : T_ALT
+            f_cell(tInfo, 0, r, cl.get(i), T_LBL, bg, text.align_left)
+            for k = 0 to 1
+                St s = ST.get(k)
+                float a  = f_avg(s)
+                float pf = s.gL > 0 ? s.gW / s.gL : na
+                float ts = f_tsc(s)
+                string v = i == 0 ? (na(s.t0) ? "—" : str.format_time(s.t0, "dd MMM yy", "America/New_York")) : i == 1 ? str.tostring(s.n) + (nOpen.get(k) > 0 ? " (+" + str.tostring(nOpen.get(k)) + ")" : "") : i == 2 ? (s.n > 0 ? str.tostring(f_wr(s), "#") + "%" : "—") : i == 3 ? (na(pf) ? "—" : str.tostring(pf, "0.00")) : i == 4 ? f_sgn(a, "0.00") : i == 5 ? (na(ts) ? "—" : str.tostring(ts, "0.0")) : i == 6 ? str.tostring(s.maxW) + " / " + str.tostring(s.maxL) : i == 7 ? (s.n > 0 ? f_usd(-s.dd) : "—") : i == 8 ? f_usd(s.wUsd) : i == 9 ? f_usd(s.lUsd) : f_usd(s.wUsd + s.lUsd)
+                color vc = i == 4 ? (na(a) ? T_MUTE : a >= 0 ? T_POS : T_NEG) : i == 10 ? (s.wUsd + s.lUsd >= 0 ? T_POS : T_NEG) : i == 8 ? T_POS : i == 9 ? T_NEG : T_VAL
+                f_cell(tInfo, 1 + k, r, v, vc, bg, text.align_right)
+            r += 1
+        bool ibOn = useIb and timeframe.in_seconds(ibUse) < timeframe.in_seconds(timeframe.period)
+        f_cell(tInfo, 0, r, "Grading: " + (ibOn ? ibUse + "m intrabar" : "chart candles") + " · stop first · cost " + str.tostring(COST, "#.##") + " pt" + (tf1h ? "" : " · NOT a 1h chart: untested"), tf1h ? T_MUTE : T_WARN, T_BG, text.align_left)
+        table.merge_cells(tInfo, 0, r, 2, r)
+
+    // GUIDE
+    table.clear(tGuide, 0, 0, 0, 8)
+    if guideOn
+        array<string> g = array.from("─ GUIDE ─", "FVA box = the neutral candles (NBC) before a body close", "PEL+ / PES+ = flip zone: the last opposite BC before a flip", "M1: a 1h CLOSE above a PES+ zone = sellers failed = BUY (1:4)", "M2: in Asia, a 1h CLOSE through a flip zone = trade the break (1:1.5)", "Dashed line on a zone = its trigger · ARMED = a trigger is live", "WR = win rate · PF = profit factor · avg RR = average result in risk units", "t-score 2+ = not luck · plan on half of the tested result", "A zone and its lines die together when a candle closes through it")
+        for i = 0 to 8
+            f_cell(tGuide, 0, i, g.get(i), i == 0 ? T_GOLD : T_LBL, i == 0 ? T_BG : (i % 2 == 0 ? T_ROW : T_ALT), i == 0 ? text.align_center : text.align_left)

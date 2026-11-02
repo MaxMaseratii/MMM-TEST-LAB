@@ -1,0 +1,1103 @@
+//@version=6
+indicator("MMM Body Flip Trend @MaxMaserati", "MMM Body Flip", overlay=true, max_labels_count=500, max_lines_count=500, max_polylines_count=100, max_bars_back=5000)
+
+// ════════════════════════════════════════════════════════════════════════════
+// MMM Body Flip Trend (Nov 2 2026)
+//  CDS / CDL RULE (bull trend shown, bear = mirror)
+//   C1  a bear body close (BeX) starts a setup. Its body (open to close) is the size to beat.
+//       Boundary = its body top (or its high). No candle may CLOSE above it, or the setup is cancelled.
+//   C2  the next bear body close with a body of 50%+ of C1 (and, optional, a bearish delta of 50%+ of C1's) = CDS (now bearish).
+//       Marked MMM style: a line from the open of the last BuBC before C2 to C2, labelled CDS. CDL = the mirror.
+//       C1 becomes the protected line: BePO4 after a CDS, BuPO4 after a CDL (label shows C1 / C2 body and delta).
+//       A smaller one always becomes the new C1 (new size to beat, new boundary).
+//   OPEN CHECK: one candle from C1 on (C1 itself, any candle between, C2, or any later candle) must CLOSE beyond the open of
+//       the last opposite body close (CDS: below the last BuBC open, CDL: above the last BeBC open). Once that happened it stays
+//       done for this setup (no need to look again). The flip comes when BOTH are done: a C2 passed the body check and the open broke.
+//       Until then the trend stays the same. A close past the boundary still cancels.
+//   The flip holds until an opposite candle meets the same rules.
+//  C1 LINES
+//   BIG C1  = the biggest C1 of each side that no later body close of the same side has beaten yet (body 50%+ of it).
+//   LAST C1 = the most recent C1 of each side. Lines at the open (or wick), extended 3 candles past price.
+//  TREND LINE (drawn from its starting point)
+//   At the flip it starts at C1 (the reversal candle). Then each new candle is compared with the candle before it:
+//   C3 vs C2, C4 vs C3 ... When the newer candle is a body close in the trend direction with a BIGGER body,
+//   the line moves to the older candle (body top in a bear trend, body bottom in a bull trend).
+//   TOUCH = a wick beyond the line with the close back inside: the line moves to that wick (the new level to close beyond).
+//   CLOSE beyond the line = the whole line is deleted. A new line starts at the next step.
+//  ATR STOP LINE (drawn from its starting point)
+//   The trend-line candle (body or wick) + ATR x multiplier (live ATR by default). Same rules: a touch moves it to the wick,
+//   a CLOSE beyond deletes the whole line, the next step starts a new one.
+//   The PO4 lines stay until a close beyond the PO4 itself.
+//  PO4 PLACEMENT
+//   From C1 to C2 (C2 included) price may wick or open past C1 without closing past the boundary.
+//   BePO4 = the HIGHEST high (Wick) / HIGHEST open (Open) from C1 to C2. BuPO4 = the LOWEST low / LOWEST open.
+//  CDS / CDL LINE (one per trend change, paired with its PO4)
+//   A close beyond the trend line draws it; a later close beyond the ATR line moves it there (the ATR break is the last one).
+//   It sits on the closest body close the breaking close went beyond: CDS = lowest BuBC open (or low) still ABOVE the broken line,
+//   CDL = highest BeBC open (or high) still BELOW it. At the C2 it pairs with the new PO4: a close beyond the PO4 deletes both.
+//  CDS / CDL LINE (one at a time)
+//   A close through the trend line makes the CDS (bull lines broken) / CDL (bear lines broken) line. A later close through the
+//   ATR line moves it there: the ATR break is the last one. The line sits on the closest candle open or wick that the
+//   breaking close went beyond, and starts from that candle. A close back beyond it before a flip removes it.
+//   At the C2 flip it pairs with the new PO4: when the PO4 is deleted, its CDS / CDL line is deleted too.
+//  PO4 = the highest high (BePO4) / lowest low (BuPO4) from C1 to C2, or the highest / lowest open (Open level).
+//   The calibration table shows how often each ATR multiplier would have been touched BEFORE the reversal started.
+//  Closed candles only: nothing repaints.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ─── ① Flip Rule ───
+G1 = "① Flip Rule"
+i_bnd      = input.string("Body", "Boundary", options=["Body", "Wick"], group=G1, tooltip="The level no candle may CLOSE beyond while a setup is live.\nBody: C1 body top (bear setup) / body bottom (bull setup).\nWick: C1 high (bear setup) / low (bull setup).\nA close beyond it = the other side failed to take over: setup cancelled, the trend stays.")
+i_c2pct    = input.float(50.0, "C2 Body ≥ % Of C1 Body", minval=1.0, maxval=500.0, step=5.0, group=G1, tooltip="C2 (the next body close in the same direction as C1) flips the trend only if its body is at least this % of the C1 body.\nA smaller one becomes the new C1. The BIG C1 line shows the biggest one not beaten yet.")
+i_wait     = input.int(0, "Max Wait (Candles, 0 = Off)", minval=0, maxval=500, group=G1, tooltip="0 = the setup stays live until it flips or the boundary breaks.")
+i_c2Open   = input.bool(true, "Flip Needs A Close Beyond The Last Opposite BC Open", group=G1, tooltip="CDS: one candle from C1 on must CLOSE below the open of the last BuBC. CDL: above the open of the last BeBC.\nIt can be C1 itself, any candle between C1 and C2, the C2, or any later candle. Once it happened it stays done for this setup.\nThe flip comes when both are done: a C2 passed the body check AND the open broke. Until then the trend stays the same.")
+
+// ─── ② Delta Filter ───
+G2 = "② Delta Filter (Optional)"
+i_dOn      = input.bool(false, "C2 Delta Check", group=G2, tooltip="ON: C2 also needs a delta in the flip direction (sellers win for a bear flip, buyers win for a bull flip) of at least the % below of the C1 delta (size compared).\nNo delta data on a candle = the check is skipped for that flip (label shows Δ n/a).")
+i_dPct     = input.float(50.0, "C2 Delta ≥ % Of C1 Delta", minval=1.0, maxval=500.0, step=5.0, group=G2)
+i_dSrc     = input.string("Footprint", "Source", options=["Footprint", "1m Candles"], inline="d", group=G2, tooltip="Footprint: real buy minus sell volume (TradingView Premium).\n1m Candles: the 1m candles inside each chart candle, + volume on up candles, - volume on down candles (an estimate).")
+i_fpTicks  = input.int(4, "Ticks / Row", minval=1, maxval=100, inline="d", group=G2)
+
+// ─── ③ C1 Lines ───
+G7 = "③ C1 Lines"
+i_bigOn    = input.bool(true, "BIG C1 (Biggest Not Beaten)", inline="g1", group=G7, tooltip="One line per side: the biggest C1 that no later body close of the same side has beaten yet (body at least the C2 % of it, plus the delta check if it is on).\nWhen it is beaten, the line moves to the next biggest C1 still not beaten.")
+i_bigW     = input.int(2, "Width", minval=1, maxval=5, inline="g1", group=G7)
+i_lastOn   = input.bool(true, "LAST C1", inline="g2", group=G7, tooltip="One line per side: the most recent C1. Replaced by each new C1.")
+i_lastW    = input.int(1, "Width", minval=1, maxval=5, inline="g2", group=G7)
+i_c1Lvl    = input.string("Open", "Level", options=["Open", "Wick"], group=G7, tooltip="Open: bear C1 = its body top (open), bull C1 = its body bottom (open).\nWick: bear C1 = its high, bull C1 = its low.")
+i_c1Ext    = input.int(3, "Extend Past Price (Candles)", minval=0, maxval=100, group=G7)
+i_c1Txt    = input.bool(true, "Line Text (Body)", group=G7)
+
+// ─── ④ Trend Line ───
+G3 = "④ Trend Line"
+i_line     = input.bool(true, "Show", inline="l1", group=G3, tooltip="Drawn from its starting point.\nA wick beyond it with the close back inside (a touch) moves the line to that wick: the new level to close beyond.\nA CLOSE beyond it deletes the whole line. The next step starts a new one.")
+i_lineW    = input.int(2, "Width", minval=1, maxval=5, inline="l1", group=G3)
+i_lvl      = input.string("Wick", "Level", options=["Body", "Wick"], group=G3, tooltip="Body: the line sits on the body top (bear trend) / body bottom (bull trend) of the candle it moved to.\nWick: on its high (bear) / low (bull).")
+i_stepPct  = input.float(100.0, "Step When Body > % Of The Candle Before", minval=1.0, maxval=500.0, step=5.0, group=G3, tooltip="100 = the newer candle must have a BIGGER body than the candle before it. Then the line moves to that older candle.\nExample: C3 body bigger than C2 -> line moves to C2. C4 bigger than C3 -> line moves to C3.")
+i_stepBC   = input.bool(true, "Newer Candle Must Be A Body Close In The Trend Direction", group=G3, tooltip="ON: only a BeX (bear trend) / BuX (bull trend) can move the line.\nOFF: any candle that closes in the trend color (red in a bear trend, green in a bull trend).")
+i_tlKeep   = input.int(10, "Keep Old Trends' Lines", minval=0, maxval=45, group=G3, tooltip="When a trend flips, its trend line and ATR line stay ALIVE: they extend at their last level to price, a touch moves them to the wick, and a CLOSE beyond deletes them.\nThis is how many old trends' lines can stay on the chart at once (the newest ones).")
+
+// ─── ⑤ ATR Stop Line ───
+G4 = "⑤ ATR Stop Line"
+i_stop     = input.bool(true, "Show", inline="s1", group=G4, tooltip="Drawn from its starting point.\nA touch (wick beyond, close back inside) moves it to that wick. A CLOSE beyond it deletes the whole line. The next step starts a new one.")
+i_stopW    = input.int(1, "Width", minval=1, maxval=5, inline="s1", group=G4)
+i_stopBase = input.string("Wick", "Base", options=["Body", "Wick"], group=G4, tooltip="The trend-line candle's body top / bottom (Body) or its high / low (Wick). The ATR room is added beyond it.")
+i_atrLen   = input.int(14, "ATR Length", minval=1, maxval=200, inline="a", group=G4)
+i_atrMult  = input.float(0.5, "x", minval=0.0, maxval=10.0, step=0.25, inline="a", group=G4, tooltip="Stop = base + ATR x this (bear trend) / base - ATR x this (bull trend).\nUse the calibration table to pick it.")
+i_atrMode  = input.string("Live (Every Candle)", "ATR", options=["Live (Every Candle)", "Fixed At The Step"], group=G4, tooltip="Live: the ATR of each candle, so the stop room grows and shrinks with volatility.\nFixed At The Step: the ATR of the candle the line moved to, so the stop only moves when the line moves.")
+
+// ─── ⑥ Candle Colors ───
+G5 = "⑥ Candle Colors"
+i_sig      = input.string("C2 Only (Flip)", "Signal Candles", options=["C1 + C2", "C2 Only (Flip)", "C1 Only", "Off"], group=G5, tooltip="C1 = the 1st opposite body close. C2 = the flip candle.")
+i_nbc      = input.string("Inside The Boundary", "NBC Candles", options=["Inside The Boundary", "All", "Off"], group=G5, tooltip="NBC = no body close: not a green close above the prior high and not a red close below the prior low (a red candle closing above the prior high is an NBC).\nInside The Boundary: only the NBC candles between C1 and the flip / cancel.\nAll: every NBC candle on the chart.")
+i_trendCol = input.bool(false, "Other Candles In Trend Color", group=G5)
+c_bull     = input.color(#00c853, "Bull", inline="c1", group=G5)
+c_bear     = input.color(#c2185b, "Bear", inline="c1", group=G5)
+c_nbc      = input.color(color.white, "NBC", inline="c1", group=G5)
+c_c1Be     = input.color(#ff9800, "C1 Bear", inline="c2", group=G5)
+c_c1Bu     = input.color(#2962ff, "C1 Bull", inline="c2", group=G5)
+c_c2Be     = input.color(#ff1744, "C2 Bear", inline="c2", group=G5)
+c_c2Bu     = input.color(#00e676, "C2 Bull", inline="c2", group=G5)
+
+// ─── ⑦ Labels And Tables ───
+G6 = "⑦ Labels And Tables"
+i_lbl      = input.bool(false, "Labels (C1 / ✕)", inline="lb", group=G6, tooltip="C1 label = its body. A new C1 (the C2 was too small) shows the body difference and Δ difference vs the C1 it replaced. ✕ = setup cancelled. CDS / CDL marks have their own switch below.")
+i_lblSz    = input.string("Tiny", "", options=["Tiny", "Small", "Normal", "Large"], inline="lb", group=G6)
+i_merge    = input.float(0.25, "Merge Labels Closer Than (ATR)", minval=0.0, maxval=5.0, step=0.05, group=G6, tooltip="Labels whose prices are closer than ATR x this are fused into ONE label (texts stacked), like MMM PRO. Lines at the same level share one label.\nLabels on the same candle and side are always fused.\n0 = fuse only exact same prices.")
+i_lblMax   = input.int(50, "Max Labels Shown", minval=1, maxval=400, group=G6, tooltip="Only the most recent labels stay on the chart.")
+i_cds      = input.bool(true, "CDS / CDL Lines", inline="cd", group=G6, tooltip="One CDS / CDL line at a time: the last broken line.\nA close through the trend line = CDS line (bull lines broken) / CDL line (bear lines broken). A later close through the ATR line moves it there.\nIt sits on the closest BODY CLOSE the breaking close went beyond: CDS = the lowest BuBC open (or low) still ABOVE the broken line; CDL = the highest BeBC open (or high) still BELOW it. None found = on the broken line itself.\nThe ATR break is the last one: a later trend line break does not move it back.\nBefore the flip: a close back beyond it removes it. At the C2 flip it pairs with the new PO4 and is deleted with it.\nNo break before the flip: the line from the open of the last opposite body close to C2 is used.")
+i_cdsLvl   = input.string("Open", "At", options=["Open", "Wick"], inline="cd", group=G6, tooltip="Where the CDS / CDL line sits on the body close it uses.\nOpen: its open. Wick: its low (CDS, from a BuBC) / its high (CDL, from a BeBC).")
+i_mkKeep   = input.int(10, "Keep", minval=1, maxval=100, inline="cd", group=G6, tooltip="How many CDS / CDL marks and PO4 lines stay on the chart (the newest).")
+i_po4      = input.bool(true, "BePO4 / BuPO4 Line (C1, Protected)", inline="po", group=G6, tooltip="A touch (wick beyond, close back inside) moves the PO4 to that wick.\nAfter a CDS, C1 becomes the BePO4 (protected top). After a CDL, C1 becomes the BuPO4 (protected bottom).\nA SOLID line from C1 to price (plus the extension), replacing the dotted boundary line. Its label shows the body difference (C2 body minus C1 body) and the delta difference (Δ, + = more in the new direction) when delta data exists.\nThe line and its CDS / CDL mark are deleted when a candle CLOSES beyond it.")
+i_po4Lvl   = input.string("Wick", "", options=["Wick", "Open"], inline="po", group=G6, tooltip="Price can wick past C1 or open past it between C1 and C2 without closing past the boundary.\nWick: BePO4 = the highest high from C1 to C2, BuPO4 = the lowest low.\nOpen: BePO4 = the highest open from C1 to C2, BuPO4 = the lowest open.\nThe line starts at the candle that made it.")
+i_po4W     = input.int(2, "Width", minval=1, maxval=5, inline="po", group=G6)
+i_po4Show  = input.string("Chain Ends", "PO4 Lines Shown", options=["Chain Ends", "Last Bull + Last Bear", "Last Only", "All"], group=G6, tooltip="Chain Ends: for each side, the newest PO4 and the PO4 of the oldest trend line still on the chart (the start of the joined chain). The PO4 lines in between are hidden (no line, no label) but still work; they show again when they become a chain end.\nLast Bull + Last Bear: the PO4 lines of the last two trends, with their CDS / CDL lines.\nLast Only: only the most recent PO4.\nAll: every PO4 line kept by the Keep count.\nHidden PO4 lines still work: a close beyond them still deletes them.")
+i_connect  = input.bool(true, "Connect The Lines", group=G6, tooltip="A new trend line / ATR line is joined to the most recent trend line / ATR line of the SAME side that is still on the chart (from an older trend): one continuous line with a step where the new one starts. If that older line gets deleted, the join goes too.\nA trend line that starts again after a delete is joined to the last PO4 line (along the PO4 level, then a step to the new line).\nA new ATR line after a delete is joined to the end of the ATR line before it.")
+i_po4Src   = input.string("Last C1", "PO4 From", options=["Last C1", "Strongest C1"], group=G6, tooltip="When two or more C1 candles follow each other (a C2 was too small, so it became the new C1):\nLast C1: the PO4 line goes on the last C1 before the CDS / CDL.\nStrongest C1: the PO4 line goes on the C1 with the biggest body in that chain.\nThe trend line still starts at the last C1.")
+i_tests    = input.bool(false, "Mark Deleted Lines", group=G6, tooltip="Gray dot: a candle CLOSED beyond the trend line (the line is deleted).\nRed / green x: a candle CLOSED beyond the ATR line with no CDS / CDL yet (the ATR line is deleted).")
+i_lblDel   = input.bool(true, "Auto-Delete Labels", inline="dl", group=G6, tooltip="C1 / ✕ labels are deleted when a later candle CLOSES beyond their candle: bear labels when a close goes above that candle's high, bull labels when a close goes below its low (Body = beyond its body).\nCDS / CDL marks follow their protected C1 instead.")
+i_delLvl   = input.string("Wick", "", options=["Wick", "Body"], inline="dl", group=G6)
+i_bndLn    = input.bool(true, "Boundary Line (Last Bull + Last Bear Only)", group=G6, tooltip="The dotted C1 boundary. Only the latest one of each side stays on the chart: a new bull C1 replaces the old bull line, a new bear C1 the old bear line.")
+i_badge    = input.bool(false, "Status", inline="tb", group=G6)
+i_calib    = input.bool(true, "Stop Calibration", inline="tb", group=G6, tooltip="For every finished trend (flip to flip): the % of trends where price TOUCHED the ATR stop line at each multiplier BEFORE the reversal started (before its first C1) = an early stop.\nIt uses the same base and the same ATR (live or fixed) as the stop line. The reversal itself is not counted.")
+i_tblPos   = input.string("Top Right", "", options=["Top Right", "Top Center", "Top Left", "Bottom Right", "Bottom Center", "Bottom Left"], inline="tb", group=G6)
+i_tblSz    = input.string("Small", "Text", options=["Tiny", "Small", "Normal", "Large"], inline="tb2", group=G6)
+
+// ─── Helpers ───
+// lines can only start up to the history buffer back: clamp very old anchors (old BIG C1s) to 4,900 candles back
+f_x(int x) =>
+    math.max(x, bar_index - 4900)
+
+// signed numbers for labels: body difference and delta difference (Δ)
+f_sg(float v) =>
+    (v > 0 ? "+" : "") + str.tostring(v, format.mintick)
+f_sgK(float v) =>
+    float a = math.abs(v)
+    (v > 0 ? "+" : v < 0 ? "-" : "") + (a >= 1000000 ? str.tostring(a / 1000000, "#.#") + "M" : a >= 1000 ? str.tostring(a / 1000, "#.#") + "K" : str.tostring(a, "#"))
+
+f_size(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : size.large
+
+f_pos(string p) =>
+    p == "Top Right" ? position.top_right : p == "Top Center" ? position.top_center : p == "Top Left" ? position.top_left : p == "Bottom Right" ? position.bottom_right : p == "Bottom Center" ? position.bottom_center : position.bottom_left
+
+string lblSz   = f_size(i_lblSz)
+string tblSz   = f_size(i_tblSz)
+bool   bndWick = i_bnd == "Wick"
+bool   lvlWick = i_lvl == "Wick"
+bool   stWick  = i_stopBase == "Wick"
+bool   newRef  = true
+bool   atrLive = i_atrMode == "Live (Every Candle)"
+bool   c1Open  = i_c1Lvl == "Open"
+bool   colC1   = i_sig == "C1 + C2" or i_sig == "C1 Only"
+bool   colC2   = i_sig == "C1 + C2" or i_sig == "C2 Only (Flip)"
+
+// ─── Candles ───
+// BuBC = a GREEN candle (close above open) that closes above the prior high.
+// BeBC = a RED candle (close below open) that closes below the prior low.
+// A candle that opens above the prior high and closes red (below its open), even if still above that high, is an NBC, not a BuBC.
+// Mirror: opens below the prior low and closes green, even if still below that low = NBC, not a BeBC.
+bool  isBuX = close > high[1] and close > open
+bool  isBeX = close < low[1] and close < open
+bool  isNbc = not isBuX and not isBeX
+float body  = math.abs(close - open)
+float bTop  = math.max(open, close)
+float bBot  = math.min(open, close)
+float atr   = ta.atr(i_atrLen)
+
+// ─── Delta ───
+footprint fpData = request.footprint(i_fpTicks, 70)
+string       ltfUse = timeframe.in_seconds("1") < timeframe.in_seconds() ? "1" : timeframe.period
+array<float> ltfD   = request.security_lower_tf(syminfo.tickerid, ltfUse, close > open ? volume : close < open ? -volume : 0.0)
+float dFp      = na(fpData) ? na : fpData.delta()
+float dLtf     = ltfD.size() > 0 ? ltfD.sum() : na
+float barDelta = i_dSrc == "Footprint" ? dFp : dLtf
+
+// ─── State ───
+var int   trend    = 0      // 1 bull, -1 bear, 0 not known yet
+var bool  setOn    = false  // a C1 is live
+var int   setSide  = 0      // -1 = bear C1 inside a bull trend, 1 = bull C1 inside a bear trend
+var float setBody  = na
+var float setDelta = na
+var float setBnd   = na
+var float setLB    = na     // C1 body level (top for a bear C1, bottom for a bull C1)
+var float setLW    = na     // C1 wick level (high / low)
+var float setAtr   = na
+var int   setBar   = na
+// a C2 that passed the body / delta check but has not closed beyond the last opposite BC open yet
+var bool  armed    = false
+var bool  oppDone  = false   // a close beyond the last opposite BC open happened since the C1 (sticky for the setup)
+var float armBody  = na
+var float armDelta = na
+// strongest C1 of the chain (C1s that replaced each other)
+var float stBody   = na
+var float stDelta  = na
+var float stLB     = na
+var float stLW     = na
+var int   stBar    = na
+// drawn trend line and ATR line (level, alive, corner points since their starting point)
+var float tlLv     = na
+var bool  tlOn     = false
+var array<chart.point> tlPts = array.new<chart.point>()
+var float atBase   = na
+var float atAtr    = na
+var float atTch    = na     // a touch moved the ATR line to this wick
+var bool  atOn     = false
+var int   atX0     = na
+var int   tlX0     = na     // where the running trend line itself starts
+var float atLvP    = na     // ATR line level on the last closed candle
+var array<chart.point> atPts = array.new<chart.point>()
+// lines of old trends: still alive until a close beyond their last level
+type OldLine
+    array<chart.point> pts
+    float lv
+    int   side     // 1 = bull line (below price), -1 = bear line (above price)
+    bool  isAtr
+    polyline pl
+    int   id       // unique id of this line
+    int   trId     // the trend (flip) it belongs to, to keep its PO4 on the chart
+    int   jId      // the older same-side line it is joined to (na = none)
+    int   jX
+    float jLv
+var array<OldLine> olds = array.new<OldLine>()
+var int   nextId   = 0
+var int   curTr    = 0      // id of the running trend (+1 at every flip)
+// the running trend / ATR line is joined to the most recent still-alive line of the same side (old trend)
+var int   tlJId    = na
+var int   tlJX     = na
+var float tlJLv    = na
+var int   atJId    = na
+var int   atJX     = na
+var float atJLv    = na
+var array<int> mkTr = array.new<int>()   // trend id of each PO4
+var polyline tlPl  = na
+var polyline atPl  = na
+// trend-line candle
+var float lnBody   = na
+var float lnWick   = na
+var float lnAtr    = na
+// calibration: max wick overshoot beyond the stop base (in ATR) before the reversal chain started
+var float legMax   = 0.0
+var bool  chainOn  = false
+var float chainMax = na
+var array<float> legRec = array.new<float>()
+
+// C1 registry per side, for the BIG / LAST C1 lines: body, open level, wick level, bar, delta
+var array<float> beB = array.new<float>()
+var array<float> beO = array.new<float>()
+var array<float> beW = array.new<float>()
+var array<int>   beI = array.new<int>()
+var array<float> beD = array.new<float>()
+var array<float> buB = array.new<float>()
+var array<float> buO = array.new<float>()
+var array<float> buW = array.new<float>()
+var array<int>   buI = array.new<int>()
+var array<float> buD = array.new<float>()
+var float lastBeB = na
+var float lastBeO = na
+var float lastBeW = na
+var int   lastBeI = na
+var float lastBuB = na
+var float lastBuO = na
+var float lastBuW = na
+var int   lastBuI = na
+
+var line         bndLn    = na
+var array<line>  bndBu    = array.new<line>()   // the last finished bull boundary line
+var array<line>  bndBe    = array.new<line>()   // the last finished bear boundary line
+var array<label> lbls     = array.new<label>()
+var array<bool>  lUp      = array.new<bool>()    // label above (true) / below the candle
+var array<int>   lSide    = array.new<int>()     // direction of the labelled candle: -1 bear, 1 bull
+var array<float> lLvl     = array.new<float>()   // a close beyond this deletes the label
+var array<int>   lBar     = array.new<int>()
+// CDS / CDL marks: line, CDS / CDL label, PO4 label, side, protected C1 level
+var array<line>  mkLn  = array.new<line>()
+var array<label> mkLb  = array.new<label>()
+var array<float>  mkPoPx  = array.new<float>()   // PO4 line price (C1 wick or open)
+var array<int>    mkPoBar = array.new<int>()     // C1 candle
+var array<string> mkPoTxt = array.new<string>()
+var array<int>   mkSd  = array.new<int>()
+var array<float> mkLv  = array.new<float>()
+// pending CDS / CDL line (the last broken trend / ATR line, before the flip): level, start bar, side (-1 CDS, 1 CDL)
+var float pbLv = na
+var int   pbX  = na
+var int   pbSd = 0
+var int   pbRk = 0      // 1 = trend line break, 2 = ATR line break (the last one)
+var int   trStart = 0   // first candle of this trend (its C1)
+var line  pbLn = na
+var label pbLb = na
+// last body close of each side (open and bar), for the CDS / CDL line
+var float lastBuxO = na
+var int   lastBuxI = na
+var float lastBexO = na
+var int   lastBexI = na
+
+int   evType    = 0         // 1 = C1, 2 = flip, 3 = cancelled, 4 = expired, 5 = C2 too small, 6 = new C1
+color candleCol = na
+
+f_lbl(bool show, float y, string txt, color c, bool above, string tip, int side) =>
+    bool fused = false
+    if show and lbls.size() > 0
+        int k = lbls.size() - 1
+        if lBar.get(k) == bar_index and lUp.get(k) == above
+            label lb = lbls.get(k)
+            label.set_text(lb, label.get_text(lb) + "\n" + txt)
+            label.set_tooltip(lb, tip)
+            fused := true
+    if show and not fused
+        lbls.push(label.new(bar_index, y, txt, yloc=above ? yloc.abovebar : yloc.belowbar, style=above ? label.style_label_down : label.style_label_up, color=color.new(c, 100), textcolor=c, size=lblSz, tooltip=tip))
+        lUp.push(above)
+        lSide.push(side)
+        lLvl.push(side == -1 ? (i_delLvl == "Wick" ? high : math.max(open, close)) : (i_delLvl == "Wick" ? low : math.min(open, close)))
+        lBar.push(bar_index)
+        while lbls.size() > i_lblMax
+            label.delete(lbls.shift())
+            lUp.shift()
+            lSide.shift()
+            lLvl.shift()
+            lBar.shift()
+
+f_endBnd() =>
+    if not na(bndLn)
+        line.set_x2(bndLn, bar_index)
+        array<line> side = setSide == -1 ? bndBe : bndBu
+        while side.size() > 0
+            line.delete(side.pop())
+        side.push(bndLn)
+
+// remove the C1s of one side that this candle beats (same-side body close, body >= C2 % of theirs, delta check if on)
+f_beat(array<float> bA, array<float> oA, array<float> wA, array<int> iA, array<float> dA, int side) =>
+    bool bc = side == -1 ? isBeX : isBuX
+    if bc and bA.size() > 0
+        for k = bA.size() - 1 to 0
+            float dRef = dA.get(k)
+            bool  dGood = not i_dOn or na(barDelta) or na(dRef) or (barDelta * side > 0 and math.abs(barDelta) >= math.abs(dRef) * i_dPct / 100.0)
+            if iA.get(k) < bar_index and body >= bA.get(k) * i_c2pct / 100.0 and dGood
+                bA.remove(k)
+                oA.remove(k)
+                wA.remove(k)
+                iA.remove(k)
+                dA.remove(k)
+
+f_add(array<float> bA, array<float> oA, array<float> wA, array<int> iA, array<float> dA, float o, float w) =>
+    bA.push(body)
+    oA.push(o)
+    wA.push(w)
+    iA.push(bar_index)
+    dA.push(barDelta)
+    while bA.size() > 150
+        bA.shift()
+        oA.shift()
+        wA.shift()
+        iA.shift()
+        dA.shift()
+
+f_dOk(int side) =>
+    not i_dOn or na(barDelta) or na(setDelta) or (barDelta * side > 0 and math.abs(barDelta) >= math.abs(setDelta) * i_dPct / 100.0)
+
+// a level change: corner points so the line steps
+f_pt(array<chart.point> pts, float oldLv, float newLv) =>
+    if pts.size() > 0 and not na(oldLv)
+        pts.push(chart.point.from_index(bar_index, oldLv))
+    pts.push(chart.point.from_index(bar_index, newLv))
+    while pts.size() > 9000
+        pts.shift()
+
+// ATR line level now (live or fixed ATR, a touch overrides)
+f_atLv() =>
+    float aUse = atrLive ? atr : atAtr
+    float lv = na(atBase) or na(aUse) or trend == 0 ? na : atBase - trend * aUse * i_atrMult
+    if not na(lv) and not na(atTch)
+        lv := trend == 1 ? math.min(lv, atTch) : math.max(lv, atTch)
+    lv
+
+// copy points for drawing (very old points are clamped to the history buffer) and end at x2 / lv
+f_draw(array<chart.point> pts, int x2, float lv, color c, int w, int jX, float jLv) =>
+    polyline pl = na
+    if pts.size() > 0 and not na(lv)
+        array<chart.point> p2 = array.new<chart.point>()
+        // joined: start on the older line's level, then step to this line
+        if not na(jX) and not na(jLv)
+            p2.push(chart.point.from_index(f_x(jX), jLv))
+        // only the part up to x2 (an older line stops where the newer one joins it)
+        float last = na
+        for p in pts
+            if p.index <= x2
+                p2.push(chart.point.from_index(f_x(p.index), p.price))
+                last := p.price
+        if not na(last)
+            p2.push(chart.point.from_index(x2, last))
+            pl := polyline.new(p2, line_color=c, line_width=w)
+    pl
+
+// a trend flipped with its lines still alive: they stay alive (extended at their last level until a close beyond)
+f_keep(array<chart.point> pts, float lv, int side, bool isAtr, int id, int trId, int jId, int jX, float jLv) =>
+    if i_tlKeep > 0 and pts.size() > 0 and not na(lv)
+        olds.push(OldLine.new(pts.copy(), lv, side, isAtr, na, id, trId, jId, jX, jLv))
+        while olds.size() > i_tlKeep * 2
+            OldLine o = olds.shift()
+            polyline.delete(o.pl)
+
+// is this old line still on the chart?
+f_alive(int id) =>
+    bool f = false
+    if not na(id) and olds.size() > 0
+        for o in olds
+            if o.id == id
+                f := true
+    f
+
+// the most recent still-alive old line of a side (trend line or ATR line): its id and level
+f_lastOld(int side, bool isAtr) =>
+    int   rid = na
+    float rlv = na
+    if olds.size() > 0
+        for k = olds.size() - 1 to 0
+            OldLine o = olds.get(k)
+            if o.side == side and o.isAtr == isAtr
+                rid := o.id
+                rlv := o.lv
+                break
+    [rid, rlv]
+
+// the CDS / CDL line level: the closest BODY CLOSE the breaking close went beyond, on the far side of the broken line.
+// CDS (side -1, a bull line broke): the lowest BuBC open (or low) still ABOVE the broken line that this close is below.
+// CDL (side 1, a bear line broke): the highest BeBC open (or high) still BELOW the broken line that this close is above.
+// Only body closes of this trend (since its C1). None = the broken line itself, from x0.
+f_brk(int side, float ref, int x0) =>
+    float bv = na
+    int   bx = na
+    int   lb = math.min(math.min(400, bar_index - 1), math.max(bar_index - trStart, 1))
+    if lb >= 1
+        for k = 1 to lb
+            bool isBc = side == -1 ? (close[k] > high[k + 1] and close[k] > open[k]) : (close[k] < low[k + 1] and close[k] < open[k])
+            if isBc
+                float lv = i_cdsLvl == "Open" ? open[k] : (side == -1 ? low[k] : high[k])
+                if side == -1 ? (lv > ref and close < lv) : (lv < ref and close > lv)
+                    if na(bv) or (side == -1 ? lv < bv : lv > bv)
+                        bv := lv
+                        bx := bar_index - k
+    if na(bv)
+        bv := ref
+        bx := x0
+    [bv, bx]
+
+bool evCds = false
+bool evTlDel = false
+float tlLvBrk = na
+float atLvBrk = na
+int   tlX0Brk = na
+int   atX0Brk = na
+bool evAtDel = false
+bool evTlTch = false
+bool evAtTch = false
+bool evCdl = false
+if barstate.isconfirmed and not na(high[1])
+    // auto-delete: a close beyond a labelled candle removes its label
+    if i_lblDel and lbls.size() > 0
+        for k = lbls.size() - 1 to 0
+            if lBar.get(k) < bar_index and (lSide.get(k) == -1 ? close > lLvl.get(k) : close < lLvl.get(k))
+                label.delete(lbls.get(k))
+                lbls.remove(k)
+                lUp.remove(k)
+                lSide.remove(k)
+                lLvl.remove(k)
+                lBar.remove(k)
+    // CDS / CDL marks die when a close goes beyond their protected C1
+    if mkLn.size() > 0
+        for k = mkLn.size() - 1 to 0
+            if mkSd.get(k) == -1 ? close > mkLv.get(k) : close < mkLv.get(k)
+                line.delete(mkLn.get(k))
+                label.delete(mkLb.get(k))
+                mkLn.remove(k)
+                mkLb.remove(k)
+                mkPoPx.remove(k)
+                mkPoBar.remove(k)
+                mkPoTxt.remove(k)
+                mkSd.remove(k)
+                mkTr.remove(k)
+                mkLv.remove(k)
+            else if mkSd.get(k) == -1 ? high > mkLv.get(k) : low < mkLv.get(k)
+                // a touch (wick beyond, close back inside) moves the PO4 to that wick
+                float nv = mkSd.get(k) == -1 ? high : low
+                mkLv.set(k, nv)
+                mkPoPx.set(k, nv)
+                mkPoBar.set(k, bar_index)
+    f_beat(beB, beO, beW, beI, beD, -1)
+    f_beat(buB, buO, buW, buI, buD, 1)
+    if trend == 0
+        if isBuX or isBeX
+            trend  := isBuX ? 1 : -1
+            trStart := bar_index
+            lnBody := isBuX ? bBot : bTop
+            lnWick := isBuX ? low : high
+            lnAtr  := atr
+            tlLv   := lvlWick ? lnWick : lnBody
+            tlOn   := true
+            tlPts.clear()
+            tlPts.push(chart.point.from_index(bar_index, tlLv))
+            tlX0   := bar_index
+            atBase := stWick ? lnWick : lnBody
+            atAtr  := atr
+            atTch  := na
+            atOn   := true
+            atX0   := bar_index
+            atPts.clear()
+    else
+        // overshoot of this candle beyond the stop base (before any change this candle)
+        float base = stWick ? lnWick : lnBody
+        float aUse = atrLive ? atr : lnAtr
+        float ov   = na(aUse) or aUse <= 0 or na(base) ? 0.0 : (trend == -1 ? (high - base) / aUse : (base - low) / aUse)
+        bool  flipped = false
+        // old trends' lines: a CLOSE beyond deletes them, a touch moves them to the wick
+        if olds.size() > 0
+            for k = olds.size() - 1 to 0
+                OldLine o = olds.get(k)
+                if o.side == 1 ? close < o.lv : close > o.lv
+                    polyline.delete(o.pl)
+                    olds.remove(k)
+                else if o.side == 1 ? low < o.lv : high > o.lv
+                    float nl2 = o.side == 1 ? low : high
+                    f_pt(o.pts, o.lv, nl2)
+                    o.lv := nl2
+        // trend line / ATR line: a CLOSE beyond deletes the whole line, a touch (wick beyond, close inside) moves it to that wick
+        if tlOn
+            if trend == 1 ? close < tlLv : close > tlLv
+                tlLvBrk := tlLv
+                tlX0Brk := na(tlX0) ? bar_index - 1 : tlX0
+                tlOn    := false
+                tlJId   := na
+                tlPts.clear()
+                lnBody  := na
+                lnWick  := na
+                evTlDel := true
+            else if trend == 1 ? low < tlLv : high > tlLv
+                float nl = trend == 1 ? low : high
+                f_pt(tlPts, tlLv, nl)
+                tlLv    := nl
+                evTlTch := true
+        if atOn and not na(atLvP)
+            if trend == 1 ? close < atLvP : close > atLvP
+                atLvBrk := atLvP
+                atX0Brk := na(atX0) ? bar_index - 1 : atX0
+                atJId   := na
+                atOn    := false
+                atPts.clear()
+                evAtDel := true
+            else if trend == 1 ? low < atLvP : high > atLvP
+                atTch   := trend == 1 ? low : high
+                evAtTch := true
+        // a pending CDS / CDL line is removed by a close back beyond it
+        if not na(pbLv) and (pbSd == -1 ? close > pbLv : close < pbLv)
+            line.delete(pbLn)
+            label.delete(pbLb)
+            pbLv := na
+            pbLn := na
+            pbLb := na
+            pbRk := 0
+        // the last broken line becomes the CDS / CDL line (trend line first, the ATR line break replaces it)
+        if (evAtDel or (evTlDel and pbRk < 2)) and i_cds
+            float ref = evAtDel ? atLvBrk : tlLvBrk
+            [bv, bx] = f_brk(-trend, ref, evAtDel ? atX0Brk : tlX0Brk)
+            if not na(bv)
+                pbRk := evAtDel ? 2 : 1
+                line.delete(pbLn)
+                label.delete(pbLb)
+                color pc = trend == 1 ? c_bear : c_bull
+                pbLv := bv
+                pbX  := bx
+                pbSd := -trend
+                pbLn := line.new(f_x(bx), bv, bar_index, bv, color=pc, width=1, style=line.style_solid)
+                pbLb := label.new(math.round((f_x(bx) + bar_index) / 2), bv, trend == 1 ? "CDS" : "CDL", style=trend == 1 ? label.style_label_up : label.style_label_down, color=color.new(pc, 100), textcolor=pc, size=lblSz, tooltip=(evAtDel ? "ATR line" : "Trend line") + " closed through at " + str.tostring(ref, format.mintick) + ". Line on the closest open / wick the close went beyond.")
+        else if not na(pbLv)
+            line.set_x2(pbLn, bar_index)
+            label.set_x(pbLb, math.round((f_x(pbX) + bar_index) / 2))
+        if setOn
+            bool cancel = setSide == -1 ? close > setBnd : close < setBnd
+            bool same   = setSide == -1 ? isBeX : isBuX
+            bool bodyOk = body >= setBody * i_c2pct / 100.0
+            bool qual   = same and bodyOk and f_dOk(setSide)
+            float oppO  = setSide == -1 ? lastBuxO : lastBexO
+            if not cancel and not oppDone and not na(oppO) and (setSide == -1 ? close < oppO : close > oppO)
+                oppDone := true
+            bool beyond = not i_c2Open or na(oppO) or oppDone
+            if cancel
+                setOn   := false
+                armed   := false
+                oppDone := false
+                chainOn := false
+                evType  := 3
+                f_endBnd()
+                bndLn := na
+                f_lbl(i_lbl, setSide == -1 ? high : low, "✕", color.gray, setSide == -1, "Boundary broke: the " + (setSide == -1 ? "sellers" : "buyers") + " failed to take over. The trend stays.", setSide == -1 ? 1 : -1)
+            else if qual and not beyond and not armed
+                // C2 passed the body check but did not close beyond the last opposite BC open: the trend stays, wait
+                armed    := true
+                armBody  := body
+                armDelta := barDelta
+                if not na(bndLn)
+                    line.set_x2(bndLn, bar_index)
+            else if (qual or armed) and beyond
+                float c2Body  = armed ? armBody : body
+                float c2Delta = armed ? armDelta : barDelta
+                armed   := false
+                oppDone := false
+                // C2: CDS / CDL
+                legRec.push(chainOn ? chainMax : legMax)
+                while legRec.size() > 2000
+                    legRec.shift()
+                legMax  := 0.0
+                chainOn := false
+                // the old trend's lines that were never closed through stay as history
+                if tlOn and i_line
+                    nextId += 1
+                    f_keep(tlPts, tlLv, trend, false, nextId, curTr, tlJId, tlJX, tlJLv)
+                if atOn and i_stop and not na(atLvP)
+                    nextId += 1
+                    f_keep(atPts, atLvP, trend, true, nextId, curTr, atJId, atJX, atJLv)
+                trend   := setSide
+                curTr   += 1
+                trStart := setBar
+                // the new trend line and ATR line start where the PO4 moved to: the highest high / body top (bear)
+                // or lowest low / body bottom (bull) from the C1 (last or strongest, as the PO4) to this C2
+                int   c1b  = i_po4Src == "Strongest C1" and not na(stBar) ? stBar : setBar
+                int   wb0  = math.max(c1b, bar_index - 4900)
+                float exW  = na
+                float exB  = na
+                int   exWx = c1b
+                int   exBx = c1b
+                for k = 0 to bar_index - wb0
+                    float vw = trend == -1 ? high[k] : low[k]
+                    float vb = trend == -1 ? math.max(open[k], close[k]) : math.min(open[k], close[k])
+                    if na(exW) or (trend == -1 ? vw > exW : vw < exW)
+                        exW  := vw
+                        exWx := bar_index - k
+                    if na(exB) or (trend == -1 ? vb > exB : vb < exB)
+                        exB  := vb
+                        exBx := bar_index - k
+                lnBody  := exB
+                lnWick  := exW
+                lnAtr   := setAtr
+                tlLv    := lvlWick ? exW : exB
+                tlOn    := true
+                tlPts.clear()
+                tlPts.push(chart.point.from_index(lvlWick ? exWx : exBx, tlLv))
+                tlX0    := lvlWick ? exWx : exBx
+                // joined to the most recent still-alive trend line / ATR line of the SAME side (an older trend)
+                [jt1, jt2] = f_lastOld(trend, false)
+                tlJId   := jt1
+                tlJLv   := jt2
+                tlJX    := tlX0
+                [ja1, ja2] = f_lastOld(trend, true)
+                atJId   := ja1
+                atJLv   := ja2
+                atJX    := stWick ? exWx : exBx
+                atBase  := stWick ? exW : exB
+                atAtr   := setAtr
+                atTch   := na
+                atOn    := true
+                atX0    := stWick ? exWx : exBx
+                atPts.clear()
+                setOn   := false
+                flipped := true
+                evType  := 2
+                if not na(bndLn)
+                    line.delete(bndLn)
+                bndLn := na
+                if colC2
+                    candleCol := trend == 1 ? c_c2Bu : c_c2Be
+                if trend == 1
+                    evCdl := true
+                else
+                    evCds := true
+                if i_cds or i_po4
+                    float oPx = trend == -1 ? lastBuxO : lastBexO
+                    int   oI  = trend == -1 ? lastBuxI : lastBexI
+                    if na(oPx) or na(oI)
+                        oPx := open
+                        oI  := bar_index
+                    // the last broken line (trend line / ATR line) is the CDS / CDL line when there is one
+                    bool usePb = not na(pbLv) and pbSd == trend
+                    if usePb
+                        oPx := pbLv
+                        oI  := pbX
+                    line.delete(pbLn)
+                    label.delete(pbLb)
+                    pbLv := na
+                    pbLn := na
+                    pbLb := na
+                    pbRk := 0
+                    color  mc   = trend == 1 ? c_bull : c_bear
+                    string nm   = trend == 1 ? "CDL" : "CDS"
+                    float  pct  = c2Body / math.max(setBody, syminfo.mintick) * 100
+                    bool   dHas = not na(c2Delta) and not na(setDelta)
+                    string cdsTip = nm + ": C2 body " + str.tostring(c2Body, format.mintick) + " = " + str.tostring(pct, "#") + "% of C1, closed beyond the last opposite BC open. Now " + (trend == 1 ? "bullish." : "bearish.")
+                    // CDS / CDL on the break line: from the open of the last opposite body close to the break candle (C2)
+                    mkLn.push(i_cds ? line.new(f_x(oI), oPx, bar_index, oPx, color=mc, width=1, style=line.style_solid) : line(na))
+                    mkLb.push(i_cds ? label.new(math.round((f_x(oI) + bar_index) / 2), oPx, nm, style=trend == 1 ? label.style_label_down : label.style_label_up, color=color.new(mc, 100), textcolor=mc, size=lblSz, tooltip=cdsTip) : label(na))
+                    // the C1 label of that candle is replaced by the PO4 line label (it holds the C1 info)
+                    bool  useSt = i_po4Src == "Strongest C1" and not na(stBar)
+                    int   poBar = useSt ? stBar : setBar
+                    float poBody = useSt ? stBody : setBody
+                    float poDelta = useSt ? stDelta : setDelta
+                    if i_po4 and lbls.size() > 0
+                        for k = lbls.size() - 1 to 0
+                            if lBar.get(k) == poBar
+                                label.delete(lbls.get(k))
+                                lbls.remove(k)
+                                lUp.remove(k)
+                                lSide.remove(k)
+                                lLvl.remove(k)
+                                lBar.remove(k)
+                    // PO4 = the highest high / open (BePO4) or lowest low / open (BuPO4) from C1 to C2
+                    float poPx = na
+                    int   poX  = poBar
+                    int   w0   = math.max(poBar, bar_index - 4900)
+                    for k = 0 to bar_index - w0
+                        float v = i_po4Lvl == "Wick" ? (trend == -1 ? high[k] : low[k]) : open[k]
+                        if na(poPx) or (trend == -1 ? v > poPx : v < poPx)
+                            poPx := v
+                            poX  := bar_index - k
+                    mkPoPx.push(poPx)
+                    mkPoBar.push(poX)
+                    mkPoTxt.push((trend == 1 ? "BuPO4 " : "BePO4 ") + f_sg(c2Body - poBody) + (dHas and not na(poDelta) ? "  Δ " + f_sgK((c2Delta - poDelta) * trend) : ""))
+                    mkSd.push(trend)
+                    mkLv.push(poPx)
+                    mkTr.push(curTr)
+                    while mkLn.size() > i_mkKeep
+                        line.delete(mkLn.shift())
+                        label.delete(mkLb.shift())
+                        mkPoPx.shift()
+                        mkPoBar.shift()
+                        mkPoTxt.shift()
+                        mkSd.shift()
+                        mkTr.shift()
+                        mkLv.shift()
+            else if i_wait > 0 and bar_index - setBar >= i_wait
+                setOn   := false
+                armed   := false
+                oppDone := false
+                chainOn := false
+                evType  := 4
+                f_endBnd()
+                bndLn := na
+            else if same and newRef and not armed
+                // C2 too small (body or delta): it becomes the new C1 below
+                setOn  := false
+                evType := 5
+                f_endBnd()
+                bndLn := na
+            else
+                if not na(bndLn)
+                    line.set_x2(bndLn, bar_index)
+                if i_nbc == "Inside The Boundary" and isNbc
+                    candleCol := c_nbc
+        // trend line step: compare this candle with the candle before it
+        if not flipped
+            bool dirOk = i_stepBC ? (trend == 1 ? isBuX : isBeX) : (trend == 1 ? close > open : close < open)
+            if dirOk and body > 0 and body >= body[1] * i_stepPct / 100.0
+                float candB = trend == 1 ? bBot[1] : bTop[1]
+                float candW = trend == 1 ? low[1] : high[1]
+                float cur   = lvlWick ? lnWick : lnBody
+                float cand  = lvlWick ? candW : candB
+                if na(cur) or (trend == 1 ? cand > cur : cand < cur)
+                    lnBody := candB
+                    lnWick := candW
+                    lnAtr  := atr[1]
+                    // trend line: tightens, or a new line starts after the old one was deleted
+                    if not tlOn
+                        tlOn := true
+                        tlLv := cand
+                        tlPts.clear()
+                        // joined to the last PO4 line of this trend: along the PO4 level, then a step to the new line
+                        int nP = mkPoPx.size()
+                        if i_connect and nP > 0 and mkSd.get(nP - 1) == trend and mkPoBar.get(nP - 1) <= bar_index - 1
+                            tlPts.push(chart.point.from_index(mkPoBar.get(nP - 1), mkPoPx.get(nP - 1)))
+                            tlPts.push(chart.point.from_index(bar_index - 1, mkPoPx.get(nP - 1)))
+                        tlPts.push(chart.point.from_index(bar_index - 1, cand))
+                        tlX0  := bar_index - 1
+                        tlJId := na
+                    else if trend == 1 ? cand > tlLv : cand < tlLv
+                        f_pt(tlPts, tlLv, cand)
+                        tlLv := cand
+                    // ATR line follows the new candle (only tightens), or a new line starts
+                    float nb    = stWick ? candW : candB
+                    float aNew  = atrLive ? atr : atr[1]
+                    float nLv   = nb - trend * aNew * i_atrMult
+                    float curLv = f_atLv()
+                    if not atOn
+                        atOn   := true
+                        atBase := nb
+                        atAtr  := atr[1]
+                        atTch  := na
+                        atX0   := bar_index - 1
+                        // a new ATR line: joined to the most recent still-alive ATR line of the same side
+                        [jr1, jr2] = f_lastOld(trend, true)
+                        atJId  := jr1
+                        atJLv  := jr2
+                        atJX   := bar_index - 1
+                        atPts.clear()
+                    else if na(curLv) or (trend == 1 ? nLv > curLv : nLv < curLv)
+                        atBase := nb
+                        atAtr  := atr[1]
+                        atTch  := na
+        // a new C1
+        bool opp = trend == 1 ? isBeX : isBuX
+        if not setOn and not flipped and evType != 3 and opp
+            if not chainOn
+                chainOn  := true
+                chainMax := legMax
+            float prevBody  = setBody
+            float prevDelta = setDelta
+            // open check: a fresh C1 starts it again (C1 itself can break the open); a new C1 of the same chain keeps it
+            float oppC1 = trend == 1 ? lastBuxO : lastBexO
+            bool  c1Brk = not na(oppC1) and (trend == 1 ? close < oppC1 : close > oppC1)
+            oppDone  := (evType == 5 and oppDone) or c1Brk
+            setOn    := true
+            setSide  := -trend
+            setBody  := body
+            setDelta := barDelta
+            setBnd   := setSide == -1 ? (bndWick ? high : bTop) : (bndWick ? low : bBot)
+            setLB    := setSide == -1 ? bTop : bBot
+            setLW    := setSide == -1 ? high : low
+            setAtr   := atr
+            setBar   := bar_index
+            evType   := evType == 5 ? 6 : 1
+            if evType == 1 or na(stBody) or body > stBody
+                stBody  := body
+                stDelta := barDelta
+                stLB    := setLB
+                stLW    := setLW
+                stBar   := bar_index
+            if setSide == -1
+                f_add(beB, beO, beW, beI, beD, bTop, high)
+                lastBeB := body
+                lastBeO := bTop
+                lastBeW := high
+                lastBeI := bar_index
+            else
+                f_add(buB, buO, buW, buI, buD, bBot, low)
+                lastBuB := body
+                lastBuO := bBot
+                lastBuW := low
+                lastBuI := bar_index
+            color sc = setSide == -1 ? c_c1Be : c_c1Bu
+            if colC1
+                candleCol := sc
+            if i_bndLn
+                // a new boundary replaces the last one of its side
+                array<line> sideA = setSide == -1 ? bndBe : bndBu
+                while sideA.size() > 0
+                    line.delete(sideA.pop())
+                bndLn := line.new(bar_index, setBnd, bar_index + 1, setBnd, color=sc, width=1, style=line.style_dotted)
+            string tip = (evType == 6 ? "New C1: the last C1 was not beaten (body or delta too small).\n" : "") + "C1 body " + str.tostring(body, format.mintick) + (i_dOn and not na(barDelta) ? " · delta " + str.tostring(barDelta, "#") : "") + ".\nFlip needs a " + (setSide == -1 ? "bear" : "bull") + " body close with a body of " + str.tostring(body * i_c2pct / 100.0, format.mintick) + "+.\nBoundary " + str.tostring(setBnd, format.mintick) + ": no close " + (setSide == -1 ? "above" : "below") + " it."
+            string c1Txt = evType == 6 and not na(prevBody) ? f_sg(body - prevBody) + (not na(barDelta) and not na(prevDelta) ? "  Δ " + f_sgK((barDelta - prevDelta) * setSide) : "") : str.tostring(body, format.mintick)
+            f_lbl(i_lbl, setSide == -1 ? high : low, c1Txt, sc, setSide == -1, tip, setSide)
+        if not flipped
+            legMax := math.max(legMax, ov)
+    // ATR line level for this candle (points only when it changes)
+    if atOn and trend != 0
+        float lvNow = f_atLv()
+        if not na(lvNow)
+            if atPts.size() == 0
+                int ax = na(atX0) ? bar_index : atX0
+                atPts.push(chart.point.from_index(ax, lvNow))
+            else if lvNow != atLvP
+                f_pt(atPts, atLvP, lvNow)
+        atLvP := lvNow
+    else
+        atLvP := na
+    if isBuX
+        lastBuxO := open
+        lastBuxI := bar_index
+    if isBeX
+        lastBexO := open
+        lastBexI := bar_index
+    if na(candleCol) and i_nbc == "All" and isNbc
+        candleCol := c_nbc
+    if na(candleCol) and i_trendCol and trend != 0
+        candleCol := trend == 1 ? color.new(c_bull, 40) : color.new(c_bear, 40)
+
+barcolor(candleCol, title="Candles")
+
+// ─── Lines ───
+float tLine = tlOn ? tlLv : na
+float sLine = atOn ? atLvP : na
+if barstate.islast
+    polyline.delete(tlPl)
+    polyline.delete(atPl)
+    tlPl := na
+    atPl := na
+    if i_line and tlOn and trend != 0
+        bool tj = i_connect and f_alive(tlJId)
+        tlPl := f_draw(tlPts, bar_index + i_c1Ext, tlLv, trend == 1 ? c_bull : c_bear, i_lineW, tj ? tlJX : na, tj ? tlJLv : na)
+    if i_stop and atOn and trend != 0
+        bool aj = i_connect and f_alive(atJId)
+        atPl := f_draw(atPts, bar_index + i_c1Ext, atLvP, color.new(trend == 1 ? c_bull : c_bear, 45), i_stopW, aj ? atJX : na, aj ? atJLv : na)
+    // where newer lines join older ones: the older one stops there (no extension to price)
+    array<int> jI  = array.new<int>()
+    array<int> jXa = array.new<int>()
+    if i_connect
+        if tlOn and not na(tlJId)
+            jI.push(tlJId)
+            jXa.push(tlJX)
+        if atOn and not na(atJId)
+            jI.push(atJId)
+            jXa.push(atJX)
+        for o in olds
+            if not na(o.jId)
+                jI.push(o.jId)
+                jXa.push(o.jX)
+    // old trends' lines: extended to price, or up to where a newer line joins them
+    for o in olds
+        polyline.delete(o.pl)
+        int ji = jI.indexof(o.id)
+        int xE = ji >= 0 ? jXa.get(ji) : bar_index + i_c1Ext
+        color oc = o.side == 1 ? c_bull : c_bear
+        bool oj = i_connect and f_alive(o.jId)
+        o.pl := f_draw(o.pts, xE, o.lv, o.isAtr ? color.new(oc, 45) : oc, o.isAtr ? i_stopW : i_lineW, oj ? o.jX : na, oj ? o.jLv : na)
+
+// ─── Deleted lines ───
+plotshape(i_tests and evTlDel and trend == -1, "Bear Trend Line Deleted", style=shape.circle, location=location.abovebar, color=color.gray, size=size.tiny)
+plotshape(i_tests and evTlDel and trend == 1, "Bull Trend Line Deleted", style=shape.circle, location=location.belowbar, color=color.gray, size=size.tiny)
+plotshape(i_tests and evAtDel and trend == -1, "Bear ATR Line Deleted", style=shape.xcross, location=location.abovebar, color=c_bear, size=size.tiny)
+plotshape(i_tests and evAtDel and trend == 1, "Bull ATR Line Deleted", style=shape.xcross, location=location.belowbar, color=c_bull, size=size.tiny)
+alertcondition(evTlDel, "Trend Line Deleted (Close)", "A candle closed beyond the trend line: the line is deleted")
+alertcondition(evAtDel, "ATR Line Deleted (Close)", "A candle closed beyond the ATR line with no CDS / CDL yet: the line is deleted")
+
+// ─── C1 lines (levels closer than ATR x merge share one label) ───
+var array<line>  c1Ln = array.new<line>()
+var array<label> c1Lb = array.new<label>()
+
+f_big(array<float> bA) =>
+    int bi = -1
+    float bv = -1.0
+    if bA.size() > 0
+        for k = 0 to bA.size() - 1
+            if bA.get(k) > bv
+                bv := bA.get(k)
+                bi := k
+    bi
+
+if barstate.islast
+    while c1Ln.size() > 0
+        line.delete(c1Ln.pop())
+    while c1Lb.size() > 0
+        label.delete(c1Lb.pop())
+    string fm = format.mintick
+    array<float>  eP = array.new<float>()
+    array<string> eT = array.new<string>()
+    array<color>  eC = array.new<color>()
+    array<int>    eW = array.new<int>()
+    array<string> eS = array.new<string>()
+    array<int>    eX = array.new<int>()
+    int kb = i_bigOn ? f_big(beB) : -1
+    int ku = i_bigOn ? f_big(buB) : -1
+    bool sameBe = kb >= 0 and beI.get(kb) == lastBeI
+    bool sameBu = ku >= 0 and buI.get(ku) == lastBuI
+    if kb >= 0
+        eP.push(c1Open ? beO.get(kb) : beW.get(kb))
+        eT.push((sameBe and i_lastOn ? "BIG & LAST" : "BIG") + " Be " + str.tostring(beB.get(kb), fm))
+        eC.push(c_c1Be)
+        eW.push(i_bigW)
+        eS.push(line.style_solid)
+        eX.push(beI.get(kb))
+    if ku >= 0
+        eP.push(c1Open ? buO.get(ku) : buW.get(ku))
+        eT.push((sameBu and i_lastOn ? "BIG & LAST" : "BIG") + " Bu " + str.tostring(buB.get(ku), fm))
+        eC.push(c_c1Bu)
+        eW.push(i_bigW)
+        eS.push(line.style_solid)
+        eX.push(buI.get(ku))
+    if i_lastOn and not na(lastBeI) and not sameBe
+        eP.push(c1Open ? lastBeO : lastBeW)
+        eT.push("LAST Be " + str.tostring(lastBeB, fm))
+        eC.push(c_c1Be)
+        eW.push(i_lastW)
+        eS.push(line.style_dashed)
+        eX.push(lastBeI)
+    if i_lastOn and not na(lastBuI) and not sameBu
+        eP.push(c1Open ? lastBuO : lastBuW)
+        eT.push("LAST Bu " + str.tostring(lastBuB, fm))
+        eC.push(c_c1Bu)
+        eW.push(i_lastW)
+        eS.push(line.style_dashed)
+        eX.push(lastBuI)
+    // which PO4 lines are drawn: the last one, the last of each side, or all. Hidden ones still work.
+    int nPo = mkPoPx.size()
+    int lastBu = -1
+    int lastBe = -1
+    if nPo > 0
+        for k = 0 to nPo - 1
+            if mkSd.get(k) == 1
+                lastBu := k
+            else
+                lastBe := k
+    // the trend of the oldest trend line still on the chart, per side (start of the joined chain)
+    int oldBuTr = na
+    int oldBeTr = na
+    for o in olds
+        if not o.isAtr
+            if o.side == 1 and na(oldBuTr)
+                oldBuTr := o.trId
+            if o.side == -1 and na(oldBeTr)
+                oldBeTr := o.trId
+    if tlOn and trend == 1 and na(oldBuTr)
+        oldBuTr := curTr
+    if tlOn and trend == -1 and na(oldBeTr)
+        oldBeTr := curTr
+    if nPo > 0
+        for k = 0 to nPo - 1
+            bool showK = i_po4Show == "All" or (i_po4Show == "Last Only" ? k == nPo - 1 : (k == lastBu or k == lastBe or (i_po4Show == "Chain Ends" and (mkTr.get(k) == oldBuTr or mkTr.get(k) == oldBeTr))))
+            color kc = mkSd.get(k) == 1 ? c_bull : c_bear
+            if not na(mkLn.get(k))
+                line.set_color(mkLn.get(k), showK ? kc : color.new(kc, 100))
+            if not na(mkLb.get(k))
+                label.set_textcolor(mkLb.get(k), showK ? kc : color.new(kc, 100))
+    if i_po4 and nPo > 0
+        for k = 0 to nPo - 1
+            if not (i_po4Show == "All" or (i_po4Show == "Last Only" ? k == nPo - 1 : (k == lastBu or k == lastBe or (i_po4Show == "Chain Ends" and (mkTr.get(k) == oldBuTr or mkTr.get(k) == oldBeTr)))))
+                continue
+            eP.push(mkPoPx.get(k))
+            eT.push(mkPoTxt.get(k))
+            eC.push(mkSd.get(k) == 1 ? c_bull : c_bear)
+            eW.push(i_po4W)
+            eS.push(line.style_solid)
+            eX.push(mkPoBar.get(k))
+    int x2 = bar_index + i_c1Ext
+    float tol = na(atr) ? 0.0 : atr * i_merge
+    // every line is drawn; the labels of levels closer than tol are fused (stacked) into one, at the average level
+    int n = eP.size()
+    if n > 0
+        for k = 0 to n - 1
+            c1Ln.push(line.new(f_x(eX.get(k)), eP.get(k), x2, eP.get(k), color=eC.get(k), width=eW.get(k), style=eS.get(k)))
+        if i_c1Txt
+            array<int> ord = eP.sort_indices(order.descending)
+            int   g0  = 0
+            while g0 < n
+                int    g1  = g0
+                float  top = eP.get(ord.get(g0))
+                string txt = eT.get(ord.get(g0))
+                float  sum = top
+                while g1 + 1 < n and top - eP.get(ord.get(g1 + 1)) <= tol
+                    g1  += 1
+                    txt := txt + "\n" + eT.get(ord.get(g1))
+                    sum += eP.get(ord.get(g1))
+                bool mixed = false
+                for j = g0 to g1
+                    if eC.get(ord.get(j)) != eC.get(ord.get(g0))
+                        mixed := true
+                color gc = mixed ? color.silver : eC.get(ord.get(g0))
+                c1Lb.push(label.new(x2, sum / (g1 - g0 + 1), txt, style=label.style_label_left, color=color.new(gc, 100), textcolor=gc, size=lblSz))
+                g0 := g1 + 1
+
+// ─── Tables ───
+var array<float> KS = array.from(0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
+var table tb = table.new(f_pos(i_tblPos), 3, 14, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.new(color.white, 80))
+if barstate.islast and (i_badge or i_calib)
+    table.clear(tb, 0, 0, 2, 13)
+    int r = 0
+    if i_badge
+        color tc = trend == 1 ? c_bull : trend == -1 ? c_bear : color.gray
+        table.cell(tb, 0, r, "TREND", text_color=color.white, text_size=tblSz, text_halign=text.align_left)
+        table.cell(tb, 1, r, trend == 1 ? "BULL" : trend == -1 ? "BEAR" : "WAITING", text_color=tc, text_size=tblSz, text_halign=text.align_left)
+        table.cell(tb, 2, r, na(tLine) ? "" : "line " + str.tostring(tLine, format.mintick) + (na(sLine) ? "" : " · stop " + str.tostring(sLine, format.mintick)), text_color=tc, text_size=tblSz, text_halign=text.align_left)
+        r += 1
+        string st = setOn ? ((setSide == -1 ? "bear" : "bull") + " C1 live · C2 needs body " + str.tostring(setBody * i_c2pct / 100.0, format.mintick) + "+" + (i_dOn and not na(setDelta) ? " · delta " + str.tostring(math.abs(setDelta) * i_dPct / 100.0, "#") + "+" : "")) : "no setup"
+        table.cell(tb, 0, r, "SETUP", text_color=color.white, text_size=tblSz, text_halign=text.align_left)
+        table.cell(tb, 1, r, st, text_color=setOn ? (setSide == -1 ? c_c1Be : c_c1Bu) : color.gray, text_size=tblSz, text_halign=text.align_left)
+        table.cell(tb, 2, r, setOn ? "no close " + (setSide == -1 ? "above " : "below ") + str.tostring(setBnd, format.mintick) : "", text_color=color.gray, text_size=tblSz, text_halign=text.align_left)
+        r += 1
+    if i_calib
+        int n = legRec.size()
+        table.cell(tb, 0, r, "ATR ROOM", text_color=color.white, text_size=tblSz, text_halign=text.align_left)
+        table.cell(tb, 1, r, "EARLY STOP %", text_color=color.white, text_size=tblSz, text_halign=text.align_left)
+        table.cell(tb, 2, r, str.tostring(n) + " trends · " + i_stopBase + " base", text_color=color.gray, text_size=tblSz, text_halign=text.align_left)
+        r += 1
+        for k in KS
+            int hit = 0
+            if n > 0
+                for v in legRec
+                    if v >= k and v > 0
+                        hit += 1
+            float pc  = n > 0 ? hit * 100.0 / n : na
+            bool  cur = math.abs(k - i_atrMult) < 0.001
+            color kc  = na(pc) ? color.gray : pc <= 20 ? c_bull : pc <= 40 ? color.orange : c_bear
+            table.cell(tb, 0, r, "x " + str.tostring(k, "#.##") + (cur ? "  ◀" : ""), text_color=cur ? color.yellow : color.white, text_size=tblSz, text_halign=text.align_left)
+            table.cell(tb, 1, r, na(pc) ? "-" : str.tostring(pc, "#") + "%", text_color=kc, text_size=tblSz, text_halign=text.align_left)
+            table.cell(tb, 2, r, na(pc) ? "" : str.tostring(hit) + " of " + str.tostring(n), text_color=color.gray, text_size=tblSz, text_halign=text.align_left)
+            r += 1
+        float med = n > 0 ? legRec.median() : na
+        table.cell(tb, 0, r, "MEDIAN", text_color=color.white, text_size=tblSz, text_halign=text.align_left)
+        table.cell(tb, 1, r, na(med) ? "-" : "x " + str.tostring(med, "#.##"), text_color=color.white, text_size=tblSz, text_halign=text.align_left)
+        table.cell(tb, 2, r, "half the trends stayed inside this", text_color=color.gray, text_size=tblSz, text_halign=text.align_left)
+
+// ─── Alerts ───
+alertcondition((evType == 1 or evType == 6) and setSide == -1, "C1 Bear (Bull Trend)", "Bull trend: a C1 bear body close started a setup")
+alertcondition((evType == 1 or evType == 6) and setSide == 1, "C1 Bull (Bear Trend)", "Bear trend: a C1 bull body close started a setup")
+alertcondition(evCds, "CDS - Now Bearish", "C2 confirmed: CDS, the trend is bearish. C1 = BePO4 protected line")
+alertcondition(evCdl, "CDL - Now Bullish", "C2 confirmed: CDL, the trend is bullish. C1 = BuPO4 protected line")
+alertcondition(evType == 3, "Setup Cancelled", "A close beyond the boundary: the other side failed, the trend stays")
+alertcondition(evTlTch, "Trend Line Touched (Moved To The Wick)", "A wick went beyond the trend line and closed back inside: the line moved to that wick")
+alertcondition(evAtTch, "ATR Line Touched (Moved To The Wick)", "A wick went beyond the ATR line and closed back inside: the line moved to that wick")

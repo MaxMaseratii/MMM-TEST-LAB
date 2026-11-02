@@ -1,0 +1,2968 @@
+//@version=6
+indicator("MMM Perfect Entry: Fair Value Area Break @MaxMaserati 3.0", "Fair Value Area Break @MaxMaserati 3.0", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════════════
+// CRASH PREVENTION
+// ═══════════════════════════════════════════════════════════════════════
+max_bars_back(time,   5000)
+max_bars_back(high,   5000)
+max_bars_back(low,    5000)
+max_bars_back(close,  5000)
+max_bars_back(open,   5000)
+max_bars_back(volume, 5000)
+
+var int VP_MAX_LOOKBACK = 200
+
+// ═══════════════════════════════════════════════════════════════════════
+// ESSENTIAL GLOBAL CONTROLS
+// ═══════════════════════════════════════════════════════════════════════
+group_global   = "⚡ Global Performance & Spacing"
+use_hist_limit = input.bool(true, "Limit Historical Bars (Faster Load)", group=group_global)
+max_bars_back  = input.int(500, "Max History Bars", minval=100, maxval=20000, group=group_global)
+offsetGap      = input.int(2, "Offset Gap (Bars)", minval=0, maxval=20, group=group_global, tooltip="Horizontally offsets labels and signals to prevent overlap with candle bodies.")
+
+in_calc_range  = not use_hist_limit or (last_bar_index - bar_index <= max_bars_back)
+
+// ═══════════════════════════════════════════════════════════════════════
+// MMPD ENGINE (inline)
+// ═══════════════════════════════════════════════════════════════════════
+f_xsa(float src, int len, float wei) =>
+    var float _sum = 0.0
+    var float _ma  = na
+    var float _out = na
+    _sum := nz(_sum[1]) - nz(src[len]) + src
+    _ma  := na(src[len]) ? na : _sum / len
+    _out := na(_out[1]) ? _ma : (src * wei + _out[1] * (len - wei)) / len
+    _out
+
+f_poc_trend(float[] hist) =>
+    int sz = hist.size()
+    string t = "neutral"
+    if sz >= 3
+        float first  = hist.get(0)
+        float last_v = hist.get(sz - 1)
+        float diff   = last_v - first
+        if first != 0 and math.abs(diff / (first == 0 ? 1e-9 : first) * 100) > 0.03
+            t := diff > 0 ? "up" : "down"
+    t
+
+f_delta_strong(float bd, bool is_bull) =>
+    if not na(bd)
+        is_bull ? bd > 0 : bd < 0
+    else
+        float body = math.abs(close - open)
+        float rng  = math.max(high - low, syminfo.mintick)
+        body / rng > 0.6
+
+// ═══════════════════════════════════════════════════════════════════════
+// SMART "A&B" OVERLAP HANDLING ENGINE
+// ═══════════════════════════════════════════════════════════════════════
+type RenderGroup
+    float         price
+    array<string> labels
+    color         ln_col
+    int           ln_width
+    string        ln_style
+    int           b_time
+    int           e_time
+    int           priority
+    bool          draw_dot
+    color         dot_col
+    string        dot_sz
+    string        lbl_pos
+
+var array<RenderGroup> render_groups = array.new<RenderGroup>()
+var array<line>        drawn_lines   = array.new<line>()
+var array<label>       drawn_labels  = array.new<label>()
+var array<label>       drawn_dots    = array.new<label>()
+
+f_sz(string s) =>
+    s == "Huge" or s == "Extra Large" ? size.huge : s == "Large" ? size.large : s == "Normal" ? size.normal : s == "Tiny" ? size.tiny : size.small
+
+var int bar_time_diff = timeframe.in_seconds() * 1000
+f_future_time(int ext) =>
+    int diff = time - nz(time[1], time)
+    if diff <= 0
+        diff := bar_time_diff
+    if diff <= 0
+        diff := 60000
+    time + math.round(diff * ext)
+
+f_add_level(float p_price, string p_text, color p_col, int p_width, string p_style, int p_start_t, int p_end_t, int p_prio, bool p_draw_dot, color p_dot_col, string p_dot_sz, string p_lbl_pos) =>
+    bool found = false
+    float eps = math.max(syminfo.mintick * 0.51, 1e-5) 
+    int safe_start = nz(p_start_t, time)
+    int safe_end   = nz(p_end_t, time)
+    int final_b    = math.min(safe_start, safe_end)
+    int final_e    = math.max(safe_start, safe_end)
+
+    if render_groups.size() > 0
+        for grp in render_groups
+            if math.abs(grp.price - p_price) <= eps
+                found := true
+                if str.length(p_text) > 0 and array.indexof(grp.labels, p_text) == -1
+                    grp.labels.push(p_text)
+                grp.b_time := math.min(grp.b_time, final_b)
+                grp.e_time := math.max(grp.e_time, final_e)
+                if p_prio > grp.priority
+                    grp.ln_col   := p_col
+                    grp.ln_width := p_width
+                    grp.ln_style := p_style
+                    grp.priority := p_prio
+                    grp.lbl_pos  := p_lbl_pos
+                break
+                
+    if not found
+        array<string> new_labels = array.new<string>()
+        if str.length(p_text) > 0
+            new_labels.push(p_text)
+        render_groups.push(RenderGroup.new(
+            price    = p_price, 
+            labels   = new_labels, 
+            ln_col   = p_col, 
+            ln_width = p_width, 
+            ln_style = p_style, 
+            b_time   = final_b, 
+            e_time   = final_e, 
+            priority = p_prio, 
+            draw_dot = p_draw_dot, 
+            dot_col  = p_dot_col, 
+            dot_sz   = p_dot_sz, 
+            lbl_pos  = p_lbl_pos
+        ))
+
+f_draw_groups() =>
+    if drawn_lines.size() > 0
+        for ln in drawn_lines
+            line.delete(ln)
+        drawn_lines.clear()
+    if drawn_labels.size() > 0
+        for lb in drawn_labels
+            label.delete(lb)
+        drawn_labels.clear()
+
+    if render_groups.size() > 0
+        for grp in render_groups
+            string combined_txt = array.join(grp.labels, " & ")
+            drawn_lines.push(line.new(grp.b_time, grp.price, grp.e_time, grp.price, xloc=xloc.bar_time, color=grp.ln_col, width=grp.ln_width, style=grp.ln_style))
+            int lbl_x = grp.e_time
+            string lbl_style_val = label.style_label_left
+            if grp.lbl_pos == "down"
+                lbl_x := math.round(math.avg(grp.b_time, grp.e_time))
+                lbl_style_val := label.style_label_down
+            else if grp.lbl_pos == "up"
+                lbl_x := math.round(math.avg(grp.b_time, grp.e_time))
+                lbl_style_val := label.style_label_up
+                
+            drawn_labels.push(label.new(lbl_x, grp.price, combined_txt, xloc=xloc.bar_time, textcolor=grp.ln_col, color=color(na), style=lbl_style_val, size=size.small))
+    render_groups.clear()
+
+// ═══════════════════════════════════════════════════════════════════════
+// DATA STRUCTURES
+// ═══════════════════════════════════════════════════════════════════════
+type EntrySignal
+    string  entryText
+    string  direction
+    bool    isLong
+    float   entryPrice
+    float   stopLoss
+    float   takeProfit
+    int     entryTime
+    int     timestamp
+    bool    active
+    bool    activated
+    line    entryLine
+    line    slLine
+    line    tpLine
+    label   entryLabel
+    label   slLabel
+    label   tpLabel
+    bool    exitTriggered
+    int     creationBar
+    int     tradeId
+    string  candleType
+    bool    targetHit
+    bool    stopHit
+    string  outcome
+    float   actualRR
+    float   profitLoss
+    float   actualRiskDollars
+    int     exitBar
+    float   exitPrice
+    bool    hasVisuals
+    int     positionSize
+    bool    forceExit
+    string  forceExitReason
+
+type ZoneLines
+    line         vahLine
+    line         valLine
+    array<line>  allBinLines
+    array<int>   allBinWids
+    label        pocLabel
+    int          creationBar
+
+type BullStructure
+    box          cb
+    box          cb_half
+    line         cb_mid
+    line         cb_high_base
+    line         cb_low_base
+    line         cb_high_ext
+    line         cb_low_ext
+    bool         high_ext_touched
+    bool         low_ext_touched
+    line         bb_line
+    label        bb_lbl
+    line         sl
+    label        sl_lbl
+    float        nbc_high
+    float        nbc_low
+    int          break_bar
+    int          origin_bar
+    float        swing_price
+    bool         cb_violated
+    ZoneLines    vp
+    array<label> lqg_labels
+    float        break_candle_high
+    float        break_candle_low
+    float        cb_poc_price
+    float        cb_mid_val
+    bool         poc_touched
+    bool         poc_entry_taken
+    bool         block_touched
+    bool         block_entry_taken
+    bool         vis_ok
+    float        fva_top
+    float        fva_bot
+    bool         fva_filled
+    bool         sl_violated
+    box          poc_box
+    label        poc_lbl
+    bool         poc_deleted
+    bool         is_significant
+    int          sig_state
+    int          grey_phase
+    bool         has_swing_line
+    bool         is_nested
+
+type BearStructure
+    box          cb
+    box          cb_half
+    line         cb_mid
+    line         cb_high_base
+    line         cb_low_base
+    line         cb_high_ext
+    line         cb_low_ext
+    bool         high_ext_touched
+    bool         low_ext_touched
+    line         bb_line
+    label        bb_lbl
+    line         sh
+    label        sh_lbl
+    float        nbc_high
+    float        nbc_low
+    int          break_bar
+    int          origin_bar
+    float        swing_price
+    bool         cb_violated
+    ZoneLines    vp
+    array<label> lqg_labels
+    float        break_candle_high
+    float        break_candle_low
+    float        cb_poc_price
+    float        cb_mid_val
+    bool         poc_touched
+    bool         poc_entry_taken
+    bool         block_touched
+    bool         block_entry_taken
+    bool         vis_ok
+    float        fva_top
+    float        fva_bot
+    bool         fva_filled
+    bool         sl_violated
+    box          poc_box
+    label        poc_lbl
+    bool         poc_deleted
+    bool         is_significant
+    int          sig_state
+    int          grey_phase
+    bool         has_swing_line
+    bool         is_nested
+
+type PEBox
+    box       bx
+    label     lbl
+    line      bb_line
+    label     bb_lbl
+    box       poc_box
+    label     poc_lbl
+    float     del_level
+    bool      is_bull
+    bool      is_violated
+    ZoneLines vp
+    float     box_top
+    float     box_bot
+    float     poc_price_val
+    bool      poc_touched
+    bool      poc_entry_taken
+    bool      block_touched
+    bool      block_entry_taken
+    bool      vis_ok
+    float     fva_top
+    float     fva_bot
+    bool      fva_filled
+    bool      sl_violated
+    int       creation_bar
+    bool      poc_deleted
+    bool      is_significant
+    int       sig_state
+    int       grey_phase
+    bool      has_swing_line
+    bool      is_nested
+
+// ═══════════════════════════════════════════════════════════════════════
+// DELETE HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+deleteTradeVisuals(EntrySignal t) =>
+    if not na(t)
+        line.delete(t.entryLine)
+        line.delete(t.slLine)
+        line.delete(t.tpLine)
+        label.delete(t.entryLabel)
+        label.delete(t.slLabel)
+        label.delete(t.tpLabel)
+
+deleteZoneLines(ZoneLines zl) =>
+    if not na(zl.vahLine)
+        line.delete(zl.vahLine)
+    if not na(zl.valLine)
+        line.delete(zl.valLine)
+    if not na(zl.pocLabel)
+        label.delete(zl.pocLabel)
+    if zl.allBinLines.size() > 0
+        for _bi = 0 to zl.allBinLines.size() - 1
+            if not na(zl.allBinLines.get(_bi))
+                line.delete(zl.allBinLines.get(_bi))
+
+deleteBullVisuals(BullStructure bs) =>
+    if not na(bs.cb)
+        box.delete(bs.cb)
+    if not na(bs.cb_half)
+        box.delete(bs.cb_half)
+    if not na(bs.cb_mid)
+        line.delete(bs.cb_mid)
+    if not na(bs.cb_high_base)
+        line.delete(bs.cb_high_base)
+    if not na(bs.cb_low_base)
+        line.delete(bs.cb_low_base)
+    if not na(bs.cb_high_ext)
+        line.delete(bs.cb_high_ext)
+    if not na(bs.cb_low_ext)
+        line.delete(bs.cb_low_ext)
+    if not na(bs.bb_line)
+        line.delete(bs.bb_line)
+    if not na(bs.bb_lbl)
+        label.delete(bs.bb_lbl)
+    if not na(bs.sl)
+        line.delete(bs.sl)
+    if not na(bs.sl_lbl)
+        label.delete(bs.sl_lbl)
+    if not na(bs.poc_box)
+        box.delete(bs.poc_box)
+    if not na(bs.poc_lbl)
+        label.delete(bs.poc_lbl)
+    if bs.lqg_labels.size() > 0
+        for lbl in bs.lqg_labels
+            label.delete(lbl)
+    if not na(bs.vp)
+        deleteZoneLines(bs.vp)
+
+deleteBearVisuals(BearStructure bs) =>
+    if not na(bs.cb)
+        box.delete(bs.cb)
+    if not na(bs.cb_half)
+        box.delete(bs.cb_half)
+    if not na(bs.cb_mid)
+        line.delete(bs.cb_mid)
+    if not na(bs.cb_high_base)
+        line.delete(bs.cb_high_base)
+    if not na(bs.cb_low_base)
+        line.delete(bs.cb_low_base)
+    if not na(bs.cb_high_ext)
+        line.delete(bs.cb_high_ext)
+    if not na(bs.cb_low_ext)
+        line.delete(bs.cb_low_ext)
+    if not na(bs.bb_line)
+        line.delete(bs.bb_line)
+    if not na(bs.bb_lbl)
+        label.delete(bs.bb_lbl)
+    if not na(bs.sh)
+        line.delete(bs.sh)
+    if not na(bs.sh_lbl)
+        label.delete(bs.sh_lbl)
+    if not na(bs.poc_box)
+        box.delete(bs.poc_box)
+    if not na(bs.poc_lbl)
+        label.delete(bs.poc_lbl)
+    if bs.lqg_labels.size() > 0
+        for lbl in bs.lqg_labels
+            label.delete(lbl)
+    if not na(bs.vp)
+        deleteZoneLines(bs.vp)
+
+emptyZL() =>
+    ZoneLines.new(na, na, array.new<line>(), array.new<int>(), na, bar_index)
+
+// ═══════════════════════════════════════════════════════════════════════
+// INPUT CONTROLS
+// ═══════════════════════════════════════════════════════════════════════
+grp_colors     = '🎨 CANDLE COLORS & HIGHLIGHTS'
+show_bux       = input.bool(true,  "BuX",  inline="r1c", group=grp_colors, tooltip="Bullish Expansion: Candle closing above previous high.")
+col_bux        = input.color(#27ffc3, "",   inline="r1c", group=grp_colors)
+show_bex       = input.bool(true,  "BeX",  inline="r1c", group=grp_colors, tooltip="Bearish Expansion: Candle closing below previous low.")
+col_bex        = input.color(#9c27b0, "",   inline="r1c", group=grp_colors)
+show_nbc_box   = input.bool(true,  "Show Active Forming NBC Box", group=grp_colors, tooltip="Neutral Break Candle: State of balance/contraction where no break has occurred.")
+col_nbc        = input.color(color.new(color.white, 0), "", inline="r1c", group=grp_colors)
+wait_for_close = input.bool(true, "Wait for Candle Close to Plot", group=grp_colors, tooltip="Recommended for non-polluted data. Prevents repainting of structure boxes.")
+showBodyCloseColoring = true
+
+group_ax = '✨ ACCELERATOR CANDLES'
+showAcceleratorColors = input.bool(true, "Highlight High-Momentum Candles", inline='ax1', group=group_ax, tooltip="Highlights candles with exceptional institutional displacement.")
+axBullishColor = input.color(#006400, "Bullish", inline='ax1', group=group_ax)
+axBearishColor = input.color(#8b0000, "Bearish", inline='ax1', group=group_ax)
+
+group_filter = '🌊 MMM TREND LINE FILTER'
+useTrendFilter = input.bool(false, "Require Close Above/Below Trend Line", group=group_filter, tooltip="Only allows Longs to trigger if the entry candle closes ABOVE the MMM Trend Line, and Shorts if it closes BELOW.")
+trendTF        = input.timeframe("", "MMM Trend Line TF", group=group_filter, tooltip="The timeframe used for the institutional 'line in the sand'.")
+showTrendLine  = input.bool(false, "Show MMM Trend Line", inline='tl', group=group_filter)
+trendLineColor = input.color(color.rgb(173,216,230, 40), "", inline='tl', group=group_filter)
+trendLineWidth = input.int(2, "Width", minval=1, maxval=10, inline='tl_style', group=group_filter)
+trendLineStyle = input.string("Solid", "Style", options=["Solid", "Dotted", "Dashed"], inline='tl_style', group=group_filter)
+
+var int vp_bins      = 20
+var int vp_max_width = 5
+bool    vp_bull_bear = true
+
+grp_range      = "🏗️ MARKET STRUCTURE & TARGETS"
+show_tgt_lines = input.bool(true, "Buyers & Sellers TGT", inline="r3", group=grp_range, tooltip="Liquidity objective lines based on the expansion move.")
+col_tgt_bull   = input.color(#09a579, "Buyers", inline="r3", group=grp_range)
+col_tgt_bear   = input.color(#e91e63, "Sellers", inline="r3", group=grp_range)
+tgt_line_width = input.int(1, "W", minval=1, maxval=10, inline="r3_style", group=grp_range)
+tgt_line_style = input.string("Dashed", "Style", options=["Solid","Dotted","Dashed"], inline="r3_style", group=grp_range)
+line_ext       = input.int(15, "Extension", minval=1, inline="r5", group=grp_range)
+lbl_size_lines = input.string("Small", "TGT Font Size", options=["Tiny","Small","Normal","Large","Extra Large","Huge"], inline="r5", group=grp_range)
+max_swings     = input.int(100, "Max Visuals Limit", minval=1, inline="r7", group=grp_range, tooltip="Controls the maximum number of structural objects kept on the chart. Default is 100.")
+width_swing    = input.int(1, "Swing Line Width", minval=1, maxval=10, inline="r7", group=grp_range)
+lbl_size_swing = input.string("Small", "Swing Label Size", options=["Tiny","Small","Normal","Large","Extra Large","Huge"], inline="r6", group=grp_range)
+
+// INDEPENDENT VISUAL TOGGLES & CUSTOM COLORS/WIDTHS
+grp_vis_cdl = "👁️ CDL / CDS VISUALS"
+show_cdl_box     = input.bool(true, "Show CDL/CDS Box", group=grp_vis_cdl)
+show_cdl_line    = input.bool(true, "Show CDL/CDS Break Line", group=grp_vis_cdl)
+show_cdl_lbl     = input.bool(true, "Show CDL/CDS Break Label", group=grp_vis_cdl)
+show_cdl_sl_line = input.bool(true, "Show CDL SL / CDS SH Line", group=grp_vis_cdl)
+show_cdl_sl_lbl  = input.bool(true, "Show CDL SL / CDS SH Label", group=grp_vis_cdl)
+col_cdl_solid    = input.color(#09a579, "Bullish Line/Label Color", group=grp_vis_cdl)
+col_cds_solid    = input.color(#e91e63, "Bearish Line/Label Color", group=grp_vis_cdl)
+cdl_line_width   = input.int(1, "Break Line Width", minval=1, maxval=10, group=grp_vis_cdl)
+
+grp_vis_plus = "👁️ CDL+ / CDS+ (PEL/PES) VISUALS"
+show_plus_box     = input.bool(true, "Show CDL+/CDS+ Box", group=grp_vis_plus)
+show_plus_line    = input.bool(true, "Show CDL+/CDS+ Break Line", group=grp_vis_plus)
+show_plus_lbl     = input.bool(true, "Show CDL+/CDS+ Break Label", group=grp_vis_plus)
+show_plus_sl_line = input.bool(true, "Show CDL SL+ / CDS SH+ Line", group=grp_vis_plus)
+show_plus_sl_lbl  = input.bool(true, "Show CDL SL+ / CDS SH+ Label", group=grp_vis_plus)
+
+grp_vis_ld = "👁️ LD / SD VISUALS"
+show_ld_box     = input.bool(false, "Show LD/SD Box", group=grp_vis_ld)
+show_ld_line    = input.bool(false, "Show LD/SD Break Line", group=grp_vis_ld)
+show_ld_lbl     = input.bool(false, "Show LD/SD Break Label", group=grp_vis_ld)
+show_sh_sl_line = input.bool(false, "Show SH / SL Line", group=grp_vis_ld)
+show_sh_sl_lbl  = input.bool(false, "Show SH / SL Label", group=grp_vis_ld)
+
+grp_nbc           = "MMM Fair Value Area (FVA)"
+col_cb_bull       = input.color(color.new(color.green, 85), "Bullish FVA", inline="r9",  group=grp_nbc, tooltip="Fair Value Area (FVA) is a balance area where buyers and sellers agreed to do business. Price historically returns to these levels to reject or consolidate again.")
+col_cb_bear       = input.color(color.new(color.red,   85), "Bearish FVA", inline="r10", group=grp_nbc)
+extend_filled_fva = input.bool(true, "Extend Filled FVA Boxes Until Deleted", inline="r11", group=grp_nbc)
+
+show_mid_line     = input.bool(true, "Show FVA Mid Line", inline="mid1", group=grp_nbc, tooltip="Controls the dotted midpoint line drawn through the center of each Fair Value Area block.")
+mid_line_color    = input.color(color.new(color.white, 30), "", inline="mid1", group=grp_nbc)
+mid_line_width    = input.int(1, "Mid Line Width", minval=1, maxval=10, inline="mid2", group=grp_nbc)
+mid_line_style    = input.string("Dotted", "Mid Line Style", options=["Solid","Dotted","Dashed"], inline="mid2", group=grp_nbc)
+
+show_rej_border     = input.bool(true,  "Highlight FVA Rejection (Grey Phase)", group=grp_nbc, tooltip="When price touches and rejects off an existing grey FVA box, it highlights the box border Green or Red.")
+rej_border_width    = input.int(1, "Rejection Border Width", minval=1, maxval=10, group=grp_nbc)
+
+show_nested_border  = input.bool(false, "Highlight Nested Consolidation", group=grp_nbc, tooltip="When a new NBC forms completely inside an older FVA, the older FVA's border is highlighted to show nested accumulation.")
+nested_border_width = input.int(2, "Nested Border Width", minval=1, maxval=10, group=grp_nbc)
+show_nested_bg      = input.bool(true, "Show Nested FVA Background", group=grp_nbc, tooltip="Keeps the background visible when Nested Consolidation borders are disabled.")
+
+grp_pe          = "MMM Perfect Entry Zone"
+show_pe_boxes  = input.bool(true,  "PES / PEL+ Boxes",  inline="r11", group=grp_pe, tooltip="Visual boxes highlighting the entry zones (PEL=Long, PES=Short).")
+show_pe_labels = input.bool(false, "PEL+/PES+ Labels",  inline="r11", group=grp_pe)
+lbl_size_pe    = input.string("Small", "Size", options=["Tiny","Small","Normal","Large","Extra Large","Huge"], inline="r11", group=grp_pe, tooltip="Controls the font size of all PES, CDS, PEL+, PEL, and CDL+ labels on candles and boxes.")
+show_pes_poc   = input.bool(true,  "PES+", inline="r12", group=grp_pe)
+col_cds_box    = input.color(color.new(#e91e63, 88), "", inline="r12", group=grp_pe)
+show_pel_poc   = input.bool(true,  "PEL+", inline="r12", group=grp_pe)
+col_cdl_box    = input.color(color.new(#09a579, 88), "", inline="r12", group=grp_pe)
+show_nbc_pel   = input.bool(true,  "PEL",  inline="r13", group=grp_pe)
+col_nbc_pel    = input.color(color.new(#00c853, 0), "", inline="r13", group=grp_pe)
+show_nbc_pes   = input.bool(true,  "PES",  inline="r13", group=grp_pe)
+col_nbc_pes    = input.color(color.new(#f44336, 0), "", inline="r13", group=grp_pe)
+show_hbuv      = input.bool(false, "BuFVA Volume Profile", inline="r14", group=grp_pe)
+vp_bull_color  = input.color(#00c853, "",   inline="r14", group=grp_pe)
+show_hbev      = input.bool(false, "BeFVA Volume Profile", inline="r14", group=grp_pe)
+vp_bear_color  = input.color(#f44336, "",   inline="r14", group=grp_pe)
+
+grp_lqg            = "💧 LQG Labels"
+show_lqg           = input.bool(false,  "Show LQG Labels", inline="lqg1", group=grp_lqg, tooltip="Liquidity Gap labels showing institutional sweeps.")
+lqg_size           = input.string("Small", "Size", options=["Tiny","Small","Normal","Large","Extra Large","Huge"], inline="lqg1", group=grp_lqg)
+lqg_bg_on          = input.bool(false, "Label Background", inline="lqg2", group=grp_lqg)
+lqg_break_arrow    = input.bool(false, "Arrow Only for LQG Break", inline="lqg2", group=grp_lqg)
+lqg_bull_color     = input.color(#00c853, "Bull Color", inline="lqg3", group=grp_lqg)
+lqg_bear_color     = input.color(#f44336, "Bear Color", inline="lqg3", group=grp_lqg)
+
+grp_fp        = "Order Flow / Footprint"
+use_footprint = input.bool(true, "Use Delta Footprint", group=grp_fp, tooltip="Requires an exchange and TradingView plan that provides intraday tick data.")
+fp_ticks      = input.int(100, "Ticks per Row", minval=1, group=grp_fp)
+fp_va         = input.int(70,  "Value Area %",  minval=1, maxval=100, group=grp_fp)
+
+// ── MMPD FILTER ─────────────────────────────────────────────────────
+grp_mmpd = "🎯 MMPD Context Filter"
+zone_aligned_vis     = input.bool(false, "Show Only Zone-Aligned Setups", group=grp_mmpd, tooltip="Hides setups that do not logically align with the MMPD Premium/Discount bias. Only permits Longs in Discount and Shorts in Premium.")
+
+// ── Entry Type Toggles ──────────────────────────────────────────────
+grp_entry_types    = "🎯 Standard Entry Selection"
+usePesPelPoc       = input.bool(true, "① PES/PEL Touch", group=grp_entry_types, tooltip="Limit entry directly at the Point of Control (highest volume price) of the originating FVA block.")
+epPesPelPoc        = input.string("Touch", "    Mode", options=["Touch","Touch + BuX/BeX"], group=grp_entry_types)
+usePesPelPlusPoc   = input.bool(true, "② PES/PEL+ Touch", group=grp_entry_types, tooltip="High-conviction limit entry at the POC specifically following a major trend flip.")
+epPesPelPlusPoc    = input.string("Touch", "    Mode", options=["Touch","Touch + BuX/BeX"], group=grp_entry_types)
+useCdlCdsBlock     = input.bool(true, "③ CDL/CDS Touch", group=grp_entry_types, tooltip="Limit entry directly at the structural boundary (midpoint) of the originating FVA block.")
+epCdlCdsBlock      = input.string("Touch", "    Mode", options=["Touch","Touch + BuX/BeX"], group=grp_entry_types)
+useCdlCdsPlusBlock = input.bool(true, "④ CDL/CDS+ Touch", group=grp_entry_types, tooltip="Entry at the structural boundary following a major trend flip.")
+epCdlCdsPlusBlock  = input.string("Touch", "    Mode", options=["Touch","Touch + BuX/BeX"], group=grp_entry_types)
+
+grp_nested_entry    = "🎯 Nested Entries"
+useNestedPoc        = input.bool(true, "Nested PES/PEL", inline="ne1", group=grp_nested_entry, tooltip="Triggers when price forms a new POC inside a larger active consolidation structure.")
+epNestedPoc         = input.string("Touch", "", options=["Touch","Touch + BuX/BeX"], inline="ne1", group=grp_nested_entry)
+useNestedBlock      = input.bool(true, "Nested CDL/CDS", inline="ne3", group=grp_nested_entry, tooltip="Triggers when price forms a block entry entirely inside an older structure.")
+epNestedBlock       = input.string("Touch", "", options=["Touch","Touch + BuX/BeX"], inline="ne3", group=grp_nested_entry)
+
+// ── BuX / BeX Entry Toggles ─────────────────────────────────────────
+grp_buxbex_entry = "🎯 BuX/BeX Candle Entry Options"
+useBuxBexEntry   = input.bool(true, "Enable ⑤ BuX (Long) / BeX (Short) Entry", group=grp_buxbex_entry, tooltip="Momentum entry directly on the breakout expansion candle.")
+buxBexEntryPoint = input.string("Open", "Entry Point on Candle", options=["Close", "Open", "50% High-Low", "50% Open-Close"], group=grp_buxbex_entry)
+
+// ── LQG Break Entry ───────────────────────────────────────────────
+grp_lqg_entry = "🎯 Strategy ⑥: LQG Break Entry"
+useLqgEntry   = input.bool(true, "⑥ Enable LQG Break Momentum Entry", group=grp_lqg_entry, tooltip="Momentum entry directly on the candle that confirms an LQG liquidity sweep.")
+lqgEntryPoint = input.string("Open", "Entry Point on Candle", options=["Close", "Open", "50% High-Low", "50% Open-Close"], group=grp_lqg_entry)
+lqgSlMode     = input.string("Entry Candle H/L", "Stop Loss Placement", options=["LQG Sweep Extreme", "CDL SL / CDS SH", "Entry Candle H/L"], group=grp_lqg_entry)
+
+// ── Entry Cycle Limits ──────────────────────────────────────────────
+grp_cycle          = "🚦 ENTRY CYCLE LIMITS"
+limitEntriesPerCycle = input.bool(false, "Limit Entries per Directional Cycle", group=grp_cycle, tooltip="When enabled, only takes the first X setups after a directional flip (e.g. Bullish to Bearish). Stops late entries.")
+maxEntriesPerCycle   = input.int(2, "Max Entries per Cycle", minval=1, group=grp_cycle, tooltip="1 = Enter ONLY at the first setup created.\n2 = Enter at the first AND second setups.")
+
+// ── Risk Management ─────────────────────────────────────────────────
+grp_risk            = "📈 Risk Management"
+sl_use_swing        = input.bool(false,  "SL: CDL/CDS", inline="slp", group=grp_risk, tooltip="Priority 1: Places stop loss at the recent structural swing point.")
+sl_use_box          = input.bool(true, "Box H/L",     inline="slp", group=grp_risk, tooltip="Priority 3: Places stop loss at the high/low of the balance area.")
+
+capitalDrawdown    = input.float(4500.0, "Max Allowed Drawdown ($)", minval=100.0, step=100.0, group=grp_risk, tooltip="Used to calculate risk per trade for prop-firm challenges.")
+profitTarget       = input.float(9000.0, "Profit Target ($)",        minval=100.0, step=100.0, group=grp_risk)
+challengeDays      = input.int(20, "Challenge Days", minval=1, group=grp_risk, tooltip="Determines the 'Min Daily RR' needed to pass.")
+rrRatio            = input.float(2.0, "Risk:Reward Target", minval=0.5, step=0.1, group=grp_risk, tooltip="Calculates the TP line automatically. Adjusting this 1 tick can change your entire strategy statistics.")
+cycleType          = input.string("Evaluation", "Cycle Type", options=["Evaluation","Pay-out"], group=grp_risk, tooltip="Evaluation: Spreads risk over challenge days. Pay-out: Focused on protecting accumulated profit.")
+expectedConsecLoss = input.int(14, "Expected Consecutive Losses", minval=1, group=grp_risk, tooltip="Psychological preparation. Displays how much capital you would lose in a worst-case streak.")
+riskMode           = input.string("Fixed Risk ($)", "Risk Model", options=["Fixed Position (Lots)","Fixed Risk ($)"], group=grp_risk, tooltip="Fixed Risk: Dynamically calculates lot size based on your SL distance and Dollar Risk.")
+payoutRiskPct      = input.float(1.0, "Pay-out Risk % of Drawdown", minval=0.1, maxval=10.0, step=0.1, group=grp_risk)
+fixedPositionSize  = input.int(1, "Fixed Size (Contracts)", inline="ps", minval=1, group=grp_risk)
+pointValue = input.float(2.0, "Point Value ($)", inline="ps", minval=0.1, group=grp_risk, tooltip="Multiplier per 1 full point of price movement.\n\nFUTURES:\nNQ: 20 | MNQ: 2\nES: 50 | MES: 5\nYM: 5 | MYM: 0.5\nRTY: 50 | M2K: 5\nGC (Gold): 100 | MGC: 10\nCL (Oil): 1000 | MCL: 100\n\nCRYPTO / STOCKS: 1\n\nFOREX (Std Lot): 100000")
+stopLossTicks      = input.int(4, "SL Buffer (Ticks)", minval=0, group=grp_risk, tooltip="Adds extra breathing room to your stop loss. A 1-tick change is a new strategy.")
+enforceMaxRisk      = input.bool(true, "⛔ Skip if $ Risk Exceeds Limit", group=grp_risk, tooltip="Protects your account by preventing setups where the required stop is too wide for your risk limit.")
+cancelOnOppositeBreak = input.bool(false, "Emergency Exit on Opposite Structure Break", group=grp_risk, tooltip="Automatically cancels pending orders if the market structure flips to the opposite bias before entry.")
+
+// ── Display ─────────────────────────────────────────────────────────
+grp_display         = "🎯 Entry Display & Tables"
+maxDisplayedTrades = input.int(4, "Max Displayed Trades", minval=1, maxval=20, group=grp_display)
+lineExtension      = input.int(20, "Line Extension (Bars)", minval=5, maxval=50, group=grp_display)
+tradeLineWidth     = input.int(2, "Trade Line Width", minval=1, maxval=10, group=grp_display, tooltip="Controls the line thickness for Entry, SL, and TP lines on active setups.")
+autoDetectColor    = input.bool(true, "Auto Entry Color", inline="ec", group=grp_display)
+entryLineColor     = input.color(color.black, "", inline="ec", group=grp_display)
+stopLossColor      = input.color(color.red, "SL", inline="ec", group=grp_display)
+takeProfitColor    = input.color(#00e200, "TP", inline="ec", group=grp_display)
+col_type_1         = input.color(color.aqua, "① PES/PEL", inline="t_cols1", group=grp_display)
+col_type_2         = input.color(color.fuchsia, "② PES/PEL+", inline="t_cols1", group=grp_display)
+col_type_3         = input.color(color.orange, "③ CDL/CDS", inline="t_cols2", group=grp_display)
+col_type_4         = input.color(color.yellow, "④ CDL/CDS+", inline="t_cols2", group=grp_display)
+col_type_5         = input.color(color.purple, "⑤ BuX/BeX", inline="t_cols3", group=grp_display)
+col_type_6         = input.color(#2962ff, "⑥ LQG Break", inline="t_cols3", group=grp_display)
+entryLabelSize     = input.string("Small", "Label Size", options=["Tiny","Small","Normal","Large","Extra Large","Huge"], group=grp_display)
+showRiskTable      = input.bool(false, "Show Risk Table", inline="rt1", group=grp_display)
+riskTablePos       = input.string("Bottom Right", "Pos", inline="rt1", options=["Top Left","Top Right","Bottom Left","Bottom Right","Middle Left","Middle Right"], group=grp_display)
+riskTableSize      = input.string("Small", "Size", inline="rt2", options=["Tiny","Small","Normal","Large","Extra Large","Huge"], group=grp_display)
+showCtxTable       = input.bool(false, "Show Context Table", inline="ct1", group=grp_display)
+showActionRow      = input.bool(true, "Show Action Hint", inline="ct1", group=grp_display)
+ctxTablePos        = input.string("Top Right", "Pos", inline="ct1", options=["Top Left","Top Right","Bottom Left","Bottom Right","Middle Left","Middle Right"], group=grp_display)
+ctxTableSize       = input.string("Small", "Size", inline="ct2", options=["Tiny","Small","Normal","Large","Extra Large","Huge"], group=grp_display)
+showStatsTable     = input.bool(true, "Show Stats Table", inline="st1", group=grp_display)
+statsTablePos      = input.string("Middle Right", "Pos", inline="st1", options=["Top Left","Top Right","Bottom Left","Bottom Right","Middle Left","Middle Right"], group=grp_display)
+statsTableSize     = input.string("Small", "Size", inline="st2", options=["Tiny","Small","Normal","Large","Extra Large","Huge"], group=grp_display)
+
+// ═══════════════════════════════════════════════════════════════════════
+// NEW: ENTRY AND SL CALCULATION LOGIC
+// ═══════════════════════════════════════════════════════════════════════
+type CycleTracker
+    int dir
+    int count
+
+var CycleTracker cycleState = CycleTracker.new(0, 0)
+
+method check_update(CycleTracker ctx, bool is_long) =>
+    int d = is_long ? 1 : -1
+    bool allowed = true
+    if ctx.dir != d
+        ctx.dir := d
+        ctx.count := 1
+    else
+        ctx.count += 1
+    if limitEntriesPerCycle and ctx.count > maxEntriesPerCycle
+        allowed := false
+    allowed
+
+f_get_candle_entry(string mode, float c_open, float c_high, float c_low, float c_close) =>
+    float ep = c_close 
+    if mode == "Open"
+        ep := c_open
+    else if mode == "50% High-Low"
+        ep := (c_high + c_low) / 2.0
+    else if mode == "50% Open-Close"
+        ep := (c_open + c_close) / 2.0
+    ep
+
+getBullSL(float swing_sl, float box_sl) =>
+    float final_sl = na
+    if sl_use_swing and not na(swing_sl)
+        final_sl := swing_sl
+    else if sl_use_box and not na(box_sl)
+        final_sl := box_sl
+    if na(final_sl)
+        final_sl := not na(box_sl) ? box_sl : swing_sl
+    final_sl
+
+getBearSL(float swing_sl, float box_sl) =>
+    float final_sl = na
+    if sl_use_swing and not na(swing_sl)
+        final_sl := swing_sl
+    else if sl_use_box and not na(box_sl)
+        final_sl := box_sl
+    if na(final_sl)
+        final_sl := not na(box_sl) ? box_sl : swing_sl
+    final_sl
+
+// ═══════════════════════════════════════════════════════════════════════
+// UTILITY
+// ═══════════════════════════════════════════════════════════════════════
+get_size(s) =>
+    switch s
+        "Tiny"        => size.tiny
+        "Small"       => size.small
+        "Normal"      => size.normal
+        "Large"       => size.large
+        "Extra Large" => size.huge
+        "Huge"        => size.huge
+        => size.small
+
+get_style(s) =>
+    s == "Solid" ? line.style_solid : s == "Dotted" ? line.style_dotted : s == "Dashed" ? line.style_dashed : line.style_solid
+
+get_safe_mid(int a, int b) =>
+    math.max(int((a + b) / 2), bar_index - 9500)
+
+getTablePosition(string pos) =>
+    switch pos
+        "Top Left"     => position.top_left
+        "Top Right"    => position.top_right
+        "Bottom Left"  => position.bottom_left
+        "Bottom Right" => position.bottom_right
+        "Middle Left"  => position.middle_left
+        "Middle Right" => position.middle_right
+        => position.middle_right
+
+getTableTextSize(string sz) =>
+    switch sz
+        "Tiny"        => size.tiny
+        "Small"       => size.small
+        "Normal"      => size.normal
+        "Large"       => size.large
+        "Extra Large" => size.huge
+        "Huge"        => size.huge
+        => size.small
+
+getSizeFromString(string sz) =>
+    switch sz
+        "Tiny"        => size.tiny
+        "Small"       => size.small
+        "Normal"      => size.normal
+        "Large"       => size.large
+        "Extra Large" => size.huge
+        "Huge"        => size.huge
+        => size.small
+
+f_wl(int w, int l) =>
+    int tot  = w + l
+    string wr = tot > 0 ? str.tostring(w * 100.0 / math.max(float(tot), 1.0), "#") + "%" : "—"
+    str.tostring(w) + "/" + str.tostring(l) + " (" + wr + ")"
+
+// ═══════════════════════════════════════════════════════════════════════
+// RISK CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════
+float tickSize        = syminfo.mintick
+riskPerTrade          = cycleType == "Pay-out" ? (capitalDrawdown * payoutRiskPct / 100.0) : (capitalDrawdown / challengeDays)
+totalRNeeded          = profitTarget / riskPerTrade
+minDailyR             = totalRNeeded / challengeDays
+expectedTotalLoss     = expectedConsecLoss * riskPerTrade
+color finalEntryLineColor = autoDetectColor ? (color.r(chart.bg_color) + color.g(chart.bg_color) + color.b(chart.bg_color) > 382 ? color.black : color.white) : entryLineColor
+
+// ═══════════════════════════════════════════════════════════════════════
+// GLOBAL STATE
+// ═══════════════════════════════════════════════════════════════════════
+var bull_structs = array.new<BullStructure>()
+var bear_structs = array.new<BearStructure>()
+var pe_boxes     = array.new<PEBox>()
+var EntrySignal[] activeTrades = array.new<EntrySignal>()
+var int globalTradeId = 0
+
+var int   totalWins            = 0
+var int   totalLosses          = 0
+var float totalProfitDollars   = 0.0
+var float totalLossDollars     = 0.0
+var float totalPosRR           = 0.0
+var float totalNegRR           = 0.0
+var int   firstTradeTime       = na
+var float maxDrawdown          = 0.0
+var float peakEquity           = 0.0
+var int   consecutiveWins      = 0
+var int   consecutiveLosses    = 0
+var int   maxConsecutiveWins   = 0
+var int   maxConsecutiveLosses = 0
+var string lastTradeOutcome    = ""
+var int   expiredTrades        = 0
+var float totalUnrealizedPL    = 0.0
+var int   cancelledTrades      = 0
+var manualExitWarningFlag      = array.new_bool(1, false)
+
+var int pocWins      = 0, var int pocLosses      = 0
+var int pocPlusWins  = 0, var int pocPlusLosses  = 0
+var int blockWins    = 0, var int blockLosses    = 0
+var int blockPlusWins = 0, var int blockPlusLosses = 0
+
+var int nestPocW = 0, var int nestPocL = 0
+var int nestBlkW = 0, var int nestBlkL = 0
+
+var int buxbexWins   = 0, var int buxbexLosses   = 0
+var int lqgWins      = 0, var int lqgLosses      = 0
+
+var int STATE_NBC  = 0
+var int STATE_BULL = 1
+var int STATE_BEAR = -1
+var int current_state = -999
+
+var box   nbc_active_box   = na
+var float last_nbc_high    = na, var float last_nbc_low     = na, var int last_nbc_bar = na
+var float last_bc_high     = na, var float last_bc_low        = na
+var float last_bc_open     = na, var float last_bc_close      = na, var int last_bc_bar  = na
+
+var float recent_swing_low  = na, var int recent_swing_low_bar  = na
+var float recent_swing_high = na, var int recent_swing_high_bar = na
+
+var string structural_trend    = "NEUTRAL"
+var string prev_structural_trend = "NEUTRAL"
+var float  last_trend_flip_lvl = na
+var int    last_trend_flip_bar = na
+
+var int last_bc_dir = 0 
+var int ld_counter  = 0
+var int sd_counter  = 0
+
+var array<label> global_lqg_bull_labels = array.new<label>()
+var array<label> global_lqg_bear_labels = array.new<label>()
+var label lqg_break_bull_lbl = na
+var label lqg_break_bear_lbl = na
+
+var bool  lqg_bull_pending   = false
+var int   lqg_bull_count      = 0
+var bool  lqg_bear_pending   = false
+var int   lqg_bear_count      = 0
+var bool  trig_lqg_bull      = false
+var bool  trig_lqg_bear      = false
+
+var float fva_running_top  = na
+var float fva_running_bot  = na
+var float fva_running_high = na
+var float fva_running_low  = na
+var int   fva_start_bar    = na
+var bool  current_nbc_is_nested = false
+var int   current_nbc_parent_start = na
+var float current_nbc_parent_high = na
+var float current_nbc_parent_low = na
+
+var float[] poc_hist   = array.new_float(0)
+var string  poc_trend  = "neutral"
+var string  value_flow = "FLAT  ↔"
+
+var bool  last_bc_strong = true
+var string bc_quality_txt = "—"
+
+var line bull_tgt_line = na
+var label bull_tgt_lbl = na
+var bool bull_tgt_active = false
+var float bull_tgt_price = na
+var bool bull_tgt_locked = false
+
+var line bear_tgt_line = na
+var label bear_tgt_lbl = na
+var bool bear_tgt_active = false
+var float bear_tgt_price = na
+var bool bear_tgt_locked = false
+
+footprint reqFootprint = use_footprint ? request.footprint(fp_ticks, fp_va) : na
+float bar_delta = use_footprint and not na(reqFootprint) ? reqFootprint.delta() : na
+
+// ═══════════════════════════════════════════════════════════════════════
+// 🌊 MMM TREND LINE
+// ═══════════════════════════════════════════════════════════════════════
+float htf_high   = request.security(syminfo.tickerid, trendTF, ta.highest(high, 14))
+float htf_low_v  = request.security(syminfo.tickerid, trendTF, ta.lowest(low,  14))
+float fused_line = htf_low_v + (htf_high - htf_low_v) * 0.5
+
+// Plot Solid Trend Line using native plot (fastest for 5000 bars)
+plot(showTrendLine and trendLineStyle == "Solid" ? fused_line : na, "MMM Trend Line (Solid)", color=trendLineColor, linewidth=trendLineWidth, style=plot.style_line)
+
+// Render Dashed or Dotted Trend Line using dynamic line segments
+var line trend_seg = na
+if showTrendLine and (trendLineStyle == "Dashed" or trendLineStyle == "Dotted")
+    if barstate.isconfirmed
+        if fused_line == fused_line[1] and not na(trend_seg)
+            line.set_x2(trend_seg, bar_index)
+            line.set_y2(trend_seg, fused_line)
+        else
+            trend_seg := line.new(bar_index - 1, nz(fused_line[1], fused_line), bar_index, fused_line, color=trendLineColor, width=trendLineWidth, style=get_style(trendLineStyle))
+    else if barstate.islast and not na(trend_seg)
+        line.set_x2(trend_seg, bar_index)
+        line.set_y2(trend_seg, fused_line)
+
+// ═══════════════════════════════════════════════════════════════════════
+// MMPD CALCULATIONS
+// ═══════════════════════════════════════════════════════════════════════
+float _cln             = (close - ta.lowest(low, 27)) / math.max(ta.highest(high, 27) - ta.lowest(low, 27), syminfo.mintick) * 100
+float _sm1             = f_xsa(_cln, 5, 1)
+float _sm2             = f_xsa(_sm1, 3, 1)
+float mmpd_fundtrend   = (_sm1 * 3 - _sm2 * 2 - 50) * 1.032 + 50
+float _typ             = (2 * close + high + low + open) / 5
+float _lol             = ta.lowest(low, 34)
+float _hoh             = ta.highest(high, 34)
+float mmpd_bullbearline = ta.ema((_typ - _lol) / math.max(_hoh - _lol, syminfo.mintick) * 100, 13)
+
+bool mmpd_extreme_discount = mmpd_fundtrend < 20
+bool mmpd_extreme_premium  = mmpd_fundtrend > 80
+bool mmpd_discount         = mmpd_fundtrend < 50
+bool mmpd_premium          = mmpd_fundtrend > 50
+bool mmpd_bull_mom         = mmpd_fundtrend > mmpd_bullbearline
+bool mmpd_bear_mom         = mmpd_fundtrend < mmpd_bullbearline
+string mmpd_zone_txt = mmpd_fundtrend > 80 ? "EXTREME PREMIUM" : mmpd_fundtrend > 50 ? "PREMIUM" : mmpd_fundtrend < 20 ? "EXTREME DISCOUNT" : "DISCOUNT"
+
+isEntryAllowed(bool isLong) =>
+    bool zone_pass = true
+    if zone_aligned_vis
+        zone_pass := isLong ? mmpd_discount : mmpd_premium
+    bool mmm_trend_pass = true
+    if useTrendFilter
+        mmm_trend_pass := isLong ? (close > fused_line) : (close < fused_line)
+    zone_pass and mmm_trend_pass
+
+isVisOk(bool isLong) =>
+    if not zone_aligned_vis
+        true
+    else
+        isLong ? mmpd_discount : mmpd_premium
+
+// ═══════════════════════════════════════════════════════════════════════
+// VOLUME PROFILE ENGINE
+// ═══════════════════════════════════════════════════════════════════════
+calcVolumeProfile(float swingH, float swingL, int barsBackStart, int barsBackEnd) =>
+    int  bins = vp_bins
+    float step = math.max((swingH - swingL) / bins, syminfo.mintick)
+    float[] vols     = array.new<float>(bins, 0.0)
+    float[] bullVols = array.new<float>(bins, 0.0)
+    float[] bearVols = array.new<float>(bins, 0.0)
+    float totalVol   = 0.0
+    float[] priceLevels = array.new<float>(bins)
+    for _b = 0 to bins - 1
+        array.set(priceLevels, _b, swingL + (_b * step))
+    int safeStart = math.min(VP_MAX_LOOKBACK, barsBackStart)
+    int safeEnd   = math.max(0, barsBackEnd)
+    if safeStart >= safeEnd
+        for i = safeEnd to safeStart
+            float cH = high[i], float cL = low[i], float cC = close[i], float cO = open[i], float cV = volume[i]
+            if cV > 0 and cH >= swingL and cL <= swingH
+                float pm = cC - cO
+                float pr = math.max(cH - cL, syminfo.mintick)
+                float bp = math.abs(pm) / pr
+                float wr = (cH - math.max(cO, cC)) / pr
+                float sr = (math.min(cO, cC) - cL) / pr
+                float bv = 0.0
+                float sv = 0.0
+                if pm > 0
+                    bv := cV * math.max(0.1, math.min(0.9, 0.5 + (bp * 0.3) - (wr * 0.1)))
+                    sv := cV - bv
+                else if pm < 0
+                    sv := cV * math.max(0.1, math.min(0.9, 0.5 + (bp * 0.3) - (sr * 0.1)))
+                    bv := cV - sv
+                else
+                    bv := cV * 0.5
+                    sv := cV * 0.5
+                int sB = math.max(0, array.binary_search_rightmost(priceLevels, cL - step))
+                int eB = math.min(bins - 1, array.binary_search_leftmost(priceLevels, cH + step))
+                if sB <= eB
+                    for b = sB to eB
+                        float binBot = array.get(priceLevels, b)
+                        float binTop = binBot + step
+                        if cH >= binBot and cL <= binTop
+                            float oT = math.min(cH, binTop)
+                            float oB = math.max(cL, binBot)
+                            float oF = (oT - oB) / pr
+                            if oF > 0
+                                array.set(vols,     b, array.get(vols,     b) + (cV * oF))
+                                array.set(bullVols, b, array.get(bullVols, b) + (bv * oF))
+                                array.set(bearVols, b, array.get(bearVols, b) + (sv * oF))
+                                totalVol += (cV * oF)
+    float maxVol = 0.0
+    int   pocIdx = 0
+    for b = 0 to bins - 1
+        if array.get(vols, b) > maxVol
+            maxVol := array.get(vols, b)
+            pocIdx := b
+    float pocP   = swingL + (pocIdx * step) + (step / 2)
+    float tgtVol = totalVol * 0.70
+    float curVol = maxVol
+    int   valIdx = pocIdx
+    int   vahIdx = pocIdx
+    while curVol < tgtVol and (valIdx > 0 or vahIdx < bins - 1)
+        float lV = valIdx > 0        ? array.get(vols, valIdx - 1) : -1.0
+        float uV = vahIdx < bins - 1 ? array.get(vols, vahIdx + 1) : -1.0
+        if lV >= uV and lV != -1.0
+            valIdx -= 1
+            curVol += lV
+        else if uV != -1.0
+            vahIdx += 1
+            curVol += uV
+        else
+            break
+    int   actBins = 0
+    float sumBV   = 0.0
+    for b = 0 to bins - 1
+        float bv2 = array.get(vols, b)
+        if bv2 > 0
+            actBins += 1
+            sumBV   += bv2
+    float avgBV = actBins > 0 ? sumBV / math.max(float(actBins), 1.0) : 0.0
+    float[] aBP  = array.new<float>()
+    float[] aBV  = array.new<float>()
+    float[] aBBu = array.new<float>()
+    float[] aBBe = array.new<float>()
+    for b = 0 to bins - 1
+        aBP.push(swingL + (b * step) + (step / 2.0))
+        aBV.push(array.get(vols, b))
+        aBBu.push(array.get(bullVols, b))
+        aBBe.push(array.get(bearVols, b))
+    [swingL + ((vahIdx + 1) * step), swingL + (valIdx * step), pocP, pocIdx, avgBV, maxVol, aBP, aBV, aBBu, aBBe]
+
+drawZoneLines(float swingH, float swingL, int barsBackStart, int barsBackEnd, int cBar, color zoneColor, bool is_bull_zone, bool show_poc, color poc_color) =>
+    ZoneLines zl = ZoneLines.new(na, na, array.new<line>(), array.new<int>(), na, cBar)
+    int safeLB = math.min(VP_MAX_LOOKBACK, barsBackStart)
+    if swingH > swingL and safeLB >= 0
+        [_vah, _val, _poc, _pocIdx, _avgVol, _maxVol, _bP, _bV, _bBuV, _bBeV] = calcVolumeProfile(swingH, swingL, safeLB, barsBackEnd)
+        if _maxVol > 0 and _bP.size() > 0
+            for _bi = 0 to _bP.size() - 1
+                float _bv = _bV.get(_bi)
+                float _bp = _bP.get(_bi)
+                if _bv > 0
+                    bool _isPOC  = _bi == _pocIdx
+                    bool _isBull = _bBuV.get(_bi) >= _bBeV.get(_bi)
+                    bool _isHVN  = (_isBull ? show_hbuv : show_hbev) and _bv > _avgVol * 1.5 and not _isPOC
+                    if _isPOC or _isHVN
+                        int   _bLen = math.max(1, int(_bv / math.max(_maxVol, syminfo.mintick) * vp_max_width))
+                        color _dC   = _isBull ? vp_bull_color : vp_bear_color
+                        color _bCol = _isPOC and show_poc ? poc_color : vp_bull_bear ? _dC : color.new(zoneColor, 40)
+                        int   _bWid = _isPOC and show_poc ? 6 : _bv >= _maxVol * 0.8 ? 4 : _bv >= _maxVol * 0.6 ? 3 : 2
+                        zl.allBinLines.push(line.new(cBar, _bp, cBar + _bLen, _bp, width=_bWid, color=_bCol))
+                        zl.allBinWids.push(_bLen)
+                        if _isPOC
+                            zl.pocLabel := label.new(cBar, _bp, "", color=color(na), textcolor=color(na), size=size.tiny)
+    zl
+
+// ═══════════════════════════════════════════════════════════════════════
+// TRADE CREATION
+// ═══════════════════════════════════════════════════════════════════════
+createTrade(bool isLong, float ep, float slIn, string entryType, int tid, bool activateNow = false) =>
+    float _sl = slIn
+    float rp = math.round(math.abs(ep - _sl) / tickSize) * tickSize
+    if rp < (tickSize * 4)
+        rp  := tickSize * 4
+        _sl := isLong ? ep - rp : ep + rp
+    float tp = isLong ? ep + (rp * rrRatio) : ep - (rp * rrRatio)
+    bool valid = true
+    if isLong and (_sl >= ep or tp <= ep)
+        valid := false
+    if not isLong and (_sl <= ep or tp >= ep)
+        valid := false
+    if not valid
+        na
+    else
+        int ps = riskMode == "Fixed Risk ($)" ? int(math.max(1, math.round(riskPerTrade / math.max((rp * pointValue), syminfo.mintick)))) : fixedPositionSize
+        float aRisk = rp * pointValue * ps
+        if enforceMaxRisk and aRisk > (riskPerTrade * 1.05)
+            na
+        else
+            int eB = bar_index + lineExtension
+            float profD = aRisk * rrRatio
+            color _tbg = color.new(color.white, 100)
+            string _dir = isLong ? "Long" : "Short"
+            string _et = entryType + " " + _dir + ":" + str.tostring(ps) + "L #" + str.tostring(tid) + " @" + str.tostring(ep, format.mintick)
+            string _slTx = "SL:-$" + str.tostring(aRisk, "#") + " @" + str.tostring(_sl, format.mintick)
+            string _tpTx = "TP:+$" + str.tostring(profD, "#") + " (" + str.tostring(rrRatio, "#.#") + "R) @" + str.tostring(tp, format.mintick)
+            color _eCol = finalEntryLineColor
+            if str.contains(entryType, "①")
+                _eCol := col_type_1
+            else if str.contains(entryType, "②")
+                _eCol := col_type_2
+            else if str.contains(entryType, "③")
+                _eCol := col_type_3
+            else if str.contains(entryType, "④")
+                _eCol := col_type_4
+            else if str.contains(entryType, "⑤")
+                _eCol := col_type_5
+            else if str.contains(entryType, "⑥")
+                _eCol := col_type_6
+            _entL = line.new(bar_index, ep,  eB, ep,  color=_eCol,         width=tradeLineWidth, style=line.style_solid)
+            _slL  = line.new(bar_index, _sl, eB, _sl, color=stopLossColor,   width=tradeLineWidth, style=line.style_dashed)
+            _tpL  = line.new(bar_index, tp,  eB, tp,  color=takeProfitColor, width=tradeLineWidth, style=line.style_dotted)
+            _eLbl = label.new(eB + offsetGap, ep,  _et,   style=label.style_label_left, color=_tbg, textcolor=_eCol,         size=getSizeFromString(entryLabelSize))
+            _sLbl = label.new(eB + offsetGap, _sl, _slTx, style=label.style_label_left, color=_tbg, textcolor=stopLossColor,   size=getSizeFromString(entryLabelSize))
+            _tLbl = label.new(eB + offsetGap, tp,  _tpTx, style=label.style_label_left, color=_tbg, textcolor=takeProfitColor, size=getSizeFromString(entryLabelSize))
+            EntrySignal.new(_et, isLong ? "LONG" : "SHORT", isLong, ep, _sl, tp, time, time, true, activateNow, _entL, _slL, _tpL, _eLbl, _sLbl, _tLbl, false, bar_index, tid, entryType, false, false, "pending", 0.0, 0.0, aRisk, na, na, true, ps, false, "")
+
+pushTradeToArrays(EntrySignal t) =>
+    if not na(t)
+        array.set(manualExitWarningFlag, 0, false)
+        int visCount = 0
+        if activeTrades.size() > 0
+            for i = 0 to activeTrades.size() - 1
+                if activeTrades.get(i).hasVisuals
+                    visCount += 1
+        while visCount >= maxDisplayedTrades and activeTrades.size() > 0
+            bool found = false
+            for i = 0 to activeTrades.size() - 1
+                tr = activeTrades.get(i)
+                if tr.hasVisuals
+                    deleteTradeVisuals(tr)
+                    tr.hasVisuals := false
+                    activeTrades.set(i, tr)
+                    visCount -= 1
+                    found := true
+                    break
+            if not found
+                break
+        activeTrades.push(t)
+
+// ═══════════════════════════════════════════════════════════════════════
+// 👁️ LAYER 1: VISUAL INTRABAR HIDING
+// ═══════════════════════════════════════════════════════════════════════
+if activeTrades.size() > 0
+    for i = 0 to activeTrades.size() - 1
+        EntrySignal _tcv = activeTrades.get(i)
+        if _tcv.outcome == "pending"
+            bool hitEntry = _tcv.isLong ? (low <= _tcv.entryPrice) : (high >= _tcv.entryPrice)
+            bool isAct = _tcv.activated or hitEntry
+            bool _tpH = _tcv.isLong ? (high >= _tcv.takeProfit) : (low <= _tcv.takeProfit)
+            bool _slH = _tcv.isLong ? (low <= _tcv.stopLoss) : (high >= _tcv.stopLoss)
+            
+            bool _shouldHide = (isAct and (_tpH or _slH)) or _tcv.forceExit
+            if _shouldHide
+                line.set_color(_tcv.entryLine, na)
+                line.set_color(_tcv.slLine, na)
+                line.set_color(_tcv.tpLine, na)
+                label.set_textcolor(_tcv.entryLabel, color.new(color.black, 100))
+                label.set_textcolor(_tcv.slLabel, color.new(color.black, 100))
+                label.set_textcolor(_tcv.tpLabel, color.new(color.black, 100))
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// CORE LOGIC
+// ═══════════════════════════════════════════════════════════════════════
+bool allow_processing = not wait_for_close or not barstate.isrealtime or barstate.isconfirmed
+
+bool is_bux = close > high[1]
+bool is_bex = close < low[1]
+bool is_nbc = not is_bux and not is_bex
+
+barcolor(barstate.isconfirmed ? (is_bux and show_bux ? col_bux : is_bex and show_bex ? col_bex : is_nbc and show_nbc_box ? col_nbc : na) : na)
+
+int end_b    = bar_index + line_ext
+int prev_bar = bar_index - 1
+
+// Maintain recent 3-candle swings for structural tracking
+bool is_swing_high = high[1] > high[2] and high[1] > high
+bool is_swing_low  = low[1]  < low[2]  and low[1]  < low
+if is_swing_low
+    recent_swing_low     := low[1]
+    recent_swing_low_bar := prev_bar
+if is_swing_high
+    recent_swing_high     := high[1]
+    recent_swing_high_bar := prev_bar
+
+var bool   _alertLong  = false
+var bool   _alertShort = false
+_alertLong  := false
+_alertShort := false
+var string _alertMsg   = ""
+
+trig_lqg_bull := false
+trig_lqg_bear := false
+
+// Export variables to ensure SL/SH perfectly align with structural ranges
+var float global_slp = na
+var float global_shp = na
+
+// ── GLOBAL LQG DELETION ─────────────────────────────────────────────
+if global_lqg_bull_labels.size() > 0
+    for i = global_lqg_bull_labels.size() - 1 to 0
+        label lbl = global_lqg_bull_labels.get(i)
+        if not na(lbl)
+            if low <= label.get_y(lbl)
+                label.delete(lbl)
+                global_lqg_bull_labels.remove(i)
+        else
+            global_lqg_bull_labels.remove(i)
+
+if global_lqg_bear_labels.size() > 0
+    for i = global_lqg_bear_labels.size() - 1 to 0
+        label lbl = global_lqg_bear_labels.get(i)
+        if not na(lbl)
+            if high >= label.get_y(lbl)
+                label.delete(lbl)
+                global_lqg_bear_labels.remove(i)
+        else
+            global_lqg_bear_labels.remove(i)
+
+if not na(lqg_break_bull_lbl)
+    if low <= label.get_y(lqg_break_bull_lbl)
+        label.delete(lqg_break_bull_lbl)
+        lqg_break_bull_lbl := na
+
+if not na(lqg_break_bear_lbl)
+    if high >= label.get_y(lqg_break_bear_lbl)
+        label.delete(lqg_break_bear_lbl)
+        lqg_break_bear_lbl := na
+
+if in_calc_range and allow_processing
+
+    // ═══════════════════════════════════════════════════════════════
+    // 1. GLOBAL TGT SYSTEM (With custom colors and font size)
+    // ═══════════════════════════════════════════════════════════════
+    if bull_tgt_active
+        if not bull_tgt_locked
+            if high > bull_tgt_price
+                bull_tgt_price := high
+                if not na(bull_tgt_line)
+                    line.set_y1(bull_tgt_line, high)
+                    line.set_y2(bull_tgt_line, high)
+                if not na(bull_tgt_lbl)
+                    label.set_y(bull_tgt_lbl, high)
+        else
+            if high >= bull_tgt_price
+                if not na(bull_tgt_line)
+                    line.delete(bull_tgt_line)
+                    bull_tgt_line := line(na)
+                if not na(bull_tgt_lbl)
+                    label.delete(bull_tgt_lbl)
+                    bull_tgt_lbl := label(na)
+                bull_tgt_active := false
+                bull_tgt_price := na
+                
+        if bull_tgt_active
+            if not na(bull_tgt_line)
+                line.set_x2(bull_tgt_line, end_b)
+                line.set_color(bull_tgt_line, col_tgt_bull)
+                line.set_width(bull_tgt_line, tgt_line_width)
+                line.set_style(bull_tgt_line, get_style(tgt_line_style))
+            if not na(bull_tgt_lbl)
+                label.set_x(bull_tgt_lbl, end_b + offsetGap)
+                label.set_textcolor(bull_tgt_lbl, col_tgt_bull)
+                label.set_size(bull_tgt_lbl, get_size(lbl_size_lines))
+
+    if bear_tgt_active
+        if not bear_tgt_locked
+            if low < bear_tgt_price
+                bear_tgt_price := low
+                if not na(bear_tgt_line)
+                    line.set_y1(bear_tgt_line, low)
+                    line.set_y2(bear_tgt_line, low)
+                if not na(bear_tgt_lbl)
+                    label.set_y(bear_tgt_lbl, low)
+        else
+            if low <= bear_tgt_price
+                if not na(bear_tgt_line)
+                    line.delete(bear_tgt_line)
+                    bear_tgt_line := line(na)
+                if not na(bear_tgt_lbl)
+                    label.delete(bear_tgt_lbl)
+                    bear_tgt_lbl := label(na)
+                bear_tgt_active := false
+                bear_tgt_price := na
+                
+        if bear_tgt_active
+            if not na(bear_tgt_line)
+                line.set_x2(bear_tgt_line, end_b)
+                line.set_color(bear_tgt_line, col_tgt_bear)
+                line.set_width(bear_tgt_line, tgt_line_width)
+                line.set_style(bear_tgt_line, get_style(tgt_line_style))
+            if not na(bear_tgt_lbl)
+                label.set_x(bear_tgt_lbl, end_b + offsetGap)
+                label.set_textcolor(bear_tgt_lbl, col_tgt_bear)
+                label.set_size(bear_tgt_lbl, get_size(lbl_size_lines))
+
+    if is_bux
+        if show_tgt_lines
+            if not na(bull_tgt_line)
+                line.delete(bull_tgt_line)
+            if not na(bull_tgt_lbl)
+                label.delete(bull_tgt_lbl)
+            
+            bull_tgt_price := high
+            bull_tgt_active := true
+            bull_tgt_locked := false
+            
+            bull_tgt_line := line.new(bar_index, bull_tgt_price, end_b, bull_tgt_price, color=col_tgt_bull, width=tgt_line_width, style=get_style(tgt_line_style))
+            bull_tgt_lbl  := label.new(end_b + offsetGap, bull_tgt_price, "Buyers TGT", textcolor=col_tgt_bull, style=label.style_label_down, color=color(na), size=get_size(lbl_size_lines))
+            
+    if is_bex
+        if show_tgt_lines
+            if not na(bear_tgt_line)
+                line.delete(bear_tgt_line)
+            if not na(bear_tgt_lbl)
+                label.delete(bear_tgt_lbl)
+            
+            bear_tgt_price := low
+            bear_tgt_active := true
+            bear_tgt_locked := false
+            
+            bear_tgt_line := line.new(bar_index, bear_tgt_price, end_b, bear_tgt_price, color=col_tgt_bear, width=tgt_line_width, style=get_style(tgt_line_style))
+            bear_tgt_lbl  := label.new(end_b + offsetGap, bear_tgt_price, "Sellers TGT", textcolor=col_tgt_bear, style=label.style_label_up, color=color(na), size=get_size(lbl_size_lines))
+
+    // ═══════════════════════════════════════════════════════════════
+    // 2. NESTED FVA DETECTION (Runs First for NBCs)
+    // ═══════════════════════════════════════════════════════════════
+    if is_nbc
+        current_nbc_is_nested := false
+        if bull_structs.size() > 0
+            for i = bull_structs.size() - 1 to 0
+                BullStructure bs = bull_structs.get(i)
+                if not bs.cb_violated and not bs.is_significant
+                    if close <= bs.fva_top and close >= bs.fva_bot
+                        bs.is_significant := true
+                        bs.sig_state := 0
+                        current_nbc_is_nested := true
+                        current_nbc_parent_start := bs.origin_bar
+                        current_nbc_parent_high := bs.fva_top
+                        current_nbc_parent_low := bs.fva_bot
+                        if show_nested_border and not na(bs.cb)
+                            box.set_border_color(bs.cb, color.gray)
+                            box.set_border_width(bs.cb, nested_border_width)
+                        if not show_nested_bg and not na(bs.cb)
+                            box.set_bgcolor(bs.cb, color(na))
+                bull_structs.set(i, bs)
+                
+        if not current_nbc_is_nested and bear_structs.size() > 0
+            for i = bear_structs.size() - 1 to 0
+                BearStructure bs = bear_structs.get(i)
+                if not bs.cb_violated and not bs.is_significant
+                    if close <= bs.fva_top and close >= bs.fva_bot
+                        bs.is_significant := true
+                        bs.sig_state := 0
+                        current_nbc_is_nested := true
+                        current_nbc_parent_start := bs.origin_bar
+                        current_nbc_parent_high := bs.fva_top
+                        current_nbc_parent_low := bs.fva_bot
+                        if show_nested_border and not na(bs.cb)
+                            box.set_border_color(bs.cb, color.gray)
+                            box.set_border_width(bs.cb, nested_border_width)
+                        if not show_nested_bg and not na(bs.cb)
+                            box.set_bgcolor(bs.cb, color(na))
+                bear_structs.set(i, bs)
+                
+        if not current_nbc_is_nested and pe_boxes.size() > 0
+            for i = pe_boxes.size() - 1 to 0
+                PEBox pb = pe_boxes.get(i)
+                if not pb.is_violated and not pb.is_significant
+                    if close <= pb.fva_top and close >= pb.fva_bot
+                        pb.is_significant := true
+                        pb.sig_state := 0
+                        current_nbc_is_nested := true
+                        current_nbc_parent_start := pb.creation_bar
+                        current_nbc_parent_high := pb.fva_top
+                        current_nbc_parent_low := pb.fva_bot
+                        if show_nested_border and not na(pb.bx)
+                            box.set_border_color(pb.bx, color.gray)
+                            box.set_border_width(pb.bx, nested_border_width)
+                        if not show_nested_bg and not na(pb.bx)
+                            box.set_bgcolor(pb.bx, color(na))
+                pe_boxes.set(i, pb)
+
+    // ═══════════════════════════════════════════════════════════════
+    // 3. INVALIDATION + STRUCTURAL TREND FLIP + LQG BREAK DETECTION
+    // ═══════════════════════════════════════════════════════════════
+
+    // ── BULL STRUCTURES ─────────────────────────────────────────────
+    if bull_structs.size() > 0
+        for i = bull_structs.size() - 1 to 0
+            BullStructure bs = bull_structs.get(i)
+            
+            // 1. Check SL Violated
+            bool sl_touch = bar_index > bs.break_bar and not na(bs.swing_price) and low <= bs.swing_price
+            if sl_touch and not bs.sl_violated
+                if not na(bs.sl)
+                    line.delete(bs.sl)
+                if not na(bs.sl_lbl)
+                    label.delete(bs.sl_lbl)
+                if not na(bs.bb_line)
+                    line.delete(bs.bb_line)
+                if not na(bs.bb_lbl)
+                    label.delete(bs.bb_lbl)
+                bs.sl_violated := true
+
+                if close < bs.swing_price
+                    structural_trend    := "BEAR"
+                    last_trend_flip_lvl := bs.swing_price
+                    last_trend_flip_bar := bar_index
+                    lqg_bull_pending    := false
+                    lqg_bull_count      := 0
+                    if not na(lqg_break_bull_lbl)
+                        label.delete(lqg_break_bull_lbl)
+                        lqg_break_bull_lbl := na
+                        
+            // 2. Check FVA Filled
+            if not bs.fva_filled and bar_index > bs.break_bar
+                if low <= bs.fva_bot
+                    bs.fva_filled := true
+                    if not bs.is_significant and not na(bs.cb)
+                        box.set_bgcolor(bs.cb, color.new(color.gray, 85))
+
+            // 2.5 Grey Phase Logic
+            if bs.fva_filled and not bs.cb_violated and not bs.is_significant
+                if bs.grey_phase == 0 and close > bs.fva_top
+                    bs.grey_phase := 1
+                else if bs.grey_phase == 1 and low <= bs.fva_top
+                    bs.grey_phase := 2
+                else if bs.grey_phase == 2 and close > bs.fva_top
+                    bs.grey_phase := 3
+                    if show_rej_border and not na(bs.cb)
+                        box.set_border_color(bs.cb, color.green)
+                        box.set_border_width(bs.cb, rej_border_width)
+                    if not na(bs.cb)
+                        box.set_bgcolor(bs.cb, color.new(color.green, 85))
+
+            // 3. Significant Breakout Update
+            if bs.is_significant and bs.sig_state == 0
+                if close > bs.fva_top
+                    bs.sig_state := 1
+                    if show_nested_border and not na(bs.cb)
+                        box.set_border_color(bs.cb, color.green)
+                    if not na(bs.cb)
+                        box.set_bgcolor(bs.cb, show_nested_bg ? color.new(color.green, 85) : color(na))
+                else if close < bs.fva_bot
+                    bs.sig_state := -1
+                    if show_nested_border and not na(bs.cb)
+                        box.set_border_color(bs.cb, color.red)
+                    if not na(bs.cb)
+                        box.set_bgcolor(bs.cb, show_nested_bg ? color.new(color.red, 85) : color(na))
+
+            // 4. Check CB Violated (Deletion rules)
+            bool cb_brk = false
+            if bs.is_significant
+                if bs.sig_state == 1 and close < bs.fva_bot
+                    cb_brk := true
+                else if bs.sig_state == -1 and close > bs.fva_top
+                    cb_brk := true
+            else
+                cb_brk := not bs.cb_violated and close < bs.fva_bot
+                
+            if cb_brk
+                if not na(bs.cb)
+                    box.delete(bs.cb)
+                if not na(bs.cb_mid)
+                    line.delete(bs.cb_mid)
+                if not na(bs.vp)
+                    deleteZoneLines(bs.vp)
+                bs.cb_violated := true
+                
+                if not bs.has_swing_line and not bs.sl_violated
+                    if not na(bs.bb_line)
+                        line.delete(bs.bb_line)
+                    if not na(bs.bb_lbl)
+                        label.delete(bs.bb_lbl)
+                    bs.sl_violated := true
+
+            // Clean-up Evaluation
+            if bs.sl_violated and bs.cb_violated and bs.poc_deleted
+                bull_structs.remove(i)
+                continue
+            
+            // ─── THE SWING EXTENSIONS ───
+            if not bs.sl_violated
+                if not na(bs.sl)
+                    line.set_x2(bs.sl, end_b)
+                if not na(bs.sl_lbl)
+                    label.set_x(bs.sl_lbl, end_b + offsetGap)
+            
+            if not bs.cb_violated
+                if not bs.fva_filled or extend_filled_fva or bs.is_significant
+                    if not na(bs.cb)
+                        box.set_right(bs.cb, end_b)
+
+            // LQG logic
+            if not bs.cb_violated and low < bs.nbc_low and close >= bs.nbc_low
+                lqg_bull_pending := true
+                lqg_bull_count   += 1
+                if bs.vis_ok and show_lqg
+                    color _lbg  = lqg_bg_on ? color.new(lqg_bull_color, 30) : color(na)
+                    color _ltxt = lqg_bg_on ? color.white : lqg_bull_color
+                    label lqg_lbl = label.new(bar_index + offsetGap, low, "LQG", color=_lbg, textcolor=_ltxt, style=label.style_label_up, size=get_size(lqg_size))
+                    global_lqg_bull_labels.push(lqg_lbl)
+
+            // PES/PEL (POC Box) Deletion on Touch
+            if not bs.poc_deleted and bs.vis_ok
+                if not na(bs.cb_poc_price) and low <= bs.cb_poc_price
+                    bs.poc_touched := true
+                    if i == bull_structs.size() - 1
+                        bull_tgt_locked := true
+
+                    if not na(bs.poc_box)
+                        box.delete(bs.poc_box)
+                        bs.poc_box := box(na)
+                    if not na(bs.poc_lbl)
+                        label.delete(bs.poc_lbl)
+                        bs.poc_lbl := label(na)
+                    if not na(bs.vp)
+                        deleteZoneLines(bs.vp)
+                    bs.poc_deleted := true
+                if not bs.poc_deleted
+                    if not na(bs.poc_box)
+                        box.set_right(bs.poc_box, end_b)
+                    if not na(bs.poc_lbl)
+                        label.set_xy(bs.poc_lbl, end_b, bs.cb_poc_price)
+
+            // Entries
+            bool is_nest = bs.is_nested
+            string e_poc_name = is_nest ? "① Nested PES/PEL" : "① PES/PEL"
+            bool e_poc_use = is_nest ? useNestedPoc : usePesPelPoc
+            string e_poc_mode = is_nest ? epNestedPoc : epPesPelPoc
+            string e_blk_name = is_nest ? "③ Nested CDL/CDS" : "③ CDL/CDS"
+            bool e_blk_use = is_nest ? useNestedBlock : useCdlCdsBlock
+            string e_blk_mode = is_nest ? epNestedBlock : epCdlCdsBlock
+
+            if not na(bs.cb_poc_price) and bs.vis_ok
+                if e_poc_use and not bs.poc_entry_taken and isEntryAllowed(true)
+                    if e_poc_mode == "Touch" and low <= bs.cb_poc_price
+                        bs.poc_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(true)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBullSL(bs.swing_price, bs.fva_bot) - (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(true, bs.cb_poc_price, _slP, e_poc_name, globalTradeId))
+                    else if e_poc_mode == "Touch + BuX/BeX" and bs.poc_touched and is_bux
+                        bs.poc_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(true)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBullSL(bs.swing_price, bs.fva_bot) - (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(true, close, _slP, e_poc_name, globalTradeId))
+
+            if not na(bs.cb_mid_val) and bs.vis_ok
+                if low <= bs.cb_mid_val
+                    bs.block_touched := true
+                if e_blk_use and not bs.block_entry_taken and isEntryAllowed(true)
+                    if e_blk_mode == "Touch" and low <= bs.cb_mid_val
+                        bs.block_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(true)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBullSL(bs.swing_price, bs.fva_bot) - (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(true, bs.cb_mid_val, _slP, e_blk_name, globalTradeId))
+                    else if e_blk_mode == "Touch + BuX/BeX" and bs.block_touched and is_bux
+                        bs.block_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(true)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBullSL(bs.swing_price, bs.fva_bot) - (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(true, close, _slP, e_blk_name, globalTradeId))
+                            
+            bull_structs.set(i, bs)
+
+    // ── BEAR STRUCTURES ─────────────────────────────────────────────
+    if bear_structs.size() > 0
+        for i = bear_structs.size() - 1 to 0
+            BearStructure bs = bear_structs.get(i)
+            
+            // 1. Check SL Violated
+            bool sh_touch = bar_index > bs.break_bar and not na(bs.swing_price) and high >= bs.swing_price
+            if sh_touch and not bs.sl_violated
+                if not na(bs.sh)
+                    line.delete(bs.sh)
+                if not na(bs.sh_lbl)
+                    label.delete(bs.sh_lbl)
+                if not na(bs.bb_line)
+                    line.delete(bs.bb_line)
+                if not na(bs.bb_lbl)
+                    label.delete(bs.bb_lbl)
+                bs.sl_violated := true
+                if close > bs.swing_price
+                    structural_trend    := "BULL"
+                    last_trend_flip_lvl := bs.swing_price
+                    last_trend_flip_bar := bar_index
+                    lqg_bear_pending    := false
+                    lqg_bear_count      := 0
+                    if not na(lqg_break_bear_lbl)
+                        label.delete(lqg_break_bear_lbl)
+                        lqg_break_bear_lbl := na
+                        
+            // 2. Check FVA Filled 
+            if not bs.fva_filled and bar_index > bs.break_bar
+                if high >= bs.fva_top
+                    bs.fva_filled := true
+                    if not bs.is_significant and not na(bs.cb)
+                        box.set_bgcolor(bs.cb, color.new(color.gray, 85))
+
+            // 2.5 Grey Phase Logic
+            if bs.fva_filled and not bs.cb_violated and not bs.is_significant
+                if bs.grey_phase == 0 and close < bs.fva_bot
+                    bs.grey_phase := 1
+                else if bs.grey_phase == 1 and high >= bs.fva_bot
+                    bs.grey_phase := 2
+                else if bs.grey_phase == 2 and close < bs.fva_bot
+                    bs.grey_phase := 3
+                    if show_rej_border and not na(bs.cb)
+                        box.set_border_color(bs.cb, color.red)
+                        box.set_border_width(bs.cb, rej_border_width)
+                    if not na(bs.cb)
+                        box.set_bgcolor(bs.cb, color.new(color.red, 85))
+
+            // 3. Significant Breakout Update
+            if bs.is_significant and bs.sig_state == 0
+                if close > bs.fva_top
+                    bs.sig_state := 1
+                    if show_nested_border and not na(bs.cb)
+                        box.set_border_color(bs.cb, color.green)
+                    if not na(bs.cb)
+                        box.set_bgcolor(bs.cb, show_nested_bg ? color.new(color.green, 85) : color(na))
+                else if close < bs.fva_bot
+                    bs.sig_state := -1
+                    if show_nested_border and not na(bs.cb)
+                        box.set_border_color(bs.cb, color.red)
+                    if not na(bs.cb)
+                        box.set_bgcolor(bs.cb, show_nested_bg ? color.new(color.red, 85) : color(na))
+
+            // 4. Check CB Violated (Deletion rules)
+            bool cb_brk = false
+            if bs.is_significant
+                if bs.sig_state == 1 and close < bs.fva_bot
+                    cb_brk := true
+                else if bs.sig_state == -1 and close > bs.fva_top
+                    cb_brk := true
+            else
+                cb_brk := not bs.cb_violated and close > bs.fva_top
+                
+            if cb_brk
+                if not na(bs.cb)
+                    box.delete(bs.cb)
+                if not na(bs.cb_mid)
+                    line.delete(bs.cb_mid)
+                if not na(bs.vp)
+                    deleteZoneLines(bs.vp)
+                bs.cb_violated := true
+                if not bs.has_swing_line and not bs.sl_violated
+                    if not na(bs.bb_line)
+                        line.delete(bs.bb_line)
+                    if not na(bs.bb_lbl)
+                        label.delete(bs.bb_lbl)
+                    bs.sl_violated := true
+
+            // Clean-up Evaluation
+            if bs.sl_violated and bs.cb_violated and bs.poc_deleted
+                bear_structs.remove(i)
+                continue
+            
+            // ─── THE SWING EXTENSIONS ───
+            if not bs.sl_violated
+                if not na(bs.sh)
+                    line.set_x2(bs.sh, end_b)
+                if not na(bs.sh_lbl)
+                    label.set_x(bs.sh_lbl, end_b + offsetGap)
+            
+            if not bs.cb_violated
+                if not bs.fva_filled or extend_filled_fva or bs.is_significant
+                    if not na(bs.cb)
+                        box.set_right(bs.cb, end_b)
+
+            // LQG logic
+            if not bs.cb_violated and high > bs.nbc_high and close <= bs.nbc_high
+                lqg_bear_pending := true
+                lqg_bear_count   += 1
+                if bs.vis_ok and show_lqg
+                    color _lbg  = lqg_bg_on ? color.new(lqg_bear_color, 30) : color(na)
+                    color _ltxt = lqg_bg_on ? color.white : lqg_bear_color
+                    label lqg_lbl = label.new(bar_index + offsetGap, high, "LQG", color=_lbg, textcolor=_ltxt, style=label.style_label_down, size=get_size(lqg_size))
+                    global_lqg_bear_labels.push(lqg_lbl)
+
+            // PES/PEL (POC Box) Deletion on Touch
+            if not bs.poc_deleted and bs.vis_ok
+                if not na(bs.cb_poc_price) and high >= bs.cb_poc_price
+                    bs.poc_touched := true
+                    if i == bear_structs.size() - 1
+                        bear_tgt_locked := true
+
+                    if not na(bs.poc_box)
+                        box.delete(bs.poc_box)
+                        bs.poc_box := box(na)
+                    if not na(bs.poc_lbl)
+                        label.delete(bs.poc_lbl)
+                        bs.poc_lbl := label(na)
+                    if not na(bs.vp)
+                        deleteZoneLines(bs.vp)
+                    bs.poc_deleted := true
+                if not bs.poc_deleted
+                    if not na(bs.poc_box)
+                        box.set_right(bs.poc_box, end_b)
+                    if not na(bs.poc_lbl)
+                        label.set_xy(bs.poc_lbl, end_b, bs.cb_poc_price)
+
+            // Entries
+            bool is_nest = bs.is_nested
+            string e_poc_name = is_nest ? "① Nested PES/PEL" : "① PES/PEL"
+            bool e_poc_use = is_nest ? useNestedPoc : usePesPelPoc
+            string e_poc_mode = is_nest ? epNestedPoc : epPesPelPoc
+            string e_blk_name = is_nest ? "③ Nested CDL/CDS" : "③ CDL/CDS"
+            bool e_blk_use = is_nest ? useNestedBlock : useCdlCdsBlock
+            string e_blk_mode = is_nest ? epNestedBlock : epCdlCdsBlock
+
+            if not na(bs.cb_poc_price) and bs.vis_ok
+                if e_poc_use and not bs.poc_entry_taken and isEntryAllowed(false)
+                    if e_poc_mode == "Touch" and high >= bs.cb_poc_price
+                        bs.poc_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(false)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBearSL(bs.swing_price, bs.fva_top) + (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(false, bs.cb_poc_price, _slP, e_poc_name, globalTradeId))
+                    else if e_poc_mode == "Touch + BuX/BeX" and bs.poc_touched and is_bex
+                        bs.poc_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(false)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBearSL(bs.swing_price, bs.fva_top) + (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(false, close, _slP, e_poc_name, globalTradeId))
+
+            if not na(bs.cb_mid_val) and bs.vis_ok
+                if high >= bs.cb_mid_val
+                    bs.block_touched := true
+                if e_blk_use and not bs.block_entry_taken and isEntryAllowed(false)
+                    if e_blk_mode == "Touch" and high >= bs.cb_mid_val
+                        bs.block_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(false)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBearSL(bs.swing_price, bs.fva_top) + (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(false, bs.cb_mid_val, _slP, e_blk_name, globalTradeId))
+                    else if e_blk_mode == "Touch + BuX/BeX" and bs.block_touched and is_bex
+                        bs.block_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(false)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBearSL(bs.swing_price, bs.fva_top) + (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(false, close, _slP, e_blk_name, globalTradeId))
+                            
+            bear_structs.set(i, bs)
+
+
+    // ── PE BOXES (②④) ────────────────────────────────────────────────
+    if pe_boxes.size() > 0
+        for i = pe_boxes.size() - 1 to 0
+            PEBox pb = pe_boxes.get(i)
+            
+            // 1. SL Check
+            bool sl_touch = pb.is_bull ? (not na(pb.del_level) and low <= pb.del_level) : (not na(pb.del_level) and high >= pb.del_level)
+            if sl_touch and not pb.sl_violated
+                if not na(pb.bb_line)
+                    line.delete(pb.bb_line)
+                if not na(pb.bb_lbl)
+                    label.delete(pb.bb_lbl)
+                pb.sl_violated := true
+
+            // 2. FVA Fill Check
+            if not pb.fva_filled and bar_index > pb.creation_bar
+                if pb.is_bull and low <= pb.fva_bot
+                    pb.fva_filled := true
+                else if not pb.is_bull and high >= pb.fva_top
+                    pb.fva_filled := true
+                if pb.fva_filled
+                    if not pb.is_significant and not na(pb.bx)
+                        box.set_bgcolor(pb.bx, color.new(color.gray, 85))
+
+            // 2.5 Grey Phase Logic
+            if pb.fva_filled and not pb.is_violated and not pb.is_significant
+                if pb.is_bull
+                    if pb.grey_phase == 0 and close > pb.fva_top
+                        pb.grey_phase := 1
+                    else if pb.grey_phase == 1 and low <= pb.fva_top
+                        pb.grey_phase := 2
+                    else if pb.grey_phase == 2 and close > pb.fva_top
+                        pb.grey_phase := 3
+                        if show_rej_border and not na(pb.bx)
+                            box.set_border_color(pb.bx, color.green)
+                            box.set_border_width(pb.bx, rej_border_width)
+                        if not na(pb.bx)
+                            box.set_bgcolor(pb.bx, color.new(color.green, 85))
+                else
+                    if pb.grey_phase == 0 and close < pb.fva_bot
+                        pb.grey_phase := 1
+                    else if pb.grey_phase == 1 and high >= pb.fva_bot
+                        pb.grey_phase := 2
+                    else if pb.grey_phase == 2 and close < pb.fva_bot
+                        pb.grey_phase := 3
+                        if show_rej_border and not na(pb.bx)
+                            box.set_border_color(pb.bx, color.red)
+                            box.set_border_width(pb.bx, rej_border_width)
+                        if not na(pb.bx)
+                            box.set_bgcolor(pb.bx, color.new(color.red, 85))
+
+            // 3. Significant Breakout Update
+            if pb.is_significant and pb.sig_state == 0
+                if close > pb.fva_top
+                    pb.sig_state := 1
+                    if show_nested_border and not na(pb.bx)
+                        box.set_border_color(pb.bx, color.green)
+                    if not na(pb.bx)
+                        box.set_bgcolor(pb.bx, show_nested_bg ? color.new(color.green, 85) : color(na))
+                else if close < pb.fva_bot
+                    pb.sig_state := -1
+                    if show_nested_border and not na(pb.bx)
+                        box.set_border_color(pb.bx, color.red)
+                    if not na(pb.bx)
+                        box.set_bgcolor(pb.bx, show_nested_bg ? color.new(color.red, 85) : color(na))
+                        
+            // 4. CB Violation Check
+            bool inv = false
+            if pb.is_significant
+                if pb.sig_state == 1 and close < pb.fva_bot
+                    inv := true
+                else if pb.sig_state == -1 and close > pb.fva_top
+                    inv := true
+            else
+                inv := (pb.is_bull and close < pb.fva_bot) or (not pb.is_bull and close > pb.fva_top)
+                
+            if inv and not pb.is_violated
+                if not na(pb.bx)
+                    box.delete(pb.bx)
+                if not na(pb.lbl)
+                    label.delete(pb.lbl)
+                if not na(pb.vp)
+                    deleteZoneLines(pb.vp)
+                pb.is_violated := true
+                if not pb.has_swing_line and not pb.sl_violated
+                    if not na(pb.bb_line)
+                        line.delete(pb.bb_line)
+                    if not na(pb.bb_lbl)
+                        label.delete(pb.bb_lbl)
+                    pb.sl_violated := true
+
+            // POC Deletion on Touch
+            if not pb.poc_deleted and pb.vis_ok
+                if pb.is_bull and not na(pb.poc_price_val) and low <= pb.poc_price_val
+                    pb.poc_touched := true
+                    if i == pe_boxes.size() - 1
+                        bull_tgt_locked := true
+                else if not pb.is_bull and not na(pb.poc_price_val) and high >= pb.poc_price_val
+                    pb.poc_touched := true
+                    if i == pe_boxes.size() - 1
+                        bear_tgt_locked := true
+
+                if pb.poc_touched
+                    if not na(pb.poc_box)
+                        box.delete(pb.poc_box)
+                        pb.poc_box := box(na)
+                    if not na(pb.poc_lbl)
+                        label.delete(pb.poc_lbl)
+                        pb.poc_lbl := label(na)
+                    if not na(pb.vp)
+                        deleteZoneLines(pb.vp)
+                    pb.poc_deleted := true
+                if not pb.poc_deleted
+                    if not na(pb.poc_box)
+                        box.set_right(pb.poc_box, end_b)
+                    if not na(pb.poc_lbl)
+                        label.set_xy(pb.poc_lbl, end_b, pb.poc_price_val)
+
+            if pb.sl_violated and pb.is_violated and pb.poc_deleted
+                pe_boxes.remove(i)
+                continue
+
+            // POC/Block Entries
+            bool is_nest = pb.is_nested
+            string e_poc_name = is_nest ? "② Nested PES/PEL+" : "② PES/PEL+"
+            bool e_poc_use = usePesPelPlusPoc
+            string e_poc_mode = epPesPelPlusPoc
+            string e_blk_name = is_nest ? "④ Nested CDL/CDS+" : "④ CDL/CDS+"
+            bool e_blk_use = useCdlCdsPlusBlock
+            string e_blk_mode = epCdlCdsPlusBlock
+
+            if pb.is_bull and not pb.is_violated
+                if e_poc_use and not pb.poc_entry_taken and isEntryAllowed(true)
+                    if e_poc_mode == "Touch" and pb.poc_touched
+                        pb.poc_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(true)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBullSL(pb.del_level, pb.fva_bot) - (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(true, pb.poc_price_val, _slP, e_poc_name, globalTradeId))
+                    else if e_poc_mode == "Touch + BuX/BeX" and pb.poc_touched and is_bux
+                        pb.poc_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(true)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBullSL(pb.del_level, pb.fva_bot) - (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(true, close, _slP, e_poc_name, globalTradeId))
+                if not na(pb.fva_top) and pb.vis_ok
+                    if low <= pb.fva_top
+                        pb.block_touched := true
+                    if e_blk_use and not pb.block_entry_taken and isEntryAllowed(true)
+                        if e_blk_mode == "Touch" and low <= pb.fva_top
+                            pb.block_entry_taken := true
+                            bool cycle_ok = cycleState.check_update(true)
+                            if not limitEntriesPerCycle or cycle_ok
+                                globalTradeId += 1
+                                if na(firstTradeTime)
+                                    firstTradeTime := time
+                                float _slP = getBullSL(pb.del_level, pb.fva_bot) - (stopLossTicks * tickSize)
+                                pushTradeToArrays(createTrade(true, pb.fva_top, _slP, e_blk_name, globalTradeId))
+                        else if e_blk_mode == "Touch + BuX/BeX" and pb.block_touched and is_bux
+                            pb.block_entry_taken := true
+                            bool cycle_ok = cycleState.check_update(true)
+                            if not limitEntriesPerCycle or cycle_ok
+                                globalTradeId += 1
+                                if na(firstTradeTime)
+                                    firstTradeTime := time
+                                float _slP = getBullSL(pb.del_level, pb.fva_bot) - (stopLossTicks * tickSize)
+                                pushTradeToArrays(createTrade(true, close, _slP, e_blk_name, globalTradeId))
+            else if not pb.is_bull and not pb.is_violated
+                if e_poc_use and not pb.poc_entry_taken and isEntryAllowed(false)
+                    if e_poc_mode == "Touch" and pb.poc_touched
+                        pb.poc_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(false)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBearSL(pb.del_level, pb.fva_top) + (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(false, pb.poc_price_val, _slP, e_poc_name, globalTradeId))
+                    else if e_poc_mode == "Touch + BuX/BeX" and pb.poc_touched and is_bex
+                        pb.poc_entry_taken := true
+                        bool cycle_ok = cycleState.check_update(false)
+                        if not limitEntriesPerCycle or cycle_ok
+                            globalTradeId += 1
+                            if na(firstTradeTime)
+                                firstTradeTime := time
+                            float _slP = getBearSL(pb.del_level, pb.fva_top) + (stopLossTicks * tickSize)
+                            pushTradeToArrays(createTrade(false, close, _slP, e_poc_name, globalTradeId))
+                if not na(pb.fva_bot) and pb.vis_ok
+                    if high >= pb.fva_bot
+                        pb.block_touched := true
+                    if e_blk_use and not pb.block_entry_taken and isEntryAllowed(false)
+                        if e_blk_mode == "Touch" and high >= pb.fva_bot
+                            pb.block_entry_taken := true
+                            bool cycle_ok = cycleState.check_update(false)
+                            if not limitEntriesPerCycle or cycle_ok
+                                globalTradeId += 1
+                                if na(firstTradeTime)
+                                    firstTradeTime := time
+                                float _slP = getBearSL(pb.del_level, pb.fva_top) + (stopLossTicks * tickSize)
+                                pushTradeToArrays(createTrade(false, pb.fva_bot, _slP, e_blk_name, globalTradeId))
+                        else if e_blk_mode == "Touch + BuX/BeX" and pb.block_touched and is_bex
+                            pb.block_entry_taken := true
+                            bool cycle_ok = cycleState.check_update(false)
+                            if not limitEntriesPerCycle or cycle_ok
+                                globalTradeId += 1
+                                if na(firstTradeTime)
+                                    firstTradeTime := time
+                                float _slP = getBearSL(pb.del_level, pb.fva_top) + (stopLossTicks * tickSize)
+                                pushTradeToArrays(createTrade(false, close, _slP, e_blk_name, globalTradeId))
+                    
+            if not pb.is_violated and pb.vis_ok
+                if not pb.fva_filled or extend_filled_fva or pb.is_significant
+                    if show_pe_boxes and not na(pb.bx)
+                        box.set_right(pb.bx, end_b)
+                    if not na(pb.lbl)
+                        label.set_xy(pb.lbl, end_b, (pb.box_top + pb.box_bot) / 2)
+                
+            pe_boxes.set(i, pb)
+
+    if lqg_bull_pending and is_bux
+        structural_trend    := "BULL"
+        last_trend_flip_lvl := close
+        last_trend_flip_bar := bar_index
+        lqg_bull_pending    := false
+        lqg_bull_count      := 0
+        if useLqgEntry and isEntryAllowed(true)
+            bool cycle_ok = cycleState.check_update(true)
+            if not limitEntriesPerCycle or cycle_ok
+                float ep = f_get_candle_entry(lqgEntryPoint, open, high, low, close)
+                float _sl = na
+                if lqgSlMode == "LQG Sweep Extreme"
+                    _sl := recent_swing_low
+                else if lqgSlMode == "CDL SL / CDS SH"
+                    _sl := recent_swing_low
+                else if lqgSlMode == "Entry Candle H/L"
+                    _sl := low
+                if na(_sl) or _sl >= ep
+                    _sl := low
+                globalTradeId += 1
+                if na(firstTradeTime)
+                    firstTradeTime := time
+                pushTradeToArrays(createTrade(true, ep, _sl - (stopLossTicks * tickSize), "⑥ LQG", globalTradeId))
+
+    if lqg_bear_pending and is_bex
+        structural_trend    := "BEAR"
+        last_trend_flip_lvl := close
+        last_trend_flip_bar := bar_index
+        lqg_bear_pending    := false
+        lqg_bear_count      := 0
+        if useLqgEntry and isEntryAllowed(false)
+            bool cycle_ok = cycleState.check_update(false)
+            if not limitEntriesPerCycle or cycle_ok
+                float ep = f_get_candle_entry(lqgEntryPoint, open, high, low, close)
+                float _sl = na
+                if lqgSlMode == "LQG Sweep Extreme"
+                    _sl := recent_swing_high
+                else if lqgSlMode == "CDL SL / CDS SH"
+                    _sl := recent_swing_high
+                else if lqgSlMode == "Entry Candle H/L"
+                    _sl := high
+                if na(_sl) or _sl <= ep
+                    _sl := high
+                globalTradeId += 1
+                if na(firstTradeTime)
+                    firstTradeTime := time
+                pushTradeToArrays(createTrade(false, ep, _sl + (stopLossTicks * tickSize), "⑥ LQG", globalTradeId))
+
+    if lqg_bull_count >= 2 and structural_trend != "BULL"
+        structural_trend := "BULL"
+        lqg_bull_count   := 0
+    if lqg_bear_count >= 2 and structural_trend != "BEAR"
+        structural_trend := "BEAR"
+        lqg_bear_count   := 0
+
+    if is_nbc and (current_state == STATE_BULL or current_state == STATE_BEAR or current_state == -999)
+        fva_running_top  := math.max(open, close)
+        fva_running_bot  := math.min(open, close)
+        fva_running_high := high
+        fva_running_low  := low
+        fva_start_bar    := bar_index
+        last_nbc_high    := high
+        last_nbc_low     := low
+        last_nbc_bar     := bar_index
+        current_state    := STATE_NBC
+        if show_nbc_box
+            nbc_active_box := box.new(bar_index, fva_running_top, bar_index, fva_running_bot, border_color=na, bgcolor=color.new(col_nbc, 85))
+
+    else if current_state == STATE_NBC
+        if is_bux and close > last_nbc_high
+            global_slp := math.min(fva_running_low, low)
+            bool _vis = isVisOk(true)
+            bool   _str    = f_delta_strong(bar_delta, true)
+            string _qtag   = _str ? "" : " ⚠"
+            color  _cb_col = _str ? col_cb_bull : color.new(#ffcc00, 85)
+            last_bc_strong := _str
+            bc_quality_txt := _str ? "STRONG" : "WEAK ⚠"
+            
+            string _base_lbl = ""
+            string _sl_lbl   = ""
+            bool   is_first  = false
+            if last_bc_dir == 1
+                ld_counter += 1
+                _base_lbl := "LD" + str.tostring(ld_counter)
+                _sl_lbl   := "SL" + str.tostring(ld_counter)
+            else
+                ld_counter := 1
+                is_first := true
+                _base_lbl := "CDL"
+                _sl_lbl   := "CDL SL"
+            
+            bool _do_box = is_first ? show_cdl_box : show_ld_box
+            bool _do_bbl = is_first ? show_cdl_line : show_ld_line
+            bool _do_bbl_lbl = is_first ? show_cdl_lbl : show_ld_lbl
+            bool _do_sl_line = is_first ? show_cdl_sl_line : show_sh_sl_line
+            bool _do_sl_lbl = is_first ? show_cdl_sl_lbl : show_sh_sl_lbl
+
+            if not na(nbc_active_box)
+                box.delete(nbc_active_box)
+            box  new_cb  = na
+            line new_mid = na
+            float cbTop = fva_running_top
+            float cbBot = fva_running_bot
+            float midC  = (cbTop + cbBot) / 2
+            
+            if _vis and _do_box
+                new_cb  := box.new(fva_start_bar, cbTop, bar_index, cbBot, border_color=na, border_width=0, bgcolor=_cb_col)
+            if _vis and show_mid_line
+                new_mid := line.new(fva_start_bar, midC, bar_index, midC, color=mid_line_color, width=mid_line_width, style=get_style(mid_line_style))
+                
+            line  bb_l  = na
+            label bb_lb = na
+            if _vis and _do_bbl
+                bb_l  := line.new(last_nbc_bar, last_nbc_high, bar_index, last_nbc_high, color=col_cdl_solid, width=cdl_line_width)
+            if _vis and _do_bbl_lbl
+                bb_lb := label.new(last_nbc_bar + offsetGap, last_nbc_high, _base_lbl + _qtag, textcolor=col_cdl_solid, color=color(na), style=label.style_label_down, size=get_size(lbl_size_pe))
+
+            float slp = recent_swing_low
+            int   slb = recent_swing_low_bar
+            if na(slp)
+                slp := low
+                slb := bar_index
+                
+            bool slEx = false
+            if bull_structs.size() > 0
+                for k = 0 to bull_structs.size() - 1
+                    if bull_structs.get(k).swing_price == slp and not na(bull_structs.get(k).sl)
+                        slEx := true
+                        break
+            line  csl  = (_vis and _do_sl_line and not slEx) ? line.new(slb, slp, end_b, slp, color=col_cdl_solid, width=width_swing, style=line.style_solid) : line(na)
+            label cslL = (_vis and _do_sl_lbl and not slEx) ? label.new(end_b + offsetGap, slp, _sl_lbl, textcolor=col_cdl_solid, style=label.style_label_left, color=color(na), size=get_size(lbl_size_swing)) : label(na)
+            
+            int vpStart = current_nbc_is_nested ? current_nbc_parent_start : fva_start_bar
+            float vpH = current_nbc_is_nested ? math.max(fva_running_high, current_nbc_parent_high) : math.max(fva_running_high, high)
+            float vpL = current_nbc_is_nested ? math.min(fva_running_low, current_nbc_parent_low) : math.min(fva_running_low, low)
+            int vpLb = math.min(bar_index - vpStart, VP_MAX_LOOKBACK)
+            bool _doVP_cdl = show_nbc_pel or show_hbuv or show_hbev
+            ZoneLines cbVp = _doVP_cdl ? drawZoneLines(vpH, vpL, vpLb, 0, fva_start_bar, col_cdl_solid, true, show_nbc_pel, col_nbc_pel) : emptyZL()
+            float _cbPoc = not na(cbVp.pocLabel) ? label.get_y(cbVp.pocLabel) : na
+            if not na(_cbPoc)
+                poc_hist.push(_cbPoc)
+                if poc_hist.size() > 8
+                    poc_hist.shift()
+                poc_trend  := f_poc_trend(poc_hist)
+                value_flow := poc_trend == "up" ? "MIGRATING ↑" : poc_trend == "down" ? "MIGRATING ↓" : "FLAT  ↔"
+                
+            float _step_bull = math.max((fva_running_high - fva_running_low) / vp_bins, syminfo.mintick)
+            box poc_bx = na
+            label poc_lbl = na
+            if _vis and show_nbc_pel and not na(_cbPoc)
+                poc_bx := box.new(fva_start_bar, _cbPoc + _step_bull/2, end_b, _cbPoc - _step_bull/2, border_color=na, bgcolor=color.new(col_nbc_pel, 0))
+                poc_lbl := label.new(end_b, _cbPoc, "PEL", color=color(na), textcolor=col_nbc_pel, style=label.style_label_right, size=get_size(lbl_size_pe))
+            
+            nbc_active_box := na
+            bull_structs.push(BullStructure.new(new_cb, na, new_mid, na, na, na, na, false, false, bb_l, bb_lb, csl, cslL, last_nbc_high, last_nbc_low, bar_index, slb, slp, false, cbVp, array.new<label>(), high, low, _cbPoc, midC, false, false, false, false, _vis, fva_running_top, fva_running_bot, false, false, poc_bx, poc_lbl, false, false, 0, 0, not slEx, current_nbc_is_nested))
+            
+            if useBuxBexEntry and isEntryAllowed(true)
+                bool cycle_ok = cycleState.check_update(true)
+                if not limitEntriesPerCycle or cycle_ok
+                    float ep = f_get_candle_entry(buxBexEntryPoint, open, high, low, close)
+                    globalTradeId += 1
+                    if na(firstTradeTime)
+                        firstTradeTime := time
+                    float _slBux = getBullSL(slp, cbBot) - (stopLossTicks * tickSize)
+                    pushTradeToArrays(createTrade(true, ep, _slBux, "⑤ BuX", globalTradeId))
+            
+            current_state  := STATE_BULL
+            last_bc_dir    := 1
+            last_bc_high   := high
+            last_bc_low    := low
+            last_bc_open   := open
+            last_bc_close  := close
+            last_bc_bar    := bar_index
+
+        else if is_bex and close < last_nbc_low
+            global_shp := math.max(fva_running_high, high)
+            bool _vis = isVisOk(false)
+            bool   _str    = f_delta_strong(bar_delta, false)
+            string _qtag   = _str ? "" : " ⚠"
+            color  _cb_col = _str ? col_cb_bear : color.new(#ffcc00, 85)
+            last_bc_strong := _str
+            bc_quality_txt := _str ? "STRONG" : "WEAK ⚠"
+
+            string _base_lbl = ""
+            string _sl_lbl   = ""
+            bool is_first = false
+            if last_bc_dir == -1
+                sd_counter += 1
+                _base_lbl := "SD" + str.tostring(sd_counter)
+                _sl_lbl   := "SH" + str.tostring(sd_counter)
+            else
+                sd_counter := 1
+                is_first := true
+                _base_lbl := "CDS"
+                _sl_lbl   := "CDS SH"
+                
+            bool _do_box = is_first ? show_cdl_box : show_ld_box
+            bool _do_bbl = is_first ? show_cdl_line : show_ld_line
+            bool _do_bbl_lbl = is_first ? show_cdl_lbl : show_ld_lbl
+            bool _do_sl_line = is_first ? show_cdl_sl_line : show_sh_sl_line
+            bool _do_sl_lbl = is_first ? show_cdl_sl_lbl : show_sh_sl_lbl
+            
+            if not na(nbc_active_box)
+                box.delete(nbc_active_box)
+            box  new_cb  = na
+            line new_mid = na
+            float cbTop = fva_running_top
+            float cbBot = fva_running_bot
+            float midC  = (cbTop + cbBot) / 2
+            
+            if _vis and _do_box
+                new_cb  := box.new(fva_start_bar, cbTop, bar_index, cbBot, border_color=na, border_width=0, bgcolor=_cb_col)
+            if _vis and show_mid_line
+                new_mid := line.new(fva_start_bar, midC, bar_index, midC, color=mid_line_color, width=mid_line_width, style=get_style(mid_line_style))
+                
+            line  bb_l  = na
+            label bb_lb = na
+            if _vis and _do_bbl
+                bb_l  := line.new(last_nbc_bar, last_nbc_low, bar_index, last_nbc_low, color=col_cds_solid, width=cdl_line_width)
+            if _vis and _do_bbl_lbl
+                bb_lb := label.new(last_nbc_bar + offsetGap, last_nbc_low, _base_lbl + _qtag, textcolor=col_cds_solid, color=color(na), style=label.style_label_up, size=get_size(lbl_size_pe))
+
+            float shp = recent_swing_high
+            int   shb = recent_swing_high_bar
+            if na(shp)
+                shp := high
+                shb := bar_index
+                
+            bool shEx = false
+            if bear_structs.size() > 0
+                for k = 0 to bear_structs.size() - 1
+                    if bear_structs.get(k).swing_price == shp and not na(bear_structs.get(k).sh)
+                        shEx := true
+                        break
+            line  csh  = (_vis and _do_sl_line and not shEx) ? line.new(shb, shp, end_b, shp, color=col_cds_solid, width=width_swing, style=line.style_solid) : line(na)
+            label cshL = (_vis and _do_sl_lbl and not shEx) ? label.new(end_b + offsetGap, shp, _sl_lbl, textcolor=col_cds_solid, style=label.style_label_left, color=color(na), size=get_size(lbl_size_swing)) : label(na)
+            
+            int vpStart = current_nbc_is_nested ? current_nbc_parent_start : fva_start_bar
+            float vpH = current_nbc_is_nested ? math.max(fva_running_high, current_nbc_parent_high) : math.max(fva_running_high, high)
+            float vpL = current_nbc_is_nested ? math.min(fva_running_low, current_nbc_parent_low) : math.min(fva_running_low, low)
+            int vpLb = math.min(bar_index - vpStart, VP_MAX_LOOKBACK)
+            bool _doVP_cds = show_nbc_pes or show_hbuv or show_hbev
+            ZoneLines cbVp = _doVP_cds ? drawZoneLines(vpH, vpL, vpLb, 0, fva_start_bar, col_cds_solid, false, show_nbc_pes, col_nbc_pes) : emptyZL()
+            float _cbPoc = not na(cbVp.pocLabel) ? label.get_y(cbVp.pocLabel) : na
+            if not na(_cbPoc)
+                poc_hist.push(_cbPoc)
+                if poc_hist.size() > 8
+                    poc_hist.shift()
+                poc_trend  := f_poc_trend(poc_hist)
+                value_flow := poc_trend == "up" ? "MIGRATING ↑" : poc_trend == "down" ? "MIGRATING ↓" : "FLAT  ↔"
+            
+            float _step_bear = math.max((fva_running_high - fva_running_low) / vp_bins, syminfo.mintick)
+            box poc_bx = na
+            label poc_lbl = na
+            if _vis and show_nbc_pes and not na(_cbPoc)
+                poc_bx := box.new(fva_start_bar, _cbPoc + _step_bear/2, end_b, _cbPoc - _step_bear/2, border_color=na, bgcolor=color.new(col_nbc_pes, 0))
+                poc_lbl := label.new(end_b, _cbPoc, "PES", color=color(na), textcolor=col_nbc_pes, style=label.style_label_right, size=get_size(lbl_size_pe))
+                
+            nbc_active_box := na
+            bear_structs.push(BearStructure.new(new_cb, na, new_mid, na, na, na, na, false, false, bb_l, bb_lb, csh, cshL, last_nbc_high, last_nbc_low, bar_index, shb, shp, false, cbVp, array.new<label>(), high, low, _cbPoc, midC, false, false, false, false, _vis, fva_running_top, fva_running_bot, false, false, poc_bx, poc_lbl, false, false, 0, 0, not shEx, current_nbc_is_nested))
+            
+            if useBuxBexEntry and isEntryAllowed(false)
+                bool cycle_ok = cycleState.check_update(false)
+                if not limitEntriesPerCycle or cycle_ok
+                    float ep = f_get_candle_entry(buxBexEntryPoint, open, high, low, close)
+                    globalTradeId += 1
+                    if na(firstTradeTime)
+                        firstTradeTime := time
+                    float _slBex = getBearSL(shp, cbTop) + (stopLossTicks * tickSize)
+                    pushTradeToArrays(createTrade(false, ep, _slBex, "⑤ BeX", globalTradeId))
+
+            current_state  := STATE_BEAR
+            last_bc_dir    := -1
+            last_bc_high   := high
+            last_bc_low    := low
+            last_bc_open   := open
+            last_bc_close  := close
+            last_bc_bar    := bar_index
+
+        else if is_nbc
+            bool nH = high > fva_running_high
+            bool nL = low  < fva_running_low
+            if nH
+                fva_running_high := high
+                last_nbc_bar     := bar_index
+            if nL
+                fva_running_low  := low
+                last_nbc_bar     := bar_index
+                
+            fva_running_top  := math.max(fva_running_top, math.max(open, close))
+            fva_running_bot  := math.min(fva_running_bot, math.min(open, close))
+            
+            last_nbc_high := high
+            last_nbc_low  := low
+            
+            if show_nbc_box and not na(nbc_active_box)
+                box.set_top(nbc_active_box, fva_running_top)
+                box.set_bottom(nbc_active_box, fva_running_bot)
+                box.set_right(nbc_active_box, bar_index)
+
+    // ── BC→BC FLIP (PEL+/PES+) ─────────────────────────────────────
+    else if is_bux
+        if current_state == STATE_BEAR
+            global_slp := math.min(last_bc_low, low)
+            bool _vis = isVisOk(true)
+            line  bb_l  = na
+            label bb_lb = na
+            bool   _strp = f_delta_strong(bar_delta, true)
+            string _qtp  = _strp ? "" : " ⚠"
+            last_bc_strong := _strp
+            bc_quality_txt := _strp ? "STRONG" : "WEAK ⚠"
+            
+            string _base_lbl = ""
+            string _sl_lbl   = ""
+            if last_bc_dir == 1
+                ld_counter += 1
+                _base_lbl := "LD" + str.tostring(ld_counter)
+                _sl_lbl   := "SL" + str.tostring(ld_counter)
+            else
+                ld_counter := 1
+                _base_lbl := "CDL+"
+                _sl_lbl   := "CDL SL+"
+                
+            bool _do_box = show_plus_box
+            bool _do_bbl = show_plus_line
+            bool _do_bbl_lbl = show_plus_lbl
+            bool _do_sl_line = show_plus_sl_line
+            bool _do_sl_lbl = show_plus_sl_lbl
+            
+            if _vis and _do_bbl
+                bb_l  := line.new(last_bc_bar, last_bc_high, bar_index, last_bc_high, color=col_cdl_solid, width=cdl_line_width)
+            if _vis and _do_bbl_lbl
+                bb_lb := label.new(last_bc_bar + offsetGap, last_bc_high, _base_lbl + _qtp, textcolor=col_cdl_solid, color=color(na), style=label.style_label_down, size=get_size(lbl_size_pe))
+                
+            float pelT = math.max(last_bc_open, last_bc_close)
+            float pelB = math.min(last_bc_open, last_bc_close)
+            
+            int vpStart = last_bc_bar
+            float vpH = math.max(last_bc_high, high)
+            float vpL = math.min(last_bc_low, low)
+            bool is_flip_nested = false
+            for b in bear_structs
+                if b.break_bar == last_bc_bar
+                    if b.is_nested or b.grey_phase >= 3
+                        vpStart := b.origin_bar
+                        vpH := math.max(b.fva_top, vpH)
+                        vpL := math.min(b.fva_bot, vpL)
+                        is_flip_nested := true
+                    break
+                    
+            int   peLb = math.min(bar_index - vpStart, VP_MAX_LOOKBACK)
+            bool _doVP_pel = show_pel_poc or show_hbuv or show_hbev
+            ZoneLines peVp = _doVP_pel ? drawZoneLines(vpH, vpL, peLb, 0, last_bc_bar, col_cdl_solid, true, show_pel_poc, col_cdl_box) : emptyZL()
+            box   pelBx  = na
+            label pelLbl = na
+            if _vis and _do_box
+                pelBx := box.new(last_bc_bar, pelT, bar_index, pelB, border_color=na, bgcolor=col_cdl_box)
+                if show_pe_labels
+                    pelLbl := label.new(end_b, (pelT + pelB) / 2, "PEL+", color=color(na), textcolor=col_cdl_solid, style=label.style_label_right, size=get_size(lbl_size_pe))
+            
+            float _pelPocP = not na(peVp.pocLabel) ? label.get_y(peVp.pocLabel) : na
+            float _step_pel = math.max((last_bc_high - last_bc_low) / vp_bins, syminfo.mintick)
+            box pel_poc_bx = na
+            label pel_poc_lbl = na
+            if _vis and show_pel_poc and not na(_pelPocP)
+                pel_poc_bx := box.new(last_bc_bar, _pelPocP + _step_pel/2, end_b, _pelPocP - _step_pel/2, border_color=na, bgcolor=color.new(col_cdl_box, 0))
+                pel_poc_lbl := label.new(end_b, _pelPocP, "PEL+", color=color(na), textcolor=col_cdl_box, style=label.style_label_right, size=get_size(lbl_size_pe))
+
+            float slp = recent_swing_low
+            int   slb = recent_swing_low_bar
+            if na(slp)
+                slp := low
+                slb := bar_index
+                
+            bool slEx = false
+            if bull_structs.size() > 0
+                for k = 0 to bull_structs.size() - 1
+                    if bull_structs.get(k).swing_price == slp and not na(bull_structs.get(k).sl)
+                        slEx := true
+                        break
+                        
+            pe_boxes.push(PEBox.new(pelBx, pelLbl, bb_l, bb_lb, pel_poc_bx, pel_poc_lbl, slp, true, false, peVp, pelT, pelB, _pelPocP, false, false, false, false, _vis, pelT, pelB, false, false, bar_index, false, false, 0, 0, not slEx, is_flip_nested))
+            
+            line csl = (_vis and _do_sl_line and not slEx) ? line.new(slb, slp, end_b, slp, color=col_cdl_solid, width=width_swing, style=line.style_solid) : line(na)
+            label cslL = (_vis and _do_sl_lbl and not slEx) ? label.new(end_b + offsetGap, slp, _sl_lbl, textcolor=col_cdl_solid, style=label.style_label_left, color=color(na), size=get_size(lbl_size_swing)) : label(na)
+            
+            bull_structs.push(BullStructure.new(na, na, na, na, na, na, na, false, false, na, na, csl, cslL, last_bc_high, last_bc_low, bar_index, prev_bar, slp, false, emptyZL(), array.new<label>(), high, low, na, na, false, false, false, false, _vis, pelT, pelB, false, false, pel_poc_bx, pel_poc_lbl, false, false, 0, 0, not slEx, is_flip_nested))
+            
+            if useBuxBexEntry and isEntryAllowed(true)
+                bool cycle_ok = cycleState.check_update(true)
+                if not limitEntriesPerCycle or cycle_ok
+                    float ep = f_get_candle_entry(buxBexEntryPoint, open, high, low, close)
+                    globalTradeId += 1
+                    if na(firstTradeTime)
+                        firstTradeTime := time
+                    float _slBux = getBullSL(slp, pelB) - (stopLossTicks * tickSize)
+                    pushTradeToArrays(createTrade(true, ep, _slBux, "⑤ BuX", globalTradeId))
+        else
+            global_slp := low
+            
+        current_state := STATE_BULL
+        last_bc_dir   := 1
+        last_bc_high  := high
+        last_bc_low   := low
+        last_bc_open  := open
+        last_bc_close := close
+        last_bc_bar   := bar_index
+
+    else if is_bex
+        if current_state == STATE_BULL
+            global_shp := math.max(last_bc_high, high)
+            bool _vis = isVisOk(false)
+            line  bb_l  = na
+            label bb_lb = na
+            bool   _strm = f_delta_strong(bar_delta, false)
+            string _qtm  = _strm ? "" : " ⚠"
+            last_bc_strong := _strm
+            bc_quality_txt := _strm ? "STRONG" : "WEAK ⚠"
+            
+            string _base_lbl = ""
+            string _sl_lbl   = ""
+            if last_bc_dir == -1
+                sd_counter += 1
+                _base_lbl := "SD" + str.tostring(sd_counter)
+                _sl_lbl   := "SH" + str.tostring(sd_counter)
+            else
+                sd_counter := 1
+                _base_lbl := "CDS+"
+                _sl_lbl   := "CDS SH+"
+                
+            bool _do_box = show_plus_box
+            bool _do_bbl = show_plus_line
+            bool _do_bbl_lbl = show_plus_lbl
+            bool _do_sl_line = show_plus_sl_line
+            bool _do_sl_lbl = show_plus_sl_lbl
+            
+            if _vis and _do_bbl
+                bb_l  := line.new(last_bc_bar, last_bc_low, bar_index, last_bc_low, color=col_cds_solid, width=cdl_line_width)
+            if _vis and _do_bbl_lbl
+                bb_lb := label.new(last_bc_bar + offsetGap, last_bc_low, _base_lbl + _qtm, textcolor=col_cds_solid, color=color(na), style=label.style_label_up, size=get_size(lbl_size_pe))
+                
+            float pesT = math.max(last_bc_open, last_bc_close)
+            float pesB = math.min(last_bc_open, last_bc_close)
+            
+            int vpStart = last_bc_bar
+            float vpH = math.max(last_bc_high, high)
+            float vpL = math.min(last_bc_low, low)
+            bool is_flip_nested = false
+            for b in bull_structs
+                if b.break_bar == last_bc_bar
+                    if b.is_nested or b.grey_phase >= 3
+                        vpStart := b.origin_bar
+                        vpH := math.max(b.fva_top, vpH)
+                        vpL := math.min(b.fva_bot, vpL)
+                        is_flip_nested := true
+                    break
+
+            int   peLb = math.min(bar_index - vpStart, VP_MAX_LOOKBACK)
+            bool _doVP_pes = show_pes_poc or show_hbuv or show_hbev
+            ZoneLines peVp = _doVP_pes ? drawZoneLines(vpH, vpL, peLb, 0, last_bc_bar, col_cds_solid, false, show_pes_poc, col_cds_box) : emptyZL()
+            box   pesBx  = na
+            label pesLbl = na
+            if _vis and _do_box
+                pesBx := box.new(last_bc_bar, pesT, bar_index, pesB, border_color=na, bgcolor=col_cds_box)
+                if show_pe_labels
+                    pesLbl := label.new(end_b, (pesT + pesB) / 2, "PES+", color=color(na), textcolor=col_cds_solid, style=label.style_label_right, size=get_size(lbl_size_pe))
+            
+            float _pesPocP = not na(peVp.pocLabel) ? label.get_y(peVp.pocLabel) : na
+            float _step_pes = math.max((last_bc_high - last_bc_low) / vp_bins, syminfo.mintick)
+            box pes_poc_bx = na
+            label pes_poc_lbl = na
+            if _vis and show_pes_poc and not na(_pesPocP)
+                pes_poc_bx := box.new(last_bc_bar, _pesPocP + _step_pes/2, end_b, _pesPocP - _step_pes/2, border_color=na, bgcolor=color.new(col_cds_box, 0))
+                pes_poc_lbl := label.new(end_b, _pesPocP, "PES+", color=color(na), textcolor=col_cds_box, style=label.style_label_right, size=get_size(lbl_size_pe))
+
+            float shp = recent_swing_high
+            int   shb = recent_swing_high_bar
+            if na(shp)
+                shp := high
+                shb := bar_index
+                
+            bool shEx = false
+            if bear_structs.size() > 0
+                for k = 0 to bear_structs.size() - 1
+                    if bear_structs.get(k).swing_price == shp and not na(bear_structs.get(k).sh)
+                        shEx := true
+                        break
+                        
+            pe_boxes.push(PEBox.new(pesBx, pesLbl, bb_l, bb_lb, pes_poc_bx, pes_poc_lbl, shp, false, false, peVp, pesT, pesB, _pesPocP, false, false, false, false, _vis, pesT, pesB, false, false, bar_index, false, false, 0, 0, not shEx, is_flip_nested))
+            
+            line csh = (_vis and _do_sl_line and not shEx) ? line.new(shb, shp, end_b, shp, color=col_cds_solid, width=width_swing, style=line.style_solid) : line(na)
+            label cshL = (_vis and _do_sl_lbl and not shEx) ? label.new(end_b + offsetGap, shp, _sl_lbl, textcolor=col_cds_solid, style=label.style_label_left, color=color(na), size=get_size(lbl_size_swing)) : label(na)
+            
+            bear_structs.push(BearStructure.new(na, na, na, na, na, na, na, false, false, na, na, csh, cshL, last_bc_high, last_bc_low, bar_index, prev_bar, shp, false, emptyZL(), array.new<label>(), high, low, na, na, false, false, false, false, _vis, pesT, pesB, false, false, pes_poc_bx, pes_poc_lbl, false, false, 0, 0, not shEx, is_flip_nested))
+            
+            if useBuxBexEntry and isEntryAllowed(false)
+                bool cycle_ok = cycleState.check_update(false)
+                if not limitEntriesPerCycle or cycle_ok
+                    float ep = f_get_candle_entry(buxBexEntryPoint, open, high, low, close)
+                    globalTradeId += 1
+                    if na(firstTradeTime)
+                        firstTradeTime := time
+                    float _slBex = getBearSL(shp, pesT) + (stopLossTicks * tickSize)
+                    pushTradeToArrays(createTrade(false, ep, _slBex, "⑤ BeX", globalTradeId))
+        else
+            global_shp := high
+
+        current_state := STATE_BEAR
+        last_bc_dir   := -1
+        last_bc_high  := high
+        last_bc_low   := low
+        last_bc_open  := open
+        last_bc_close := close
+        last_bc_bar   := bar_index
+
+    while bull_structs.size() > max_swings
+        deleteBullVisuals(bull_structs.shift())
+    while bear_structs.size() > max_swings
+        deleteBearVisuals(bear_structs.shift())
+    while pe_boxes.size() > max_swings
+        PEBox old = pe_boxes.shift()
+        if not na(old.bx)
+            box.delete(old.bx)
+        if not na(old.lbl)
+            label.delete(old.lbl)
+        if not na(old.bb_line)
+            line.delete(old.bb_line)
+        if not na(old.bb_lbl)
+            label.delete(old.bb_lbl)
+        if not na(old.poc_box)
+            box.delete(old.poc_box)
+        if not na(old.poc_lbl)
+            label.delete(old.poc_lbl)
+        if not na(old.vp)
+            deleteZoneLines(old.vp)
+
+if barstate.isconfirmed
+    prev_structural_trend := structural_trend
+
+// ═══════════════════════════════════════════════════════════════════════
+// ── EXIT TRADES ON OPPOSITE BREAK (LAYER 2 - Runs Intrabar/Close)
+// ═══════════════════════════════════════════════════════════════════════
+if cancelOnOppositeBreak and barstate.isconfirmed
+    bool bullFlipped = structural_trend == "BULL" and prev_structural_trend != "BULL"
+    bool bearFlipped = structural_trend == "BEAR" and prev_structural_trend != "BEAR"
+    if (bullFlipped or bearFlipped) and activeTrades.size() > 0
+        for j = activeTrades.size() - 1 to 0
+            EntrySignal _tc = activeTrades.get(j)
+            if _tc.outcome == "pending"
+                if (bullFlipped and not _tc.isLong) or (bearFlipped and _tc.isLong)
+                    _tc.forceExit := true
+                    _tc.forceExitReason := "Opposite Break"
+                    activeTrades.set(j, _tc)
+
+// ═══════════════════════════════════════════════════════════════════════
+// 🧮 LAYER 3: OFFICIAL MATH & DELETIONS (Strictly runs on close)
+// ═══════════════════════════════════════════════════════════════════════
+if barstate.isconfirmed and activeTrades.size() > 0
+    for i = activeTrades.size() - 1 to 0
+        EntrySignal _tc2 = activeTrades.get(i)
+        if _tc2.outcome == "pending"
+            if (bar_index - _tc2.creationBar) > 500
+                _tc2.forceExit := true
+                _tc2.forceExitReason := "Expired"
+
+            if not _tc2.activated
+                bool hitEntry = _tc2.isLong ? (low <= _tc2.entryPrice) : (high >= _tc2.entryPrice)
+                if hitEntry
+                    _tc2.activated := true
+                else
+                    bool hitTpEarly = _tc2.isLong ? (high >= _tc2.takeProfit) : (low <= _tc2.takeProfit)
+                    bool hitSlEarly = _tc2.isLong ? (low <= _tc2.stopLoss) : (high >= _tc2.stopLoss)
+                    if hitTpEarly or hitSlEarly
+                        _tc2.forceExit := true
+                        _tc2.forceExitReason := "Missed (TGT/SL Hit Before Entry)"
+
+            if _tc2.activated and not _tc2.forceExit
+                float _riskDist2 = math.abs(_tc2.entryPrice - _tc2.stopLoss)
+                bool _tpH2 = _tc2.isLong ? (high >= _tc2.takeProfit) : (low  <= _tc2.takeProfit)
+                bool _slH2 = _tc2.isLong ? (low  <= _tc2.stopLoss) : (high >= _tc2.stopLoss)
+                
+                if _tpH2 or _slH2
+                    bool isWin = _tpH2
+                    _tc2.outcome := isWin ? "win" : "loss"
+                    float _exitPrice2  = isWin ? _tc2.takeProfit : _tc2.stopLoss
+                    float _finalDist2  = _tc2.isLong ? (_exitPrice2 - _tc2.entryPrice) : (_tc2.entryPrice - _exitPrice2)
+                    float _pnl2        = (_finalDist2 / math.max(_riskDist2, syminfo.mintick)) * _tc2.actualRiskDollars
+                    float _rr2         = _pnl2 / math.max(_tc2.actualRiskDollars, 1e-9)
+                    
+                    string _ct = _tc2.candleType
+                    if _pnl2 >= 0
+                        totalWins          += 1
+                        totalProfitDollars += _pnl2
+                        totalPosRR         += _rr2
+                        consecutiveWins    := lastTradeOutcome == "win" ? consecutiveWins + 1 : 1
+                        consecutiveLosses  := 0
+                        maxConsecutiveWins := math.max(maxConsecutiveWins, consecutiveWins)
+                        lastTradeOutcome   := "win"
+                        
+                        if str.contains(_ct, "Nested") and str.contains(_ct, "PES/PEL")
+                            nestPocW += 1
+                        else if str.contains(_ct, "Nested") and str.contains(_ct, "CDL/CDS")
+                            nestBlkW += 1
+                        else if str.contains(_ct, "①")
+                            pocWins += 1
+                        else if str.contains(_ct, "②")
+                            pocPlusWins += 1
+                        else if str.contains(_ct, "③")
+                            blockWins += 1
+                        else if str.contains(_ct, "④")
+                            blockPlusWins += 1
+                        else if str.contains(_ct, "⑤")
+                            buxbexWins += 1
+                        else if str.contains(_ct, "⑥")
+                            lqgWins += 1
+                    else
+                        totalLosses        += 1
+                        totalLossDollars   += math.abs(_pnl2)
+                        totalNegRR         += math.abs(_rr2)
+                        consecutiveLosses  := lastTradeOutcome == "loss" ? consecutiveLosses + 1 : 1
+                        consecutiveWins    := 0
+                        maxConsecutiveLosses := math.max(maxConsecutiveLosses, consecutiveLosses)
+                        lastTradeOutcome   := "loss"
+                        
+                        if str.contains(_ct, "Nested") and str.contains(_ct, "PES/PEL")
+                            nestPocL += 1
+                        else if str.contains(_ct, "Nested") and str.contains(_ct, "CDL/CDS")
+                            nestBlkL += 1
+                        else if str.contains(_ct, "①")
+                            pocLosses += 1
+                        else if str.contains(_ct, "②")
+                            pocPlusLosses += 1
+                        else if str.contains(_ct, "③")
+                            blockLosses += 1
+                        else if str.contains(_ct, "④")
+                            blockPlusLosses += 1
+                        else if str.contains(_ct, "⑤")
+                            buxbexLosses += 1
+                        else if str.contains(_ct, "⑥")
+                            lqgLosses += 1
+                        
+                        float _cEq  = totalProfitDollars - totalLossDollars
+                        peakEquity  := math.max(peakEquity, _cEq)
+                        maxDrawdown := math.max(maxDrawdown, peakEquity - _cEq)
+                    
+                    deleteTradeVisuals(_tc2)
+                    activeTrades.remove(i)
+                    continue
+
+            if _tc2.forceExit
+                array.set(manualExitWarningFlag, 0, true)
+                if _tc2.activated
+                    float _rP = math.round(math.abs(_tc2.entryPrice - _tc2.stopLoss) / tickSize) * tickSize
+                    if _rP > 0
+                        float _xDist = _tc2.isLong ? (close - _tc2.entryPrice) : (_tc2.entryPrice - close)
+                        float _xPnl  = (_xDist / math.max(_rP, syminfo.mintick)) * _tc2.actualRiskDollars
+                        float _xRR   = _xDist / math.max(_rP, syminfo.mintick)
+                        
+                        string _ct = _tc2.candleType
+                        if _xPnl >= 0
+                            totalWins          += 1
+                            totalProfitDollars += _xPnl
+                            totalPosRR         += _xRR
+                            consecutiveWins    := lastTradeOutcome == "win" ? consecutiveWins + 1 : 1
+                            consecutiveLosses  := 0
+                            maxConsecutiveWins := math.max(maxConsecutiveWins, consecutiveWins)
+                            lastTradeOutcome   := "win"
+                            
+                            if str.contains(_ct, "Nested") and str.contains(_ct, "PES/PEL")
+                                nestPocW += 1
+                            else if str.contains(_ct, "Nested") and str.contains(_ct, "CDL/CDS")
+                                nestBlkW += 1
+                            else if str.contains(_ct, "①")
+                                pocWins += 1
+                            else if str.contains(_ct, "②")
+                                pocPlusWins += 1
+                            else if str.contains(_ct, "③")
+                                blockWins += 1
+                            else if str.contains(_ct, "④")
+                                blockPlusWins += 1
+                            else if str.contains(_ct, "⑤")
+                                buxbexWins += 1
+                            else if str.contains(_ct, "⑥")
+                                lqgWins += 1
+                        else
+                            totalLosses        += 1
+                            totalLossDollars   += math.abs(_xPnl)
+                            totalNegRR         += math.abs(_xRR)
+                            consecutiveLosses  := lastTradeOutcome == "loss" ? consecutiveLosses + 1 : 1
+                            consecutiveWins    := 0
+                            maxConsecutiveLosses := math.max(maxConsecutiveLosses, consecutiveLosses)
+                            lastTradeOutcome   := "loss"
+                            
+                            if str.contains(_ct, "Nested") and str.contains(_ct, "PES/PEL")
+                                nestPocL += 1
+                            else if str.contains(_ct, "Nested") and str.contains(_ct, "CDL/CDS")
+                                nestBlkL += 1
+                            else if str.contains(_ct, "①")
+                                pocLosses += 1
+                            else if str.contains(_ct, "②")
+                                pocPlusLosses += 1
+                            else if str.contains(_ct, "③")
+                                blockLosses += 1
+                            else if str.contains(_ct, "④")
+                                blockPlusLosses += 1
+                            else if str.contains(_ct, "⑤")
+                                buxbexLosses += 1
+                            else if str.contains(_ct, "⑥")
+                                lqgLosses += 1
+                            
+                        float _cEq  = totalProfitDollars - totalLossDollars
+                        peakEquity  := math.max(peakEquity, _cEq)
+                        maxDrawdown := math.max(maxDrawdown, peakEquity - _cEq)
+                else
+                    if str.contains(_tc2.forceExitReason, "Expired")
+                        expiredTrades += 1
+                    else
+                        cancelledTrades += 1
+
+                deleteTradeVisuals(_tc2)
+                activeTrades.remove(i)
+
+totalUnrealizedPL := 0.0
+if activeTrades.size() > 0
+    for i = activeTrades.size() - 1 to 0
+        if i < 0 or i >= activeTrades.size()
+            break
+        EntrySignal t = activeTrades.get(i)
+
+        if t.outcome == "pending"
+            int _endB = bar_index + lineExtension
+            if t.hasVisuals
+                line.set_x2(t.entryLine, _endB)
+                line.set_x2(t.slLine,    _endB)
+                line.set_x2(t.tpLine,    _endB)
+                label.set_x(t.entryLabel, _endB + offsetGap)
+                label.set_x(t.slLabel,    _endB + offsetGap)
+                label.set_x(t.tpLabel,    _endB + offsetGap)
+
+        if t.activated
+            float _dist     = t.isLong ? (close - t.entryPrice) : (t.entryPrice - close)
+            float _riskDist = math.abs(t.entryPrice - t.stopLoss)
+            float _uPL      = (_dist / math.max(_riskDist, syminfo.mintick)) * t.actualRiskDollars
+            totalUnrealizedPL += _uPL
+
+// ═══════════════════════════════════════════════════════════════════════
+// RISK TABLE
+// ═══════════════════════════════════════════════════════════════════════
+if showRiskTable and barstate.islast
+    var table _rT = table.new(getTablePosition(riskTablePos), 2, 9, bgcolor=#000000, frame_color=color.rgb(60,60,60), frame_width=1, border_color=color.rgb(40,40,40), border_width=1)
+    color _rg  = color.rgb(22,22,22)
+    color _wht = color.white
+    int _r = 0
+    table.cell(_rT, 0, _r, "─ RISK ─", text_color=#e1b31a, text_size=getTableTextSize(riskTableSize), bgcolor=#000000)
+    table.merge_cells(_rT, 0, _r, 1, _r)
+    _r += 1
+    table.cell(_rT, 0, _r, "Drawdown", text_color=_wht, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    table.cell(_rT, 1, _r, "$" + str.tostring(capitalDrawdown, "#,###"), text_color=color.red, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "Profit TGT", text_color=_wht, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    table.cell(_rT, 1, _r, "$" + str.tostring(profitTarget, "#,###"), text_color=#27ffc3, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, cycleType, text_color=_wht, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    table.cell(_rT, 1, _r, str.tostring(challengeDays) + " Days", text_color=color.white, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "Risk/Trade", text_color=_wht, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    table.cell(_rT, 1, _r, "$" + str.tostring(riskPerTrade, "#") + " [" + (riskMode == "Fixed Risk ($)" ? "D" : "F") + "]", text_color=color.orange, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "R:R", text_color=_wht, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    table.cell(_rT, 1, _r, "1:" + str.tostring(rrRatio, "#.#"), text_color=color.lime, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "Consec Loss", text_color=_wht, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    table.cell(_rT, 1, _r, str.tostring(expectedConsecLoss) + " ($" + str.tostring(expectedTotalLoss, "#,###") + ")", text_color=color.red, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    _r += 1
+    table.cell(_rT, 0, _r, "Min Daily RR", text_color=_wht, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    table.cell(_rT, 1, _r, str.tostring(minDailyR, "#.##") + " RR", text_color=#27ffc3, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    _r += 1
+    string _slpTx = sl_use_swing ? "CDL/CDS" : sl_use_box ? "Box H/L" : "Fallback (Box/Swing)"
+    table.cell(_rT, 0, _r, "SL Mode", text_color=_wht, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+    table.cell(_rT, 1, _r, _slpTx, text_color=color.orange, text_size=getTableTextSize(riskTableSize), bgcolor=_rg)
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONTEXT TABLE
+// ═══════════════════════════════════════════════════════════════════════
+if showCtxTable and barstate.islast
+    var table _cT = table.new(getTablePosition(ctxTablePos), 2, 9, bgcolor=#000000, frame_color=color.rgb(60,60,60), frame_width=1, border_color=color.rgb(40,40,40), border_width=1)
+    color _rg2 = color.rgb(22,22,22)
+    color _wht2 = color.white
+    int _c = 0
+    table.cell(_cT, 0, _c, "─ CONTEXT ─", text_color=#e1b31a, text_size=getTableTextSize(ctxTableSize), bgcolor=#000000)
+    table.merge_cells(_cT, 0, _c, 1, _c)
+    _c += 1
+    color _stCol = structural_trend == "BULL" ? color.lime : structural_trend == "BEAR" ? color.red : color.gray
+    string _stTx = structural_trend == "BULL" ? "BULL TREND ▲" : structural_trend == "BEAR" ? "BEAR TREND ▼" : "NEUTRAL ↔"
+    color _stBg  = structural_trend == "BULL" ? color.new(color.green, 80) : structural_trend == "BEAR" ? color.new(color.red, 80) : _rg2
+    table.cell(_cT, 0, _c, "Struct Trend", text_color=_wht2, text_size=getTableTextSize(ctxTableSize), bgcolor=_stBg)
+    table.cell(_cT, 1, _c, _stTx, text_color=_stCol, text_size=getTableTextSize(ctxTableSize), bgcolor=_stBg)
+    _c += 1
+    color _lcCol = current_state == STATE_BULL ? color.lime : current_state == STATE_BEAR ? color.red : color.gray
+    string _lcTx = current_state == STATE_BULL ? "BULL BC" : current_state == STATE_BEAR ? "BEAR BC" : "NBC / BALANCE"
+    table.cell(_cT, 0, _c, "Local State", text_color=_wht2, text_size=getTableTextSize(ctxTableSize), bgcolor=_rg2)
+    table.cell(_cT, 1, _c, _lcTx, text_color=_lcCol, text_size=getTableTextSize(ctxTableSize), bgcolor=_rg2)
+    _c += 1
+    color _zCol = mmpd_fundtrend > 80 ? #ff4444 : mmpd_fundtrend > 50 ? #ff9900 : mmpd_fundtrend < 20 ? #00e676 : #27ffc3
+    color _zBg  = mmpd_premium ? color.new(color.red, 85) : color.new(color.green, 85)
+    table.cell(_cT, 0, _c, "MMPD Zone", text_color=_wht2, text_size=getTableTextSize(ctxTableSize), bgcolor=_zBg)
+    table.cell(_cT, 1, _c, mmpd_zone_txt + " " + str.tostring(mmpd_fundtrend, "#.#"), text_color=_zCol, text_size=getTableTextSize(ctxTableSize), bgcolor=_zBg)
+    _c += 1
+    color _mCol = mmpd_bull_mom ? color.lime : color.red
+    string _mTx = mmpd_bull_mom ? "BULL MOM ↑" : "BEAR MOM ↓"
+    table.cell(_cT, 0, _c, "MMPD Mom", text_color=_wht2, text_size=getTableTextSize(ctxTableSize), bgcolor=_rg2)
+    table.cell(_cT, 1, _c, _mTx, text_color=_mCol, text_size=getTableTextSize(ctxTableSize), bgcolor=_rg2)
+    _c += 1
+    color _bqCol = last_bc_strong ? color.lime : #ffaa00
+    color _bqBg  = last_bc_strong ? color.new(color.green, 88) : color.new(#ff8c00, 88)
+    table.cell(_cT, 0, _c, "BC Quality", text_color=_wht2, text_size=getTableTextSize(ctxTableSize), bgcolor=_bqBg)
+    table.cell(_cT, 1, _c, bc_quality_txt, text_color=_bqCol, text_size=getTableTextSize(ctxTableSize), bgcolor=_bqBg)
+    _c += 1
+    color _vfCol = poc_trend == "up" ? color.lime : poc_trend == "down" ? color.red : color.gray
+    color _vfBg  = poc_trend == "up" ? color.new(color.green, 88) : poc_trend == "down" ? color.new(color.red, 88) : _rg2
+    table.cell(_cT, 0, _c, "Value Flow", text_color=_wht2, text_size=getTableTextSize(ctxTableSize), bgcolor=_vfBg)
+    table.cell(_cT, 1, _c, value_flow, text_color=_vfCol, text_size=getTableTextSize(ctxTableSize), bgcolor=_vfBg)
+    _c += 1
+    bool _la  = (structural_trend != "BEAR") and mmpd_discount and mmpd_bull_mom
+    bool _sa  = (structural_trend != "BULL") and mmpd_premium  and mmpd_bear_mom
+    string _cfTx = _la ? "LONG CONF ✓" : _sa ? "SHORT CONF ✓" : "NO CONF —"
+    color _cfCol = _la ? color.lime : _sa ? color.red : color.gray
+    color _cfBg  = _la ? color.new(color.green, 75) : _sa ? color.new(color.red, 75) : color.new(color.gray, 90)
+    table.cell(_cT, 0, _c, "Confluence", text_color=_wht2, text_size=getTableTextSize(ctxTableSize), bgcolor=_cfBg)
+    table.cell(_cT, 1, _c, _cfTx, text_color=_cfCol, text_size=getTableTextSize(ctxTableSize), bgcolor=_cfBg)
+    _c += 1
+    if showActionRow
+        bool _lc2 = _la
+        bool _sc2 = _sa
+        string _act_txt = ""
+        color  _act_col = color.white
+        color  _act_bg  = color.rgb(22,22,22)
+        if _lc2
+            _act_txt := poc_trend == "up" ? "LONG + VALUE ↑ — Enter PEL on pullback" : "LONG CONF — Enter PEL on pullback"
+            _act_col := color.lime
+            _act_bg  := color.new(color.green, 80)
+        else if _sc2
+            _act_txt := poc_trend == "down" ? "SHORT + VALUE ↓ — Enter PES on bounce" : "SHORT CONF — Enter PES on bounce"
+            _act_col := color.red
+            _act_bg  := color.new(color.red, 80)
+        else if structural_trend == "BULL" and not mmpd_discount
+            _act_txt := "BULL but MMPD premium — Wait for discount"
+            _act_col := #ff9900
+            _act_bg  := color.new(#1a0e00, 10)
+        else if structural_trend == "BEAR" and not mmpd_premium
+            _act_txt := "BEAR but MMPD discount — Wait for premium"
+            _act_col := #ff9900
+            _act_bg  := color.new(#1a0e00, 10)
+        else if current_state == STATE_NBC
+            _act_txt := "NBC / BALANCE — Wait for CDL or CDS break"
+            _act_col := color.gray
+            _act_bg  := color.rgb(22,22,22)
+        else
+            _act_txt := "No setup — Trend or zone not aligned"
+            _act_col := color.gray
+            _act_bg  := color.rgb(22,22,22)
+        table.cell(_cT, 0, _c, _act_txt, text_color=_act_col, text_size=getTableTextSize(ctxTableSize), bgcolor=_act_bg, text_halign=text.align_left)
+        table.merge_cells(_cT, 0, _c, 1, _c)
+
+// ═══════════════════════════════════════════════════════════════════════
+// STATISTICS TABLE
+// ═══════════════════════════════════════════════════════════════════════
+if showStatsTable and barstate.islast
+    var table _sT = table.new(getTablePosition(statsTablePos), 3, 28, bgcolor=#000000, frame_color=color.gray, frame_width=1)
+    string _sz = statsTableSize
+    int _cT_  = totalWins + totalLosses
+    int _aT   = activeTrades.size()
+    float _wr = _cT_ > 0 ? (float(totalWins) / math.max(float(_cT_), 1.0)) * 100.0 : 0.0
+    float _nPL = totalProfitDollars - totalLossDollars
+    float _avgW = totalWins   > 0 ? totalPosRR / math.max(float(totalWins), 1.0)   : 0.0
+    float _avgL = totalLosses > 0 ? totalNegRR / math.max(float(totalLosses), 1.0) : 1.0
+    float _pF   = totalLossDollars > 0 ? (totalProfitDollars / math.max(totalLossDollars, 1e-9)) : na
+    float _exp  = _cT_ > 0 ? _nPL / math.max(float(_cT_), 1.0) : 0.0
+    string _sD  = na(firstTradeTime) ? "No Trades" : str.format("{0,date,MMM dd yyyy}", firstTradeTime)
+    int st = 0
+    table.cell(_sT, 0, st, "═ STATISTICS ═", bgcolor=#000000, text_color=#e1b31a, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 0, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Since",        bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _sD,            bgcolor=#000000, text_color=#27ffc3,                text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Total/Live",  bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, str.tostring(_cT_ + _aT), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, "(" + str.tostring(_aT) + " live)", bgcolor=#000000, text_color=#27ffc3, text_size=getTableTextSize(_sz))
+    st += 1
+    table.cell(_sT, 0, st, "W / L",        bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, str.tostring(totalWins),   bgcolor=#000000, text_color=color.lime, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, str.tostring(totalLosses), bgcolor=#000000, text_color=color.red,  text_size=getTableTextSize(_sz))
+    st += 1
+    float _req_wr = 1.0 / (1.0 + rrRatio) * 100.0
+    string _rr_txt = "1:" + str.tostring(rrRatio, "#.#") + "R"
+    string _req_txt = str.tostring(_req_wr, "#.#") + "% min"
+    color _rr_bg = _cT_ == 0 ? color.new(color.gray, 80) : _wr >= _req_wr + 5 ? color.new(color.green, 70) : _wr >= _req_wr ? color.new(color.orange, 70) : color.new(color.red, 80)
+    color _rr_vc = _cT_ == 0 ? color.gray : _wr >= _req_wr + 5 ? color.lime : _wr >= _req_wr ? color.orange : color.red
+    string _wr_rr_txt = (_cT_ > 0 ? str.tostring(_wr, "#.#") + "%" : "—") + "  @  " + _rr_txt
+    table.cell(_sT, 0, st, "WR / RR",     bgcolor=_rr_bg, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _wr_rr_txt,    bgcolor=_rr_bg, text_color=_rr_vc,      text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Need",          bgcolor=_rr_bg, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _req_txt,      bgcolor=_rr_bg, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Avg R W/L",   bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, totalWins   > 0 ? "+" + str.tostring(_avgW, "#.#") : "—", bgcolor=#000000, text_color=color.lime, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, totalLosses > 0 ? "-" + str.tostring(_avgL, "#.#") : "—", bgcolor=#000000, text_color=color.red,  text_size=getTableTextSize(_sz))
+    st += 1
+    string _pfTx = not na(_pF) ? str.tostring(_pF, "#.##") : (totalWins > 0 ? "∞" : "—")
+    color  _pfCl = (not na(_pF) and _pF >= 2) ? color.lime : (not na(_pF) and _pF >= 1) ? color.orange : (na(_pF) and totalWins > 0) ? color.lime : color.red
+    table.cell(_sT, 0, st, "Prof Factor", bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _pfTx, bgcolor=#000000, text_color=_pfCl, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Expectancy",  bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _cT_ > 0 ? ((_exp >= 0 ? "+$" : "-$") + str.tostring(math.abs(_exp), "#.##")) : "—", bgcolor=#000000, text_color=_exp >= 0 ? color.lime : color.red, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Consec W/L",  bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, str.tostring(maxConsecutiveWins),    bgcolor=#000000, text_color=color.lime, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, str.tostring(maxConsecutiveLosses), bgcolor=#000000, text_color=color.red,  text_size=getTableTextSize(_sz))
+    st += 1
+    table.cell(_sT, 0, st, "Max DD",      bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, maxDrawdown > 0 ? "$" + str.tostring(maxDrawdown, "#,###") : "—", bgcolor=#000000, text_color=color.red, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    table.cell(_sT, 0, st, "Total P/L",   bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, totalWins   > 0 ? "$" + str.tostring(totalProfitDollars, "#,###") : "—", bgcolor=#000000, text_color=color.lime, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 2, st, totalLosses > 0 ? "$" + str.tostring(totalLossDollars,   "#,###") : "—", bgcolor=#000000, text_color=color.red,  text_size=getTableTextSize(_sz))
+    st += 1
+    string _uTx = totalUnrealizedPL != 0 ? (totalUnrealizedPL > 0 ? "+$" : "-$") + str.tostring(math.abs(totalUnrealizedPL), "#,###") : "—"
+    table.cell(_sT, 0, st, "Unrealized",  bgcolor=#000000, text_color=color.rgb(210,210,210), text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _uTx,          bgcolor=#000000, text_color=totalUnrealizedPL >= 0 ? color.lime : color.red, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    color _nBg = _nPL >= 0 ? color.new(color.green, 70) : color.new(color.red, 70)
+    table.cell(_sT, 0, st, "NET P/L",      bgcolor=_nBg, text_color=color.white, text_size=getTableTextSize(_sz))
+    table.cell(_sT, 1, st, _cT_ > 0 ? ((_nPL >= 0 ? "+$" : "-$") + str.tostring(math.abs(_nPL), "#,###")) : "—", bgcolor=_nBg, text_color=_nPL >= 0 ? color.lime : color.red, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 1, st, 2, st)
+    st += 1
+    
+    if array.get(manualExitWarningFlag, 0)
+        table.cell(_sT, 0, st, "⚠️ ALERT", bgcolor=color.new(color.red, 40), text_color=color.white, text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, "MANUAL EXIT OR DO NOT ENTER", bgcolor=color.new(color.red, 40), text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+
+    table.cell(_sT, 0, st, "── BY ENTRY ──", bgcolor=#000000, text_color=#e1b31a, text_size=getTableTextSize(_sz))
+    table.merge_cells(_sT, 0, st, 2, st)
+    st += 1
+    if usePesPelPoc
+        table.cell(_sT, 0, st, "① PES/PEL",        bgcolor=#000000, text_color=col_type_1,    text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(pocWins, pocLosses), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if usePesPelPlusPoc
+        table.cell(_sT, 0, st, "② PES/PEL+",      bgcolor=#000000, text_color=col_type_2, text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(pocPlusWins, pocPlusLosses), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if useCdlCdsBlock
+        table.cell(_sT, 0, st, "③ CDL/CDS",      bgcolor=#000000, text_color=col_type_3,  text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(blockWins, blockLosses), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if useCdlCdsPlusBlock
+        table.cell(_sT, 0, st, "④ CDL/CDS+",     bgcolor=#000000, text_color=col_type_4,  text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(blockPlusWins, blockPlusLosses), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if useNestedPoc
+        table.cell(_sT, 0, st, "Nest PES/PEL(+)", bgcolor=#000000, text_color=col_type_1,  text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(nestPocW, nestPocL), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if useNestedBlock
+        table.cell(_sT, 0, st, "Nest CDL/CDS(+)", bgcolor=#000000, text_color=col_type_3,  text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(nestBlkW, nestBlkL), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if useBuxBexEntry
+        table.cell(_sT, 0, st, "⑤ BuX/BeX",      bgcolor=#000000, text_color=col_type_5,  text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(buxbexWins, buxbexLosses), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+        st += 1
+    if useLqgEntry
+        table.cell(_sT, 0, st, "⑥ LQG Brk",      bgcolor=#000000, text_color=col_type_6,  text_size=getTableTextSize(_sz))
+        table.cell(_sT, 1, st, f_wl(lqgWins, lqgLosses), bgcolor=#000000, text_color=color.white, text_size=getTableTextSize(_sz))
+        table.merge_cells(_sT, 1, st, 2, st)
+
+// ═══════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════
+var int lastAlertTradeId = 0
+if activeTrades.size() > 0
+    for i = 0 to activeTrades.size() - 1
+        EntrySignal t = activeTrades.get(i)
+        if t.tradeId > lastAlertTradeId
+            if t.isLong
+                _alertLong := true
+            else
+                _alertShort := true
+            _alertMsg := t.entryText + " | " + t.direction + " Limit @ " + str.tostring(t.entryPrice, format.mintick) + " | SL: " + str.tostring(t.stopLoss, format.mintick) + " | TP: " + str.tostring(t.takeProfit, format.mintick)
+            lastAlertTradeId := t.tradeId
+
+alertcondition(_alertLong,                  title="Long Entry",  message="{{ticker}} — LONG — {{close}}")
+alertcondition(_alertShort,                 title="Short Entry", message="{{ticker}} — SHORT — {{close}}")
+alertcondition(_alertLong or _alertShort, title="Any Entry",   message="{{ticker}} — ENTRY — {{close}}")
+alertcondition(trig_lqg_bull, title="LQG Bull Break", message="{{ticker}} — LQG BULL BREAK — {{close}}")
+alertcondition(trig_lqg_bear, title="LQG Bear Break", message="{{ticker}} — LQG BEAR BREAK — {{close}}")
+
+if _alertLong or _alertShort
+    alert(_alertMsg, alert.freq_once_per_bar_close)
+
+if trig_lqg_bull
+    alert(syminfo.ticker + " — LQG BULL BREAK @ " + str.tostring(close), alert.freq_once_per_bar_close)
+
+if trig_lqg_bear
+    alert(syminfo.ticker + " — LQG BEAR BREAK @ " + str.tostring(close), alert.freq_once_per_bar_close)
+
+// Execute final unified A&B overlap drawing checks on the last bar
+if barstate.islast
+    f_draw_groups()

@@ -1,0 +1,165 @@
+//@version=6
+indicator("MMM Pro XCS One @MaxMaserati", "MMM Pro XCS One", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=300)
+
+// ═══════════════════════════════════════════════════════════════
+// MMM Pro XCS One — the UNIVERSAL MMM order-flow map (c + s + x in one picture)
+//
+//  ONE MASTER MAP. Every number on it comes from the Oct 2026 research:
+//  NQ 1m Dec 2022 – Dec 2025 (1m replay) and a re-check on MNQ Jul – Oct 2026.
+//  x  ZONE   = the balance box and its breaks: CDLx / CDSx flips, LDx / SDx
+//              continuations, T# / P# / R#, eBlocks / iBlocks.
+//  BALANCE CONTROL = green line (top third) / red line (bottom third) inside the
+//              live box + the tested break odds of where the last close sits.
+//  vPOC      = solid line, width 1–6 by its volume.
+//  c  CANDLE = MMCB candle compass (16 types) with the tested odds + GMC lines at
+//              the GMC open, with their tested stats. Violated GMCs are deleted.
+//  s  SWING  = swing protected levels (SH s / SL s) = where the stop belongs.
+//  PULLBACK ZONES = plus candles: P–MP (bull) / D–MD (bear) · minus candles: BAL–MD (bull) / BAL–MP (bear).
+//  MAP = the live read + the test data + the research facts. No signals: you decide.
+//  Everything is deleted when it is used up (broken, violated, filled or expired).
+//  Structure TF data = last CLOSED structure candle only. No repaint.
+// ═══════════════════════════════════════════════════════════════
+
+const color BOX_ACC  = #1b8a3a
+const color BOX_DIS  = #b3261e
+const color BOX_NEU  = #808080
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+//@@TF_INPUTS@@
+
+grp_cndl = "1. Candles · Compass (MMCB)"
+colorMode  = input.string("BC / NBC (x)", "Candle Coloring", options=["BC / NBC (x)", "Conviction (c)", "Off"], group=grp_cndl, tooltip="BC / NBC = body closes colored, every NBC white (the x look).\nConviction = the candle engine's 5-zone close location vs the previous candle (the c look).\nClosed candles only.")
+c_bull_bc  = input.color(#27ffc3, "BuBC", inline="cc", group=grp_cndl)
+c_bear_bc  = input.color(#9c27b0, "BeBC", inline="cc", group=grp_cndl)
+c_nbc      = input.color(color.white, "NBC", inline="cc", group=grp_cndl)
+c_bull_po4 = input.color(#0f7c0f, "Bull Structure", inline="sc", group=grp_cndl)
+c_bear_po4 = input.color(#ff0000, "Bear Structure", inline="sc", group=grp_cndl)
+cmp_on     = input.bool(true, "Candle Type Tags (compass)", inline="cmp", group=grp_cndl, tooltip="A tiny MMCB type tag on the last closed candles (BC+, BC−, C2+, AFs+, CI…). Hover = the tested odds that the NEXT candle takes this candle's target (bull lean: its high, bear lean: its low) before its protected end.\nOdds = NQ 2022–25, 1m replay, chart timeframe (5m / 15m / 1h / 4H / D).")
+cmp_n      = input.int(8, "Last", minval=1, maxval=60, inline="cmp", group=grp_cndl)
+ccm_mmm_theme = input.bool(true, "Conviction: MMM Theme (Cyan / Purple)", group=grp_cndl)
+
+grp_strc = "2. Order Flow Map · Zone Engine x"
+blockMode     = input.string("MMM Contraction Block", "Block Mode", options=["MMM Expander Block", "MMM Contraction Block"], group=grp_strc, tooltip="Contraction = the box is the range of the candles that closed back inside (the balance). The Balance Control odds were tested on Contraction + G1.\nExpander = the box is the expander candle's range.")
+boxGrowMode   = input.string("Grow with wicks (G1)", "Box Growth", options=["Grow with wicks (G1)", "Fixed range (G0)"], group=grp_strc, tooltip="G1 GROW: inside candles whose wick goes past the edge (and close back inside) push the edge out.\nG0 FIXED: the box keeps the range it was born with.")
+showPR        = input.bool(true, "Show P# / R# Lines", group=grp_strc, tooltip="P# = pullback level (break it = LDx / SDx). R# = resumption base (becomes the next T#).")
+showLiveBox   = input.bool(true, "Show Forming Box", inline="bx", group=grp_strc)
+showRoleBoxes = input.bool(true, "P# / R# Boxes", inline="bx", group=grp_strc)
+showIntBoxes  = input.bool(false, "Internal Boxes", inline="bx", group=grp_strc, tooltip="Boxes with no role (no P# / R#). Their breaks are ignored.")
+maxBoxes      = input.int(8, "Max Past Boxes (cap)", minval=0, maxval=50, inline="bx2", group=grp_strc)
+boxTransp     = input.int(88, "Box Transparency", minval=0, maxval=100, inline="bx2", group=grp_strc)
+maxKeep       = input.int(40, "Memory Guard (PO4s Kept)", minval=10, maxval=200, group=grp_strc)
+line_ext      = input.int(10, "Line Extension (Candles)", minval=0, maxval=50, group=grp_strc)
+showBreaks    = input.bool(true, "Show Breaks", group=grp_strc, tooltip="Break line + label, married to its PO4. CDLx / LDx above the middle of the line, CDSx / SDx below it.")
+
+grp_ctl  = "3. Balance Control (live box)"
+ctl_thirds = input.bool(true, "Control Lines: Green = Buyers · Red = Sellers", group=grp_ctl, tooltip="Two solid lines inside the forming box:\n• GREEN at 2/3 of the box: a structure close ABOVE it = BUYERS control.\n• RED at 1/3 of the box: a structure close BELOW it = SELLERS control.\n• Between them = no control (~50%).\nThe line of the side in control is thick (3 when the odds reach the highlight level), the other one is faint.\nTested live, every close inside a Contraction G1 box (NQ 2022–25: 191,416 closes · MNQ 2026: 23,476): top third 66–72% break UP first, bottom third 62–68% break DOWN first, 7+ candles at an edge 72–79%.")
+ctl_buCol  = input.color(#00E676, "Buyers", inline="cl", group=grp_ctl)
+ctl_beCol  = input.color(#FF5252, "Sellers", inline="cl", group=grp_ctl)
+ctl_on     = input.bool(true, "Control Text at the Line", group=grp_ctl, tooltip="Text at the right end of the line in control: BUYERS 72% up · 8c · Δ+ (the tested odds, the candles inside the box, the delta tie-breaker). Hover = the NQ and MNQ odds of this exact cell and how many closes were tested.")
+ctl_delta  = input.bool(true, "Delta Tie-Breaker (Δ+ / Δ−)", group=grp_ctl, tooltip="The box's net close-location delta. Tested: it moves the odds by only about ±3 points. Shown as a tie-breaker, never as the signal.")
+ctl_min    = input.int(60, "Highlight From (%)", minval=50, maxval=90, group=grp_ctl, tooltip="The control line gets thick and the text full color when the odds reach this level.")
+poc_on     = input.bool(true, "Box vPOC Line (green = buyers · red = sellers · yellow = neutral)", inline="poc", group=grp_ctl, tooltip="vPOC = the price with the most volume inside the box. Each structure candle's volume is spread evenly over its range (Pine has no tick footprint here).\nSolid line, width 1–6 = its volume vs the average POC of the last 20 boxes (1 = under half, 3 = average, 6 = over 2.2×).\nTested as an entry: no better than the P / MP / BAL ladder (±0.02 avg RR). Information, not an entry.\nThe POC is deleted with its box.")
+poc_colBy  = input.string("POC place in the box", "vPOC Color By", options=["POC place in the box", "Box delta"], inline="pcc", group=grp_ctl, tooltip="Who controls the POC volume:\n• POC place in the box: POC above the green line (top third) = BUYERS · below the red line (bottom third) = SELLERS · between = neutral.\n• Box delta: net close-location delta of the box ≥ +5% = BUYERS · ≤ −5% = SELLERS · else neutral.\nThe POC color itself was NOT part of the tests: it is a read, not an edge.")
+poc_neu    = input.color(#FFD600, "Neutral", inline="pcc", group=grp_ctl)
+poc_past   = input.bool(true, "On Past Boxes", inline="poc", group=grp_ctl)
+poc_txt    = input.string("All boxes", "vPOC Text", options=["All boxes", "Live box only", "Off"], inline="poc2", group=grp_ctl)
+poc_bins   = input.int(24, "Rows", minval=6, maxval=60, inline="poc2", group=grp_ctl)
+
+grp_pbz  = "4. Pullback Zones"
+pbz_on   = input.bool(true, "Pullback Zone After a Structure BC / AFs+", group=grp_pbz, tooltip="After a closed structure candle that is a body close (BC+, BC−, C2+, C2−) or a sweep-and-close-back (AFs+):\nLevels are read from the candle's LOW: D 12.5 · MD 25 · BAL 50 · MP 75 · P 87.5.\n• PLUS candles (strong close, AFs+): bull = P–MP band (top of the candle) · bear = D–MD band (bottom of the candle). Tested: the winners pull back there first; the first level fills ~90%, then the target comes ~75% (1h).\n• MINUS candles (weak close BC− / C2−): bull = BAL–MD band · bear = BAL–MP band. They come back to 50% ~80% of the time.\nThe zone lives until the candle's target is taken, its protected end breaks, or 3 structure candles pass.\nPOC is NOT used: it was tested and did no better than the ladder.")
+pbz_stats = input.bool(true, "Tested Odds in the Zone", group=grp_pbz)
+pbz_transp = input.int(82, "Transparency", minval=0, maxval=100, group=grp_pbz)
+
+grp_gmc  = "5. GMC · Candle Engine c"
+gmc_on   = input.bool(true, "GMC", group=grp_gmc, tooltip="GMC = 3 candles with a gap (bull: c2 closes above c1's high and c3's low stays above c1's high). Chart timeframe, closed candles.\nLINE = the GMC OPEN = the open of the gap candle (c2), from c2 to the right edge.\nText = c3 type (BC+ / BC− / CI / AFs against…) + the tested stats of that exact GMC on this timeframe: fixed 50 · 1:2, WR and avg RR, NQ 2022–25 → MNQ 2026. Hover = all numbers.\n★ GOLD = held in both test periods:\n• 4H GMC▲ c3 BC−\n• 1h GMC▼ c3 BC−, Asia + NY AM\n• 1h GMC▲ c3 AFs against\n• 15m GMC c3 AFs against, Asia + NY AM")
+gmc_mode = input.string("Lines", "Show As", options=["Lines", "Labels", "Lines + Labels"], inline="gm1", group=grp_gmc, tooltip="Lines = a solid line at the GMC open with the info at its end.\nLabels = a tag on candle 3.\nLines + Labels = both.")
+gmc_text = input.string("With stats", "Line Text", options=["With stats", "Short"], inline="gm1", group=grp_gmc)
+gmc_kill = input.string("Close through the GMC open", "Delete When", options=["Close through the GMC open", "Close through c1 (gap closed)", "Off"], group=grp_gmc, tooltip="A violated GMC is deleted (line, text and tag):\n• Close through the GMC open = a later candle closes below the gap candle's open (bull) / above it (bear).\n• Close through c1 = the gap is closed: a close below c1's high (bull) / above c1's low (bear).\n• Off = only the newest ones stay (Max).")
+gmc_max  = input.int(8, "Max", minval=1, maxval=12, inline="gm2", group=grp_gmc, tooltip="ONE line per GMC type (side + candle-3 type, e.g. GMC▼ BC−): a new GMC replaces the older one of the same type. Max = how many types are drawn, newest first.")
+gmc_gold = input.bool(false, "Only Gold ★", inline="gm2", group=grp_gmc)
+
+grp_sw   = "6. Swings · Engine s (protected levels)"
+sw_on    = input.bool(true, "Swing Protected Levels (SH s / SL s)", group=grp_sw, tooltip="Swing engine s on the STRUCTURE timeframe: a swing high is born when the first bearish body close follows a bullish run (and the mirror for a swing low).\nThe newest unbroken SL s = the protected level for longs, the newest SH s = for shorts. A structure close through it deletes it.")
+sw_max   = input.int(1, "Per Side", minval=1, maxval=5, group=grp_sw)
+
+//@@RANGE_INPUTS@@
+//@@TN_INPUT@@
+
+//@@GATE_INPUTS@@
+
+//@@ZONE_INPUTS@@
+
+grp_gaps         = "10. Structural Voids (c)"
+show_all_gaps    = input.bool(false, "Structural Voids (UDG / UOG / ULG)", group=grp_gaps)
+show_upg         = input.bool(true, "UDG", inline="g1", group=grp_gaps, tooltip="Unfair Delivery Gap — delivery skipped entirely between candle 1 and candle 3. Strongest tier.")
+bull_upg_css     = input.color(color.new(#2157f3,80), "Bull", inline="g1", group=grp_gaps)
+bear_upg_css     = input.color(color.new(#ff1100,80), "Bear", inline="g1", group=grp_gaps)
+show_og          = input.bool(true, "UOG", inline="g2", group=grp_gaps, tooltip="Unfair Opening Gap — a clean open above the prior high (bull) or below the prior low (bear).")
+bull_og_css      = input.color(color.new(#2157f3,50), "Bull", inline="g2", group=grp_gaps)
+bear_og_css      = input.color(color.new(#ff1100,50), "Bear", inline="g2", group=grp_gaps)
+show_vi          = input.bool(true, "ULG", inline="g3", group=grp_gaps, tooltip="Unfair Liquidity Gap — bodies don't overlap but wicks do. The subtlest tier.")
+bull_vi_css      = input.color(color.new(#2157f3,0), "Bull", inline="g3", group=grp_gaps)
+bear_vi_css      = input.color(color.new(#ff1100,0), "Bear", inline="g3", group=grp_gaps)
+min_udg_ticks    = input.int(2, "Min UDG Size (Ticks)", group=grp_gaps)
+gapExtMode       = input.string("Filled & Unfilled (Sliced)", "Extension Mode", options=["Minimalistic","Until First Touch","Until Filled","Filled & Unfilled (Sliced)"], group=grp_gaps)
+mini_len         = input.int(3, "Mini Length", minval=1, maxval=50, inline="gsz", group=grp_gaps)
+slices_count     = input.int(8, "Slices", minval=2, maxval=30, inline="gsz", group=grp_gaps)
+col_partial      = input.color(color.new(color.gray,90), "Touched Slice", group=grp_gaps)
+show_midlines    = input.bool(false, "Midlines", inline="gopt", group=grp_gaps)
+hide_filled      = input.bool(true, "Delete When Filled", inline="gopt", group=grp_gaps)
+show_gap_labels  = input.bool(false, "Void Labels", inline="g6", group=grp_gaps)
+gap_lbl_side     = input.string("Left", "", options=["Left","Right"], inline="g6", group=grp_gaps)
+gap_lbl_col      = input.color(color.white, "", inline="g6", group=grp_gaps)
+maxGaps          = input.int(5, "Max Voids Drawn", minval=0, maxval=500, group=grp_gaps, tooltip="Only the newest N voids are kept. 0 = no limit.")
+
+//@@HTF_INPUTS@@
+
+grp_map  = "12. MAP Table"
+map_on   = input.bool(true, "MMM MAP Table", inline="map", group=grp_map, tooltip="One table that reads the whole map: structure, balance control, last candle, pullback zone, last GMC, swing protected levels, HTF bias, session.")
+map_pos  = input.string("Top Right", "", options=["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], inline="map", group=grp_map)
+map_data = input.bool(true, "Test Data on Top (period · candles tested)", group=grp_map, tooltip="DATA = the periods the numbers come from. TESTED = how many candles of this timeframe and how many boxes were tested. A → B in the map = NQ 2022–25 → MNQ 2026.")
+map_facts = input.bool(true, "Research Facts (exits · POC · LTF entry · 60% WR)", group=grp_map, tooltip="Five facts from the same research, to decide with: the 2-NBC exit, the Pro Plus stall exit, the POC entry, the LTF flip entry, the 60% WR at 1:2 goal.")
+ed_shade = input.bool(false, "Shade the Tested Sessions (Asia + NY AM)", group=grp_map)
+
+//@@NEWS_INPUTS@@
+//@@STATS_INPUTS@@
+
+grp_sz    = "15. Label & Panel Sizes"
+lbl_all   = input.string("per item", "ALL Labels & Panels", options=["per item", "tiny", "small", "normal", "large"], group=grp_sz, tooltip="One switch for every label, line text and table. \"per item\" = use each size below.")
+lvl_size  = input.string("small", "Levels (PO4 · P# · R#)", options=["tiny", "small", "normal", "large"], inline="s1", group=grp_sz)
+brk_size  = input.string("small", "Breaks", options=["tiny", "small", "normal", "large"], inline="s1", group=grp_sz)
+ctl_size  = input.string("small", "Balance Control", options=["tiny", "small", "normal", "large"], inline="s2", group=grp_sz)
+poc_size  = input.string("tiny", "vPOC", options=["tiny", "small", "normal", "large"], inline="s2", group=grp_sz)
+gmc_size  = input.string("tiny", "GMC", options=["tiny", "small", "normal", "large"], inline="s3", group=grp_sz)
+cmp_size  = input.string("tiny", "Candle Tags", options=["tiny", "small", "normal", "large"], inline="s3", group=grp_sz)
+sw_size   = input.string("tiny", "Swings (SL s / SH s)", options=["tiny", "small", "normal", "large"], inline="s4", group=grp_sz)
+pbz_size  = input.string("tiny", "Pullback Zone", options=["tiny", "small", "normal", "large"], inline="s4", group=grp_sz)
+zone_size = input.string("tiny", "Box / Block Names", options=["tiny", "small", "normal", "large"], inline="s5", group=grp_sz)
+tn_size   = input.string("small", "Trend Markers", options=["tiny", "small", "normal", "large"], inline="s5", group=grp_sz)
+gap_size  = input.string("tiny", "Void Labels", options=["tiny", "small", "normal", "large"], inline="s6", group=grp_sz)
+news_size = input.string("tiny", "News", options=["tiny", "small", "normal", "large"], inline="s6", group=grp_sz)
+map_sz    = input.string("small", "MAP Panel + HTF Box", options=["tiny", "small", "normal", "large"], group=grp_sz)
+
+//@@PALETTE@@
+
+bool boxGrow = boxGrowMode == "Grow with wicks (G1)"
+bool expMode = blockMode == "MMM Expander Block"
+string ENG = "x"
+
+// ═══════════════════════════════════════════════════════════════
+// SHARED MODULES
+// ═══════════════════════════════════════════════════════════════
+//@@GATE_ENGINE@@
+//@@TF_ENGINE@@
+//@@ZONE_HELPERS@@
+//@@LEVELS@@
+//@@RANGE_HELPERS@@
+//@@ZONE_ENGINE@@
+//@@HTF_ENGINE@@
+//@@NEWS_ENGINE@@
+//@@STATS_ENGINE@@
+//@@XDXP_ENGINE@@
+
+//@@BODY@@

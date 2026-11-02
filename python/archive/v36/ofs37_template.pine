@@ -1,0 +1,970 @@
+//@version=6
+indicator("MMM Market Structure & Order Flow Suite @MaxMaserati 3.7", "MMM Order Flow @MaxMaserati 3.7", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// MMM ORDER FLOW SUITE 3.7 — the SWING engine "s" of the MMM foundation
+//
+//  HTF IN LTF: the swings are built on the STRUCTURE timeframe (closed
+//            candles only) and drawn on the chart. AX, UH$/UL$ and voids
+//            stay on the chart timeframe.
+//  SWING   = the extreme of a leg, locked by the first opposite BC.
+//            A swing dies ONLY on a body close through it (a wick is a sweep).
+//  FLIP    = CDLs / CDSs  (first break against the trend)
+//  CONT.   = LDs1, LDs2… / SDs1, SDs2… (only swings of the CURRENT leg count;
+//            the count runs until the next flip)
+//  PO4     = the swing that MADE a break becomes its origin:
+//            CDL -> BuPO4s T1 · LD1 -> BuPO4s T2 · LD2 -> T3…
+//            CDS -> BePO4s T1 · SD1 -> BePO4s T2…
+//            Live range: BeP#s / BuP#s = the newest swing a close past
+//            makes the next LD / SD · BuR#s / BeR#s = the newest swing after
+//            it (the next T#). Every other swing is a plain lowercase sh / sl.
+//  HUSBAND & WIFE: a break label lives on its PO4. Close through the PO4 and
+//            the PO4, its break labels and its eBlock / iBlock go together.
+//  🟢 / 🔴 = T1 of the newest leg · 🟩 / 🟥 = its newest T#. Everything
+//            between the highest and lowest marker is ALWAYS drawn; outside
+//            it only "Max Items" show (50 / 50 bull / bear, husband & wife = 1;
+//            0 = nothing outside).
+//  No entries, no stops: see the MMM Indicator Test Plan.
+//  Every decision is taken on CLOSED candles. No repaint.
+// ═══════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════════════════
+const color DEEP_GREEN = #006400
+const color DEEP_RED   = #8b0000
+const color LINE_BULL  = #00b400
+const color LINE_BEAR  = #c80000
+const color BULL_TGT   = #046319
+const color BEAR_TGT   = #ae0303
+const int   MAX_MARKS  = 50
+const int   FP_VA      = 70
+
+// ═══════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════
+//@@TF_INPUTS@@
+
+grp_cndl = "1. Auction State (Candles)"
+show_candles = input.bool(true, "Enable Auction State Colors", group=grp_cndl)
+c_bull_bc    = input.color(#27ffc3, "BuBC", inline="cc", group=grp_cndl, tooltip="BuBC = candle CLOSED above the previous high. BeBC = closed below the previous low. NBC = closed inside the previous range.")
+c_bear_bc    = input.color(#9c27b0, "BeBC", inline="cc", group=grp_cndl)
+c_nbc        = input.color(color.white, "NBC", inline="cc", group=grp_cndl)
+
+grp_of = "2. Order Flow (Delta & Volume)"
+use_footprint     = input.bool(true, "Use Real Footprint Delta", group=grp_of, tooltip="Needs TradingView Premium. Falls back to synthetic delta when footprint data is missing.")
+fp_ticks          = input.int(10, "Ticks per Row", minval=1, group=grp_of)
+vol_len           = input.int(20, "Volume Average Length", minval=2, group=grp_of)
+strong_vol_factor = input.float(1.5, "Strong Volume (x Average)", minval=1.0, step=0.1, group=grp_of, tooltip="Volume must be this many times the average of the PREVIOUS bars to count as STRONG.")
+
+grp_acc = "3. Accelerators (AX)"
+ax_col_on           = input.bool(true, "AX Candle Coloring", inline="axo", group=grp_acc, tooltip="Colors AX candles deep green / deep red. Independent from the labels.")
+ax_lbl_on           = input.bool(true, "AX Labels", inline="axo", group=grp_acc, tooltip="BuAx / BeAx labels. Deleted when a candle CLOSES beyond the AX candle (below its low for BuAx, above its high for BeAx).")
+max_ax              = input.int(25, "Max AX Labels", minval=1, maxval=100, group=grp_acc)
+detect_plus_only    = input.bool(false, "Plus Velocity Only (BuAx+/BeAx+)", group=grp_acc)
+size_factor         = input.float(1.5, "Range Expansion Factor", minval=1.0, step=0.1, group=grp_acc)
+use_vol_filter      = input.bool(true, "Require Strong Volume", group=grp_acc)
+use_delta_filter    = input.bool(true, "Enable Delta Confirmation", inline="ax1", group=grp_acc)
+delta_factor        = input.float(1.5, "Delta Expansion", minval=1.0, step=0.1, inline="ax1", group=grp_acc)
+ax_must_be_wickless = input.bool(false, "Strict: AX Must Be Wickless", group=grp_acc)
+show_bull           = input.bool(true, "Bullish AX", inline="ax2", group=grp_acc)
+show_bear           = input.bool(true, "Bearish AX", inline="ax2", group=grp_acc)
+show_triangles      = input.bool(true, "Show Triangles", inline="ax3", group=grp_acc)
+tri_size_str        = input.string("tiny", "Triangle Size", options=["auto", "tiny", "small", "normal", "large"], inline="ax3", group=grp_acc)
+lbl_size_str        = input.string("tiny", "Label Size", options=["tiny", "small", "normal", "large"], group=grp_acc)
+
+grp_strc = "4. Market Structure (Swing Engine s)"
+showSwings   = input.bool(true, "Show Swings & PO4s", group=grp_strc)
+maxKeep      = input.int(60, "Memory Guard (Swings Kept per Side)", minval=10, maxval=200, group=grp_strc, tooltip="Hard cap on stored swings per side. Plain sh / sl are dropped first, then the oldest PO4s.")
+line_ext     = input.int(10, "Line Extension (Candles)", minval=0, maxval=50, group=grp_strc)
+lvl_size     = input.string("tiny", "Level Label Size", options=["tiny", "small", "normal", "large"], inline="lsz", group=grp_strc)
+brk_size     = input.string("tiny", "Break Label Size", options=["tiny", "small", "normal", "large"], inline="lsz", group=grp_strc)
+eng_letter   = input.string("s", "Engine Letter", options=["s", "r", "none"], group=grp_strc, tooltip="Letter added to every break and PO4 so you know which engine made it.\ns = Swing (recommended: \"r\" already means Resumption in MMM Pro).")
+showNumbers  = input.bool(true, "Number Breaks (LD1, LD2…)", group=grp_strc)
+showBreaks   = input.bool(true, "Show Breaks", inline="s2", group=grp_strc, tooltip="Break line + label, married to its PO4. CDL / LD above the middle of the line, CDS / SD below it.")
+showStars    = input.bool(true, "Grade Break Quality", inline="s2", group=grp_strc, tooltip="1-4 stars. +1 above-average volume, +2 STRONG volume, +1 delta agrees, +1 break candle is an Accelerator (⚡).")
+showSweeps   = input.bool(true, "Show Strong Sweeps (SWP+)", group=grp_strc, tooltip="A wick takes a swing, the close comes back inside, with STRONG volume and delta pushing back. The swing stays. SWP+ is deleted when a candle CLOSES beyond the sweep candle.")
+
+//@@RANGE_INPUTS@@
+//@@TN_INPUT@@
+
+//@@GATE_INPUTS@@
+//@@ZONE_INPUTS@@
+//@@HTF_INPUTS@@
+//@@NEWS_INPUTS@@
+
+grp_wick = "9. Un-Auctioned Price (Wickless)"
+show_uh_ul      = input.bool(true, "Enable UH$/UL$ Detection", group=grp_wick, tooltip="Candles closing flat at their extreme leave un-auctioned price.")
+uh_del_mode     = input.string("Close Beyond", "Delete UH$/UL$ On", options=["Close Beyond", "Touch"], group=grp_wick, tooltip="Close Beyond = deleted when a later candle CLOSES above UH$ / below UL$.\nTouch = deleted the first time a later candle's wick reaches the level.")
+dots_on_ax_only = input.bool(false, "Strict: AX Candles Only", group=grp_wick)
+uh_col          = input.color(color.red, "UH Color", inline="w2", group=grp_wick)
+ul_col          = input.color(color.lime, "UL Color", inline="w2", group=grp_wick)
+wick_dot_size   = input.string("tiny", "Marker Size", options=["tiny", "small", "normal", "large"], group=grp_wick)
+
+grp_gaps = "10. Structural Voids (Gaps)"
+show_upg        = input.bool(true, "Show UDG (Distribution)", inline="g1", group=grp_gaps, tooltip="Unfair Distribution Gap: 3-candle one-sided move with no overlap.")
+bull_upg_css    = input.color(color.new(#2157f3, 80), "Bu", inline="g1", group=grp_gaps)
+bear_upg_css    = input.color(color.new(#ff1100, 80), "Be", inline="g1", group=grp_gaps)
+show_og         = input.bool(true, "Show UOG (Opening)", inline="g2", group=grp_gaps, tooltip="Unfair Opening Gap: price jumped with zero trade in between.")
+bull_og_css     = input.color(color.new(#2157f3, 50), "Bu", inline="g2", group=grp_gaps)
+bear_og_css     = input.color(color.new(#ff1100, 50), "Be", inline="g2", group=grp_gaps)
+show_vi         = input.bool(true, "Show ULG (Liquidity)", inline="g3", group=grp_gaps, tooltip="Unfair Liquidity Gap: wicks overlap but bodies are detached.")
+bull_vi_css     = input.color(color.new(#2157f3, 0), "Bu", inline="g3", group=grp_gaps)
+bear_vi_css     = input.color(color.new(#ff1100, 0), "Be", inline="g3", group=grp_gaps)
+gapExtMode      = input.string("Until First Touch", "Extension Mode", options=["3 Candles (Fixed)", "Until First Touch", "Until Filled"], group=grp_gaps)
+hide_filled     = input.bool(true, "Delete Filled Voids", inline="g4", group=grp_gaps)
+force_grey      = input.bool(false, "Monochrome Voids", inline="g4", group=grp_gaps)
+maxGaps         = input.int(15, "Max Active Voids", minval=1, group=grp_gaps)
+show_gap_labels = input.bool(true, "Show Void Labels", inline="g5", group=grp_gaps)
+gap_lbl_side    = input.string("Left", "Side", options=["Left", "Right"], inline="g5", group=grp_gaps)
+gap_lbl_col     = input.color(color.white, "Text Color", inline="g5", group=grp_gaps)
+
+//@@STATS_INPUTS@@
+
+// ═══════════════════════════════════════════════════════════════
+// SHARED MODULES
+// ═══════════════════════════════════════════════════════════════
+string ENG = eng_letter == "none" ? "" : eng_letter
+
+//@@GATE_ENGINE@@
+//@@TF_ENGINE@@
+//@@ZONE_HELPERS@@
+//@@LEVELS@@
+//@@RANGE_HELPERS@@
+//@@ZONE_ENGINE@@
+//@@HTF_ENGINE@@
+//@@NEWS_ENGINE@@
+//@@STATS_ENGINE@@
+//@@XDXP_ENGINE@@
+
+// ═══════════════════════════════════════════════════════════════
+// BASIC HELPERS
+// ═══════════════════════════════════════════════════════════════
+f_size(string s) =>
+    s == "auto" ? size.auto : s == "small" ? size.small : s == "normal" ? size.normal : s == "large" ? size.large : size.tiny
+
+f_fmt_delta(float d) =>
+    float  a   = math.abs(d)
+    string pfx = d >= 0.0 ? "+" : ""
+    a >= 1000000.0 ? pfx + str.tostring(math.round(d / 1000000.0, 1)) + "M" : a >= 1000.0 ? pfx + str.tostring(math.round(d / 1000.0, 1)) + "K" : pfx + str.tostring(math.round(d))
+
+f_synthetic_delta() =>
+    float delta = 0.0
+    float v     = nz(volume)
+    if v > 0
+        float pm = close - open
+        float pr = high - low
+        if pr > 0
+            float bp = math.abs(pm) / pr
+            float uw = high - math.max(open, close)
+            float lw = math.min(open, close) - low
+            float cp = (close - low) / pr
+            if pm > 0
+                float br = math.min(0.85, 0.50 + bp * 0.25 + (lw > uw ? 0.10 : 0.0) + (cp > 0.7 ? 0.05 : 0.0))
+                delta := v * (br * 2.0 - 1.0)
+            else if pm < 0
+                float sr = math.min(0.85, 0.50 + bp * 0.25 + (uw > lw ? 0.10 : 0.0) + (cp < 0.3 ? 0.05 : 0.0))
+                delta := v * -(sr * 2.0 - 1.0)
+            else
+                delta := uw > lw * 1.5 ? v * -0.40 : lw > uw * 1.5 ? v * 0.40 : v * (cp > 0.5 ? 0.04 : -0.04)
+        else
+            delta := pm > 0 ? v * 0.20 : pm < 0 ? v * -0.20 : 0.0
+    delta
+
+// ═══════════════════════════════════════════════════════════════
+// CORE SERIES (all request.* / ta.* calls unconditional)
+// ═══════════════════════════════════════════════════════════════
+float candle_range = high - low
+
+// RVOL vs the PREVIOUS bars (current bar is not inside its own average)
+float avgVolume       = ta.sma(nz(volume), vol_len)[1]
+float rvol            = nz(avgVolume) > 0 ? nz(volume) / avgVolume : 0.0
+bool  strong_vol      = rvol >= strong_vol_factor
+bool  strong_vol_prev = nz(rvol[1]) >= strong_vol_factor
+
+footprint fp        = request.footprint(fp_ticks, FP_VA)
+float fp_delta      = use_footprint and not na(fp) ? fp.delta() : na
+bool  using_real_fp = not na(fp_delta)
+float current_delta = using_real_fp ? fp_delta : f_synthetic_delta()
+
+// Auction state: a break needs a CLOSE beyond the prior extreme
+float candle_mid     = (high + low) / 2.0
+bool  curr_BuBC      = close > high[1]
+bool  curr_BeBC      = close < low[1]
+bool  curr_BuBC_Plus = curr_BuBC and close > candle_mid
+bool  curr_BeBC_Plus = curr_BeBC and close < candle_mid
+bool  is_any_BC      = curr_BuBC or curr_BeBC
+
+// Un-auctioned extremes
+float _tk    = syminfo.mintick
+bool  raw_ul = close >= open and (math.min(open, close) - low) <= _tk and candle_range > _tk
+bool  raw_uh = close <= open and (high - math.max(open, close)) <= _tk and candle_range > _tk
+
+// ═══════════════════════════════════════════════════════════════
+// STEP 1 — ACCELERATORS (computed FIRST so structure can use them)
+// ═══════════════════════════════════════════════════════════════
+var float bc_range_1 = 0.0
+var float bc_range_2 = 0.0
+var float bc_delta_1 = 0.0
+var float bc_delta_2 = 0.0
+var bool  bc_real_1  = false
+var bool  bc_real_2  = false
+
+bool  base_ready    = bc_range_1 > 0 and bc_range_2 > 0
+float avg_bc_range  = (bc_range_1 + bc_range_2) / 2.0
+float avg_bc_delta  = (math.abs(bc_delta_1) + math.abs(bc_delta_2)) / 2.0
+bool  delta_base_ok = avg_bc_delta > 0 and bc_real_1 == using_real_fp and bc_real_2 == using_real_fp
+
+bool  bull_accel  = false
+bool  bear_accel  = false
+bool  is_plus     = false
+float range_ratio = 0.0
+float delta_ratio = 0.0
+
+if base_ready and curr_BuBC and (not detect_plus_only or curr_BuBC_Plus)
+    float rr      = candle_range / avg_bc_range
+    float dr      = delta_base_ok ? math.abs(current_delta) / avg_bc_delta : 0.0
+    bool  rng_ok  = rr >= size_factor
+    bool  dlt_ok  = not use_delta_filter or (current_delta > 0 and (not delta_base_ok or dr >= delta_factor))
+    bool  vol_ok  = not use_vol_filter or strong_vol
+    bool  wick_ok = not ax_must_be_wickless or raw_ul
+    if rng_ok and dlt_ok and vol_ok and wick_ok
+        bull_accel  := true
+        is_plus     := curr_BuBC_Plus
+        range_ratio := rr
+        delta_ratio := dr
+
+if base_ready and curr_BeBC and (not detect_plus_only or curr_BeBC_Plus)
+    float rr      = candle_range / avg_bc_range
+    float dr      = delta_base_ok ? math.abs(current_delta) / avg_bc_delta : 0.0
+    bool  rng_ok  = rr >= size_factor
+    bool  dlt_ok  = not use_delta_filter or (current_delta < 0 and (not delta_base_ok or dr >= delta_factor))
+    bool  vol_ok  = not use_vol_filter or strong_vol
+    bool  wick_ok = not ax_must_be_wickless or raw_uh
+    if rng_ok and dlt_ok and vol_ok and wick_ok
+        bear_accel  := true
+        is_plus     := curr_BeBC_Plus
+        range_ratio := rr
+        delta_ratio := dr
+
+if barstate.isconfirmed and is_any_BC
+    bc_range_2 := bc_range_1
+    bc_range_1 := candle_range
+    bc_delta_2 := bc_delta_1
+    bc_delta_1 := current_delta
+    bc_real_2  := bc_real_1
+    bc_real_1  := using_real_fp
+
+// ═══════════════════════════════════════════════════════════════
+// TYPES & STATE
+// ═══════════════════════════════════════════════════════════════
+// A break, married to the PO4 swing that made it.
+type Cause
+    string kind
+    float  price
+    int    t1
+    int    t2
+    bool   isBull
+    bool   pass
+    bool   against
+    int    score
+    bool   ax
+    string tip
+
+type Swing
+    float        price
+    int          t
+    int          bIdx
+    bool         isHigh
+    int          tier
+    bool         official
+    int          seq
+    bool         swept
+    float        oH
+    float        oL
+    int          oT
+    array<Cause> causes
+    bool         conf
+    int          cIdx
+
+type GapBox
+    box   b
+    line  l
+    label lbl
+    float top
+    float bot
+    bool  isBull
+    bool  isLine
+    bool  isTouched
+    bool  stoppedExtending
+    color origBg
+    color origBorder
+    color origLine
+    int   creationBar
+    int   t
+
+type AxData
+    label lbl
+    label tri
+    float trigger
+    bool  isBull
+    int   t
+
+var Swing[]  swingHighs  = array.new<Swing>()
+var Swing[]  swingLows   = array.new<Swing>()
+var GapBox[] visual_gaps = array.new<GapBox>()
+var AxData[] active_axs  = array.new<AxData>()
+var label[]  sweep_lbls  = array.new<label>()
+var float[]  sweep_lvls  = array.new<float>()
+var float[]  sweep_px    = array.new<float>()
+var int[]    sweep_t     = array.new<int>()
+var bool[]   sweep_isLow = array.new<bool>()
+
+var int   blkIdx        = 0
+var int   signalState   = 0
+var int   trendState    = 0
+var int   lastCdlBar    = -1
+var int   lastCdsBar    = -1
+var int   ldCount       = 0
+var int   sdCount       = 0
+var int   po4Seq        = 0
+var float trackHigh     = na
+var int   trackHighTime = na
+var float trackHighL    = na
+var float trackLow      = na
+var int   trackLowTime  = na
+var float trackLowH     = na
+
+bool cdl_event      = false
+bool cds_event      = false
+bool ld_event       = false
+bool sd_event       = false
+bool swp_low_event  = false
+bool swp_high_event = false
+
+// ═══════════════════════════════════════════════════════════════
+// STRUCTURE HELPERS (they read the STRUCTURE candle's volume and delta)
+// ═══════════════════════════════════════════════════════════════
+f_breakScore(bool isBull, float rv, float dl, bool ax) =>
+    int  volPts = rv >= strong_vol_factor ? 2 : rv >= 1.0 ? 1 : 0
+    bool agree  = isBull ? dl > 0 : dl < 0
+    volPts + (agree ? 1 : 0) + (ax ? 1 : 0)
+
+f_breakTip(string kind, bool isBull, bool pass, float rv, float dl, bool ax, bool bcOk) =>
+    bool   agree = isBull ? dl > 0 : dl < 0
+    string ctag  = ax ? (isBull ? "BuAx (accelerator)" : "BeAx (accelerator)") : bcOk ? (isBull ? "BuBC" : "BeBC") : "NBC (soft break)"
+    string src   = blockSameTF ? (using_real_fp ? "FOOTPRINT" : "SYNTHETIC") : "SYNTHETIC (structure TF " + f_tfName(blockTF) + ")"
+    TFP + kind + (pass ? "" : " (failed " + gate_mode + ")") + " | Candle: " + ctag + "\nVolume: " + str.tostring(rv, "#.##") + "x avg" + (rv >= strong_vol_factor ? " (STRONG)" : "") + "\nDelta: " + f_fmt_delta(dl) + (agree ? " (agrees)" : " (against)") + "\nSource: " + src
+
+f_newSwing(bool isHigh, float price, int t, float oOther, int idx) =>
+    Swing.new(price, t, idx, isHigh, 0, true, 0, false, isHigh ? price : oOther, isHigh ? oOther : price, t, array.new<Cause>(), false, 0)
+
+// GATE (MMM Pro Edge): a new leg / a continuation needs a fresh confirmation.
+f_clearConf() =>
+    if swingHighs.size() > 0
+        for s in swingHighs
+            s.conf := false
+    if swingLows.size() > 0
+        for s in swingLows
+            s.conf := false
+
+// Memory guard: plain swings go first, then the oldest PO4s.
+f_guard(Swing[] arr) =>
+    while arr.size() > maxKeep
+        int idx = 0
+        for j = 0 to arr.size() - 1
+            if arr.get(j).tier == 0
+                idx := j
+                break
+        arr.remove(idx)
+
+// Only STRONG sweeps get a label. Returns true when it is a strong rejection.
+f_sweep(float price, bool isLowSweep, float rv, float dl, float ext, int t) =>
+    bool rej       = isLowSweep ? dl > 0 : dl < 0
+    bool strongRej = rej and rv >= strong_vol_factor
+    if strongRej and showSweeps
+        string tip = (isLowSweep ? "Sell-side" : "Buy-side") + " liquidity swept, close back inside\nVolume: " + str.tostring(rv, "#.##") + "x avg (STRONG)\nDelta: " + f_fmt_delta(dl) + " (pushing back)\nDeleted on a close " + (isLowSweep ? "below this candle low" : "above this candle high")
+        label lb = label.new(t, price, TFP + "SWP+", xloc=xloc.bar_time, color=color(na), textcolor=isLowSweep ? LINE_BULL : LINE_BEAR, style=isLowSweep ? label.style_label_up : label.style_label_down, size=size.tiny, tooltip=tip)
+        sweep_lbls.push(lb)
+        sweep_lvls.push(ext)
+        sweep_px.push(price)
+        sweep_t.push(t)
+        sweep_isLow.push(isLowSweep)
+        if sweep_lbls.size() > MAX_MARKS
+            label.delete(sweep_lbls.shift())
+            sweep_lvls.shift()
+            sweep_px.shift()
+            sweep_t.shift()
+            sweep_isLow.shift()
+    strongRej
+
+f_addGap(int left, int right, float top, float bot, bool isBull, bool isLine, string txt, color bg, color border, color lnCol, bool fixedStop) =>
+    float mid = math.avg(top, bot)
+    box bx = isLine ? box.new(left, top, right, bot, border_color=border, bgcolor=color(na), border_style=line.style_dotted) : box.new(left, top, right, bot, border_color=color(na), bgcolor=bg)
+    line ln = line.new(left, mid, right, mid, color=lnCol, style=isLine ? line.style_dotted : line.style_solid)
+    label lb = show_gap_labels ? label.new(gap_lbl_side == "Right" ? right : left, mid, txt, color=color.new(color.white, 100), textcolor=gap_lbl_col, style=label.style_none, size=size.tiny) : na
+    visual_gaps.push(GapBox.new(bx, ln, lb, top, bot, isBull, isLine, false, fixedStop, bg, border, lnCol, bar_index, time))
+
+// ═══════════════════════════════════════════════════════════════
+// STEP 2 — STRUCTURE (one closed STRUCTURE candle per step: HTF in LTF)
+// ═══════════════════════════════════════════════════════════════
+if stepNow
+    blkIdx += 1
+    // Order flow of the structure candle: real footprint only on the chart TF
+    float sDl   = blockSameTF ? current_delta : bDl
+    bool  sAxBu = blockSameTF and bull_accel
+    bool  sAxBe = blockSameTF and bear_accel
+    bool  bBu   = bC > bH1
+    bool  bBe   = bC < bL1
+
+    // 2a. GATE (MMM Pro Edge): the leg reached its OWN extreme (bull >= 80 / bear <= 20)
+    if gateOn and not na(gHi) and not na(gLo)
+        if gHi >= 80 and signalState == 1
+            bullImp := true
+        if gLo <= 20 and signalState == -1
+            bearImp := true
+
+    // 2b. Track the running extreme of the current leg (and its candle)
+    if trendState == 0
+        if na(trackHigh) or bH > trackHigh
+            trackHigh     := bH
+            trackHighTime := bT
+            trackHighL    := bL
+        if na(trackLow) or bL < trackLow
+            trackLow     := bL
+            trackLowTime := bT
+            trackLowH    := bH
+    if trendState == 1 and bH >= trackHigh
+        trackHigh     := bH
+        trackHighTime := bT
+        trackHighL    := bL
+    if trendState == -1 and bL <= trackLow
+        trackLow     := bL
+        trackLowTime := bT
+        trackLowH    := bH
+
+    // 2c. The first opposite break candle locks the swing
+    if bBe and trendState >= 0
+        swingHighs.push(f_newSwing(true, trackHigh, trackHighTime, trackHighL, blkIdx))
+        f_guard(swingHighs)
+        trendState   := -1
+        trackLow     := bL
+        trackLowTime := bT
+        trackLowH    := bH
+    else if bBu and trendState <= 0
+        swingLows.push(f_newSwing(false, trackLow, trackLowTime, trackLowH, blkIdx))
+        f_guard(swingLows)
+        trendState    := 1
+        trackHigh     := bH
+        trackHighTime := bT
+        trackHighL    := bL
+
+    // 2d. Swing lows: a CLOSE below = break (CDSs / SDs#, or a silent delete
+    //     for an old-trend swing). A wick only = sweep, the swing stays.
+    bool lowBroken = false
+    bool lowSwept  = false
+    if swingLows.size() > 0
+        for i = swingLows.size() - 1 to 0
+            Swing s = swingLows.get(i)
+            if s.bIdx < blkIdx and bL <= s.price
+                if bC < s.price
+                    bool isFlip = signalState != -1
+                    bool newLeg = s.bIdx > lastCdsBar
+                    // GATE: a small p (not confirmed) closed through = deleted, no SD
+                    bool gKill  = gateOn and not isFlip and newLeg and not s.conf
+                    if not lowBroken and (isFlip or newLeg) and not gKill
+                        lowBroken := true
+                        int    num  = isFlip ? 0 : sdCount + 1
+                        bool   pass = true
+                        string kind = isFlip ? "CDS" + ENG : "SD" + ENG + (showNumbers ? str.tostring(num) : "")
+                        if swingHighs.size() > 0
+                            Swing po = swingHighs.last()
+                            po.tier     := isFlip ? 1 : num + 1
+                            po.official := pass
+                            po4Seq      += 1
+                            po.seq      := po4Seq
+                            po.causes.push(Cause.new(kind, s.price, s.t, bT, false, pass, f_againstHtf(-1), f_breakScore(false, bRv, sDl, sAxBe), sAxBe, f_breakTip(kind, false, pass, bRv, sDl, sAxBe, bBe)))
+                        signalState := -1
+                        f_clearConf()
+                        if isFlip
+                            lastCdsBar := blkIdx
+                            sdCount    := 0
+                            hitXD      := false
+                            hitXP      := false
+                            bullImp    := false
+                            bullPb     := false
+                            bearImp    := false
+                            bearPb     := false
+                            cds_event  := pass
+                        else
+                            sdCount  := num
+                            bearImp  := false
+                            bearPb   := false
+                            sd_event := pass
+                    swingLows.remove(i)
+                else if not s.swept
+                    s.swept := true
+                    if not lowSwept
+                        lowSwept := true
+                        if f_sweep(s.price, true, bRv, sDl, bL, bT)
+                            swp_low_event := true
+
+    // 2e. Swing highs: a CLOSE above = break (CDLs / LDs#). A wick only = sweep.
+    bool highBroken = false
+    bool highSwept  = false
+    if swingHighs.size() > 0
+        for i = swingHighs.size() - 1 to 0
+            Swing s = swingHighs.get(i)
+            if s.bIdx < blkIdx and bH >= s.price
+                if bC > s.price
+                    bool isFlip = signalState != 1
+                    bool newLeg = s.bIdx > lastCdlBar
+                    // GATE: a small p (not confirmed) closed through = deleted, no LD
+                    bool gKill  = gateOn and not isFlip and newLeg and not s.conf
+                    if not highBroken and (isFlip or newLeg) and not gKill
+                        highBroken := true
+                        int    num  = isFlip ? 0 : ldCount + 1
+                        bool   pass = true
+                        string kind = isFlip ? "CDL" + ENG : "LD" + ENG + (showNumbers ? str.tostring(num) : "")
+                        if swingLows.size() > 0
+                            Swing po = swingLows.last()
+                            po.tier     := isFlip ? 1 : num + 1
+                            po.official := pass
+                            po4Seq      += 1
+                            po.seq      := po4Seq
+                            po.causes.push(Cause.new(kind, s.price, s.t, bT, true, pass, f_againstHtf(1), f_breakScore(true, bRv, sDl, sAxBu), sAxBu, f_breakTip(kind, true, pass, bRv, sDl, sAxBu, bBu)))
+                        signalState := 1
+                        f_clearConf()
+                        if isFlip
+                            lastCdlBar := blkIdx
+                            ldCount    := 0
+                            hitXD      := false
+                            hitXP      := false
+                            bullImp    := false
+                            bullPb     := false
+                            bearImp    := false
+                            bearPb     := false
+                            cdl_event  := pass
+                        else
+                            ldCount  := num
+                            bullImp  := false
+                            bullPb   := false
+                            ld_event := pass
+                    swingHighs.remove(i)
+                else if not s.swept
+                    s.swept := true
+                    if not highSwept
+                        highSwept := true
+                        if f_sweep(s.price, false, bRv, sDl, bH, bT)
+                            swp_high_event := true
+
+    // 2f. GATE: p -> P# once the pullback reached the OPPOSITE extreme after the leg's own extreme
+    if gateOn and not na(gHi) and not na(gLo)
+        if signalState == 1 and bullImp and gLo <= 20 and swingHighs.size() > 0
+            for s in swingHighs
+                if s.bIdx > lastCdlBar and not s.conf
+                    s.conf := true
+                    s.cIdx := blkIdx
+        if signalState == -1 and bearImp and gHi >= 80 and swingLows.size() > 0
+            for s in swingLows
+                if s.bIdx > lastCdsBar and not s.conf
+                    s.conf := true
+                    s.cIdx := blkIdx
+
+// ═══════════════════════════════════════════════════════════════
+// STEP 2b — SWEEP CLEAN-UP + STRUCTURAL VOIDS (chart timeframe, closed candles)
+// ═══════════════════════════════════════════════════════════════
+if barstate.isconfirmed
+    // Sweep labels die on a close beyond their sweep candle
+    if sweep_lbls.size() > 0
+        for i = sweep_lbls.size() - 1 to 0
+            bool  isLowSw = sweep_isLow.get(i)
+            float lvl     = sweep_lvls.get(i)
+            if time > sweep_t.get(i) and ((isLowSw and close < lvl) or (not isLowSw and close > lvl))
+                label.delete(sweep_lbls.get(i))
+                sweep_lbls.remove(i)
+                sweep_lvls.remove(i)
+                sweep_px.remove(i)
+                sweep_t.remove(i)
+                sweep_isLow.remove(i)
+
+    // Structural voids (⚡ = made with strong volume)
+    bool   fixedStop = gapExtMode == "3 Candles (Fixed)"
+    int    gapRight  = fixedStop ? bar_index + 2 : bar_index + 1
+    color  greyBox   = color.new(#636363, 80)
+    color  greyLine  = color.new(#636363, 0)
+    string vTag      = strong_vol ? "⚡" : ""
+    string vTagUDG   = strong_vol_prev ? "⚡" : ""
+
+    float bull_body_top = math.min(close, open)
+    float bull_body_bot = math.max(close[1], open[1])
+    float bear_body_top = math.min(close[1], open[1])
+    float bear_body_bot = math.max(close, open)
+
+    if show_vi
+        if open > close[1] and close > close[1] and open > open[1] and high[1] > low and high[1] < bull_body_top
+            color c = force_grey ? greyLine : bull_vi_css
+            f_addGap(bar_index - 1, gapRight, bull_body_top, bull_body_bot, true, true, "ULG+" + vTag, color(na), c, color.new(c, 0), fixedStop)
+        if open < close[1] and close < close[1] and open < open[1] and low[1] < high and low[1] > bear_body_bot
+            color c = force_grey ? greyLine : bear_vi_css
+            f_addGap(bar_index - 1, gapRight, bear_body_top, bear_body_bot, false, true, "ULG-" + vTag, color(na), c, color.new(c, 0), fixedStop)
+
+    if show_og
+        if low > high[1]
+            f_addGap(bar_index - 1, gapRight, low, high[1], true, false, "UOG+" + vTag, force_grey ? greyBox : bull_og_css, color(na), force_grey ? greyLine : color.new(bull_og_css, 0), fixedStop)
+        if high < low[1]
+            f_addGap(bar_index - 1, gapRight, low[1], high, false, false, "UOG-" + vTag, force_grey ? greyBox : bear_og_css, color(na), force_grey ? greyLine : color.new(bear_og_css, 0), fixedStop)
+
+    if show_upg
+        if low > high[2] and close[1] > high[2] and not (low > high[1] or low[1] > high[2])
+            f_addGap(bar_index - 2, gapRight, low, high[2], true, false, "UDG+" + vTagUDG, force_grey ? greyBox : bull_upg_css, color(na), force_grey ? greyLine : color.new(bull_upg_css, 0), fixedStop)
+        if high < low[2] and close[1] < low[2] and not (high < low[1] or high[1] < low[2])
+            f_addGap(bar_index - 2, gapRight, low[2], high, false, false, "UDG-" + vTagUDG, force_grey ? greyBox : bear_upg_css, color(na), force_grey ? greyLine : color.new(bear_upg_css, 0), fixedStop)
+
+    if visual_gaps.size() > 0
+        for i = visual_gaps.size() - 1 to 0
+            GapBox u = visual_gaps.get(i)
+            bool isFilled     = false
+            bool newlyTouched = false
+            if bar_index > u.creationBar
+                if u.isBull
+                    if not u.isTouched and low <= u.top
+                        u.isTouched  := true
+                        newlyTouched := true
+                    isFilled := low <= u.bot
+                else
+                    if not u.isTouched and high >= u.bot
+                        u.isTouched  := true
+                        newlyTouched := true
+                    isFilled := high >= u.top
+            if newlyTouched
+                if u.isLine
+                    u.b.set_border_color(color.new(u.origBorder, 80))
+                else
+                    u.b.set_bgcolor(color.new(u.origBg, 85))
+                u.l.set_color(color.new(u.origLine, 80))
+                if not na(u.lbl)
+                    u.lbl.set_textcolor(color.new(gap_lbl_col, 70))
+                if gapExtMode == "Until First Touch"
+                    u.stoppedExtending := true
+            if isFilled
+                u.stoppedExtending := true
+            if isFilled and hide_filled
+                box.delete(u.b)
+                line.delete(u.l)
+                label.delete(u.lbl)
+                visual_gaps.remove(i)
+            else if not u.stoppedExtending
+                u.b.set_right(bar_index + 1)
+                u.l.set_x2(bar_index + 1)
+                if not na(u.lbl) and gap_lbl_side == "Right"
+                    u.lbl.set_x(bar_index + 1)
+
+    while visual_gaps.size() > maxGaps
+        GapBox u = visual_gaps.shift()
+        box.delete(u.b)
+        line.delete(u.l)
+        label.delete(u.lbl)
+
+// ═══════════════════════════════════════════════════════════════
+// STEP 3 — CANDLE COLORS (AX coloring independent from AX labels)
+// ═══════════════════════════════════════════════════════════════
+color final_candle_col = na
+if show_candles
+    final_candle_col := curr_BuBC ? c_bull_bc : curr_BeBC ? c_bear_bc : c_nbc
+if ax_col_on and bull_accel and show_bull
+    final_candle_col := DEEP_GREEN
+else if ax_col_on and bear_accel and show_bear
+    final_candle_col := DEEP_RED
+
+barcolor(final_candle_col)
+
+// ═══════════════════════════════════════════════════════════════
+// STEP 4 — UN-AUCTIONED PRICE (UH$ / UL$)
+// ═══════════════════════════════════════════════════════════════
+bool is_ax_candle = bull_accel or bear_accel
+bool fire_ul = show_uh_ul and raw_ul and (not dots_on_ax_only or is_ax_candle)
+bool fire_uh = show_uh_ul and raw_uh and (not dots_on_ax_only or is_ax_candle)
+
+var label[] uh_lbls   = array.new<label>()
+var float[] uh_prices = array.new<float>()
+var int[]   uh_t      = array.new<int>()
+var label[] ul_lbls   = array.new<label>()
+var float[] ul_prices = array.new<float>()
+var int[]   ul_t      = array.new<int>()
+
+if barstate.isconfirmed
+    if uh_prices.size() > 0
+        for i = uh_prices.size() - 1 to 0
+            if uh_del_mode == "Touch" ? high >= uh_prices.get(i) : close > uh_prices.get(i)
+                label.delete(uh_lbls.get(i))
+                uh_lbls.remove(i)
+                uh_prices.remove(i)
+                uh_t.remove(i)
+
+    if ul_prices.size() > 0
+        for i = ul_prices.size() - 1 to 0
+            if uh_del_mode == "Touch" ? low <= ul_prices.get(i) : close < ul_prices.get(i)
+                label.delete(ul_lbls.get(i))
+                ul_lbls.remove(i)
+                ul_prices.remove(i)
+                ul_t.remove(i)
+
+    if fire_uh
+        if uh_prices.size() >= MAX_MARKS
+            label.delete(uh_lbls.shift())
+            uh_prices.shift()
+            uh_t.shift()
+        uh_lbls.push(label.new(bar_index, high, "UH$", style=label.style_label_down, color=color(na), textcolor=uh_col, size=f_size(wick_dot_size), tooltip="Un-auctioned high (UH$): price never traded above this close"))
+        uh_prices.push(high)
+        uh_t.push(time)
+
+    if fire_ul
+        if ul_prices.size() >= MAX_MARKS
+            label.delete(ul_lbls.shift())
+            ul_prices.shift()
+            ul_t.shift()
+        ul_lbls.push(label.new(bar_index, low, "UL$", style=label.style_label_up, color=color(na), textcolor=ul_col, size=f_size(wick_dot_size), tooltip="Un-auctioned low (UL$): price never traded below this close"))
+        ul_prices.push(low)
+        ul_t.push(time)
+
+// ═══════════════════════════════════════════════════════════════
+// STEP 5 — ACCELERATOR LABELS (independent toggle, max N, close-based delete)
+// ═══════════════════════════════════════════════════════════════
+f_axTip(string name) =>
+    name + (is_plus ? "+" : "-") + "\nVelocity: " + (is_plus ? "Plus (close past mid)" : "Minus (close not past mid)") + "\nDelta Source: " + (using_real_fp ? "FOOTPRINT" : "SYNTHETIC") + "\nRange: " + str.tostring(range_ratio, "#.##") + "x avg BC (need " + str.tostring(size_factor) + "x)" + "\nDelta: " + f_fmt_delta(current_delta) + (delta_base_ok ? " | " + str.tostring(delta_ratio, "#.##") + "x avg BC (need " + str.tostring(delta_factor) + "x)" : " | mixed source: direction only") + "\nVolume: " + str.tostring(rvol, "#.##") + "x avg (strong = " + str.tostring(strong_vol_factor) + "x)"
+
+if barstate.isconfirmed
+    if active_axs.size() > 0
+        for i = active_axs.size() - 1 to 0
+            AxData ax = active_axs.get(i)
+            if (ax.isBull and close < ax.trigger) or (not ax.isBull and close > ax.trigger)
+                label.delete(ax.lbl)
+                label.delete(ax.tri)
+                active_axs.remove(i)
+
+    if ax_lbl_on and bull_accel and show_bull
+        label tri = show_triangles ? label.new(bar_index, low, "", yloc=yloc.belowbar, style=label.style_triangleup, color=DEEP_GREEN, size=f_size(tri_size_str)) : na
+        label lbl = label.new(bar_index, low, "BuAx" + (is_plus ? "+" : "-"), yloc=yloc.belowbar, style=label.style_label_up, color=color(na), textcolor=DEEP_GREEN, size=f_size(lbl_size_str), tooltip=f_axTip("Bullish Accelerator | BuAx"))
+        active_axs.push(AxData.new(lbl, tri, low, true, time))
+
+    if ax_lbl_on and bear_accel and show_bear
+        label tri = show_triangles ? label.new(bar_index, high, "", yloc=yloc.abovebar, style=label.style_triangledown, color=DEEP_RED, size=f_size(tri_size_str)) : na
+        label lbl = label.new(bar_index, high, "BeAx" + (is_plus ? "+" : "-"), yloc=yloc.abovebar, style=label.style_label_down, color=color(na), textcolor=DEEP_RED, size=f_size(lbl_size_str), tooltip=f_axTip("Bearish Accelerator | BeAx"))
+        active_axs.push(AxData.new(lbl, tri, high, false, time))
+
+    while active_axs.size() > max_ax
+        AxData old = active_axs.shift()
+        label.delete(old.lbl)
+        label.delete(old.tri)
+
+// ═══════════════════════════════════════════════════════════════
+// RENDER — on the last bar everything structural is deleted and redrawn from
+// state, so a PO4 removed above takes its breaks and zone with it. Overlays
+// (UH$ / UL$, voids, SWP+, AX) are shown or hidden by the same range rule.
+// ═══════════════════════════════════════════════════════════════
+f_breakColor(Cause c) =>
+    not c.pass ? FAIL_COL : htf_dim and c.against ? color.new(FAIL_COL, 30) : c.isBull ? LINE_BULL : LINE_BEAR
+
+f_drawCause(Cause c) =>
+    if showBreaks and (c.pass or show_failed)
+        color  col = f_breakColor(c)
+        string txt = TFP + (c.pass ? c.kind + (showStars and c.score > 0 ? " " + str.tostring(c.score) + "⭐" : "") + (c.ax ? " ⚡" : "") : str.lower(c.kind))
+        drawn_lines.push(line.new(c.t1, c.price, c.t2, c.price, xloc=xloc.bar_time, color=col, width=1, style=c.pass ? line.style_solid : line.style_dotted))
+        drawn_labels.push(label.new(int(math.avg(c.t1, c.t2)), c.price, txt, xloc=xloc.bar_time, color=color(na), textcolor=col, style=c.isBull ? label.style_label_down : label.style_label_up, size=f_szs(brk_size), tooltip=c.tip + (c.against ? "\nAgainst the HTF bias" : "")))
+
+f_gapPaint(GapBox u, bool vis) =>
+    color bgC = u.isTouched ? color.new(u.origBg, 85) : u.origBg
+    color bdC = u.isTouched ? color.new(u.origBorder, 80) : u.origBorder
+    color lnC = u.isTouched ? color.new(u.origLine, 80) : u.origLine
+    color lbC = u.isTouched ? color.new(gap_lbl_col, 70) : gap_lbl_col
+    if u.isLine
+        u.b.set_border_color(vis ? bdC : color.new(#000000, 100))
+    else
+        u.b.set_bgcolor(vis ? bgC : color.new(#000000, 100))
+    u.l.set_color(vis ? lnC : color.new(#000000, 100))
+    if not na(u.lbl)
+        u.lbl.set_textcolor(vis ? lbC : color.new(#000000, 100))
+
+if barstate.islast
+    f_clear_drawn()
+    int futureT = f_future_time(line_ext)
+    int spanMs  = timeframe.in_seconds(blockTF) * 1000
+
+    // Trend markers: newest PO4 per side + the newest T1 of that side.
+    Swing lastBull = na
+    Swing starBull = na
+    Swing lastBear = na
+    Swing starBear = na
+    if swingLows.size() > 0
+        for s in swingLows
+            if s.tier > 0
+                if na(lastBull) or s.seq > lastBull.seq
+                    lastBull := s
+                if s.tier == 1 and (na(starBull) or s.seq > starBull.seq)
+                    starBull := s
+    if swingHighs.size() > 0
+        for s in swingHighs
+            if s.tier > 0
+                if na(lastBear) or s.seq > lastBear.seq
+                    lastBear := s
+                if s.tier == 1 and (na(starBear) or s.seq > starBear.seq)
+                    starBear := s
+
+    // The always-drawn range = highest to lowest marker, and their candles.
+    float rHi = na
+    float rLo = na
+    int   hiT = na
+    int   loT = na
+    for m in array.from(lastBull, starBull, lastBear, starBear)
+        if not na(m)
+            if na(rHi) or m.price > rHi
+                rHi := m.price
+                hiT := m.t
+            if na(rLo) or m.price < rLo
+                rLo := m.price
+                loT := m.t
+
+    // Live range: P# = the newest swing of the current leg that a close past
+    // would turn into the next LD / SD; R# = the newest opposite swing after it.
+    Swing pSw = na
+    Swing rSw = na
+    if signalState == 1
+        for s in swingHighs
+            if s.bIdx > lastCdlBar and (na(pSw) or s.bIdx > pSw.bIdx)
+                pSw := s
+        if not na(pSw)
+            for s in swingLows
+                if s.bIdx > pSw.bIdx and (na(rSw) or s.bIdx > rSw.bIdx)
+                    rSw := s
+    else if signalState == -1
+        for s in swingLows
+            if s.bIdx > lastCdsBar and (na(pSw) or s.bIdx > pSw.bIdx)
+                pSw := s
+        if not na(pSw)
+            for s in swingHighs
+                if s.bIdx > pSw.bIdx and (na(rSw) or s.bIdx > rSw.bIdx)
+                    rSw := s
+    int nRng = (signalState == 1 ? ldCount : sdCount) + 1
+    // GATE: P# is a small p until confirmed; the R# only counts after it
+    bool pCf = not na(pSw) and (not gateOn or pSw.conf)
+    if gateOn and not na(rSw) and (not pCf or rSw.bIdx <= pSw.cIdx)
+        rSw := na
+
+    array<int> q = f_quota()
+
+    // 1. PO4s (a PO4 + its breaks + its zone = ONE item), newest first
+    array<Swing> po4L = array.new<Swing>()
+    array<int>   po4S = array.new<int>()
+    array<Swing> plnL = array.new<Swing>()
+    array<int>   plnT = array.new<int>()
+    for side = 0 to 1
+        Swing[] arr = side == 0 ? swingHighs : swingLows
+        if arr.size() > 0
+            for s in arr
+                if s.tier > 0
+                    po4L.push(s)
+                    po4S.push(s.seq)
+                else
+                    plnL.push(s)
+                    plnT.push(s.t)
+    array<Swing> vis = array.new<Swing>()
+    if po4L.size() > 0
+        array<int> o1 = po4S.sort_indices(order.descending)
+        for k = 0 to o1.size() - 1
+            Swing s = po4L.get(o1.get(k))
+            if f_take(q, f_inR(s.price, rHi, rLo) or f_onMarker(s.t, hiT, loT, spanMs), not s.isHigh)
+                vis.push(s)
+    // 2. plain swings (the live P# / R# can always show)
+    if plnL.size() > 0
+        array<int> o2 = plnT.sort_indices(order.descending)
+        for k = 0 to o2.size() - 1
+            Swing s = plnL.get(o2.get(k))
+            bool live = showLiveAlways and ((not na(pSw) and s.bIdx == pSw.bIdx and s.isHigh == pSw.isHigh) or (not na(rSw) and s.bIdx == rSw.bIdx and s.isHigh == rSw.isHigh))
+            if live or f_take(q, f_inR(s.price, rHi, rLo) or f_onMarker(s.t, hiT, loT, spanMs), not s.isHigh)
+                vis.push(s)
+
+    if showSwings and vis.size() > 0
+        for s in vis
+            bool isPO4 = s.tier > 0
+            bool isP   = not na(pSw) and s.bIdx == pSw.bIdx and s.isHigh == pSw.isHigh
+            bool isR   = not na(rSw) and s.bIdx == rSw.bIdx and s.isHigh == rSw.isHigh
+            bool isPL  = (signalState == 1 and not na(lastBull) and s.seq == lastBull.seq and not s.isHigh) or (signalState == -1 and not na(lastBear) and s.seq == lastBear.seq and s.isHigh)
+            color  c   = isPO4 ? (s.official ? (s.isHigh ? LINE_BEAR : LINE_BULL) : FAIL_COL) : isP ? color.new(s.isHigh ? LINE_BEAR : LINE_BULL, pCf ? 0 : 40) : isR ? (s.isHigh ? LINE_BEAR : LINE_BULL) : s.isHigh ? (signalState == 1 ? BULL_TGT : color.new(LINE_BEAR, 30)) : (signalState == -1 ? BEAR_TGT : color.new(LINE_BULL, 30))
+            string nm  = isPO4 ? (s.isHigh ? "BePO4" : "BuPO4") + ENG + " T" + str.tostring(s.tier) + (s.official ? "" : " ✗") : isP ? (pCf ? (s.isHigh ? "BeP" : "BuP") + str.tostring(nRng) + ENG : (s.isHigh ? "bep" : "bup") + str.tostring(nRng) + ENG + " · p") : isR ? (s.isHigh ? "BeR" : "BuR") + str.tostring(nRng) + ENG : s.isHigh ? "sh" : "sl"
+            string txt = TFP + nm
+            string tip = isPO4 ? (isPL ? "Protected Level (PL): the swing that made the last break. A body close through it flips the structure." : "PO4 = the swing that made this break. A body close through it deletes it with its break and zone.") : isP ? (pCf ? "P# = the newest swing of this leg. A body close past it = the next " + (signalState == 1 ? "LD" : "SD") + str.tostring(nRng) + ENG + "." : "small p: the " + gate_mode + " gate has not confirmed this pullback yet (leg's own extreme, then the opposite extreme). A close through it deletes it: no LD / SD.") : isR ? "R# = the newest swing after P#. It becomes PO4 T" + str.tostring(nRng + 1) + " on the next " + (signalState == 1 ? "LD" : "SD") + "." : (s.isHigh ? "Swing high" : "Swing low") + (s.swept ? " (swept)" : "") + " — deleted on a body close through it"
+            string sty = isPO4 ? line.style_solid : isP ? line.style_dashed : line.style_dotted
+            f_add_level(s.price, txt, c, isPL ? 2 : 1, sty, s.t, futureT, isPO4 ? (isPL ? 6 : 5) : isP or isR ? 4 : 2, lvl_size, tip)
+            if isPO4
+                if s.causes.size() > 0
+                    for cz in s.causes
+                        f_drawCause(cz)
+                bool showZ = s.tier == 1 ? show_eblk : show_iblk
+                if showZ and s.official and not na(s.oH) and not na(s.oL) and s.oH > s.oL
+                    [zT, zB] = f_zoneSlice(s.oH, s.oL, not s.isHigh)
+                    color zc = s.isHigh ? LINE_BEAR : LINE_BULL
+                    drawn_boxes.push(box.new(s.oT, zT, futureT, zB, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(zc, zone_transp), text=zone_show_name ? TFP + f_zoneName(s.tier == 1, not s.isHigh, ENG) : "", text_color=color.new(zc, 20), text_size=size.tiny, text_halign=text.align_right, text_valign=text.align_center))
+
+    // 3. UH$ / UL$
+    if uh_lbls.size() > 0
+        for i = uh_lbls.size() - 1 to 0
+            bool v = f_take(q, f_inR(uh_prices.get(i), rHi, rLo) or f_onMarker(uh_t.get(i), hiT, loT, spanMs), false)
+            label.set_textcolor(uh_lbls.get(i), v ? uh_col : color.new(uh_col, 100))
+    if ul_lbls.size() > 0
+        for i = ul_lbls.size() - 1 to 0
+            bool v = f_take(q, f_inR(ul_prices.get(i), rHi, rLo) or f_onMarker(ul_t.get(i), hiT, loT, spanMs), true)
+            label.set_textcolor(ul_lbls.get(i), v ? ul_col : color.new(ul_col, 100))
+    // 4. voids
+    if visual_gaps.size() > 0
+        for i = visual_gaps.size() - 1 to 0
+            GapBox u = visual_gaps.get(i)
+            f_gapPaint(u, f_take(q, f_boxInR(u.top, u.bot, rHi, rLo) or f_onMarker(u.t, hiT, loT, spanMs), u.isBull))
+    // 5. SWP+
+    if sweep_lbls.size() > 0
+        for i = sweep_lbls.size() - 1 to 0
+            bool isLowSw = sweep_isLow.get(i)
+            bool v = f_take(q, f_inR(sweep_px.get(i), rHi, rLo) or f_onMarker(sweep_t.get(i), hiT, loT, spanMs), isLowSw)
+            color sc = isLowSw ? LINE_BULL : LINE_BEAR
+            label.set_textcolor(sweep_lbls.get(i), v ? sc : color.new(sc, 100))
+    // 6. AX
+    if active_axs.size() > 0
+        for i = active_axs.size() - 1 to 0
+            AxData ax = active_axs.get(i)
+            bool  v  = f_take(q, f_inR(ax.trigger, rHi, rLo) or f_onMarker(ax.t, hiT, loT, spanMs), ax.isBull)
+            color ac = ax.isBull ? DEEP_GREEN : DEEP_RED
+            label.set_textcolor(ax.lbl, v ? ac : color.new(ac, 100))
+            if not na(ax.tri)
+                label.set_color(ax.tri, v ? ac : color.new(ac, 100))
+
+    if show_tn_step
+        bool bullSame = not na(starBull) and not na(lastBull) and starBull.seq == lastBull.seq
+        bool bearSame = not na(starBear) and not na(lastBear) and starBear.seq == lastBear.seq
+        if not na(starBull)
+            drawn_labels.push(label.new(futureT, starBull.price, bullSame ? "🟢🟩" : "🟢", xloc=xloc.bar_time, style=label.style_label_right, color=color(na), textcolor=LINE_BULL, size=size.small))
+        if not na(lastBull) and not bullSame
+            drawn_labels.push(label.new(futureT, lastBull.price, "🟩", xloc=xloc.bar_time, style=label.style_label_right, color=color(na), textcolor=LINE_BULL, size=size.small))
+        if not na(starBear)
+            drawn_labels.push(label.new(futureT, starBear.price, bearSame ? "🔴🟥" : "🔴", xloc=xloc.bar_time, style=label.style_label_right, color=color(na), textcolor=LINE_BEAR, size=size.small))
+        if not na(lastBear) and not bearSame
+            drawn_labels.push(label.new(futureT, lastBear.price, "🟥", xloc=xloc.bar_time, style=label.style_label_right, color=color(na), textcolor=LINE_BEAR, size=size.small))
+
+    f_draw_groups()
+    f_xdxpDraw()
+
+//@@HTF_TABLE@@
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS (official breaks only, closed bars — no repaint)
+// ═══════════════════════════════════════════════════════════════
+alertcondition(cdl_event, "CDLs Flip", "CDLs - bullish flip (swing engine)")
+alertcondition(cds_event, "CDSs Flip", "CDSs - bearish flip (swing engine)")
+alertcondition(ld_event, "LDs Continuation", "LDs - bullish continuation (current leg)")
+alertcondition(sd_event, "SDs Continuation", "SDs - bearish continuation (current leg)")
+alertcondition(swp_low_event, "Strong Sell-Side Sweep", "SWP+ swing low swept with strong volume + buying delta")
+alertcondition(swp_high_event, "Strong Buy-Side Sweep", "SWP+ swing high swept with strong volume + selling delta")
+alertcondition(bull_accel and barstate.isconfirmed, "Bullish Accelerator", "BuAx detected (range + delta + strong volume)")
+alertcondition(bear_accel and barstate.isconfirmed, "Bearish Accelerator", "BeAx detected (range + delta + strong volume)")
+alertcondition(fire_ul and barstate.isconfirmed, "UL$ - Unbalanced Low", "Wickless bull candle UL$ detected")
+alertcondition(fire_uh and barstate.isconfirmed, "UH$ - Unbalanced High", "Wickless bear candle UH$ detected")
+alertcondition(newsWarn and barstate.isconfirmed, "News Warning", "High-impact news coming in 15 / 30 minutes")

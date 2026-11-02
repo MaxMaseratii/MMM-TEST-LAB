@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MMM Test Lab</title>
+<meta name="description" content="Test any simple trading idea on NQ / MNQ, ES, gold and crude with Max's rules: every entry x stop x target x exit, random twins, two periods, PASS check, dollars and prop.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+/* Terminal-style lab: controls on the left, results on the right (wide screens); stacked on phones. */
+:root{--bg:#f3f5f6;--panel:#fff;--line:#d6dde1;--fg:#0f1517;--mute:#5a676d;--pos:#00896a;--neg:#c62828;--gold:#9a6f00;--head:#e7ecef;--posbg:#dff3ec;--negbg:#fbe4e4;--sel:#fff6dc;
+--display:"Barlow Condensed","Arial Narrow",Arial,sans-serif;--body:"Barlow",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,Menlo,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#07090b;--panel:#0e1215;--line:#232b31;--fg:#e6ebee;--mute:#8e9aa2;--pos:#27e0ad;--neg:#ff5a5a;--gold:#e1b31a;--head:#151b20;--posbg:#0b2a22;--negbg:#2e1212;--sel:#2a220a;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#07090b;--panel:#0e1215;--line:#232b31;--fg:#e6ebee;--mute:#8e9aa2;--pos:#27e0ad;--neg:#ff5a5a;--gold:#e1b31a;--head:#151b20;--posbg:#0b2a22;--negbg:#2e1212;--sel:#2a220a;color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.45 var(--body);margin:0}
+.top{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 18px;padding:16px max(16px,env(safe-area-inset-left)) 8px}
+h1{font:700 30px/1 var(--display);letter-spacing:.03em;margin:0}
+.top p{margin:0;color:var(--mute);max-width:110ch}
+.app{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:16px;padding:8px 16px 40px;align-items:start}
+@media (max-width:900px){.app{grid-template-columns:1fr}}
+.side{position:sticky;top:10px;max-height:calc(100vh - 20px);overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+@media (max-width:900px){.side{position:static;max-height:none}}
+fieldset{border:0;border-top:1px solid var(--line);margin:10px 0 0;padding:10px 0 0;min-width:0}
+legend{font:700 16px var(--display);letter-spacing:.04em;text-transform:uppercase;color:var(--gold);padding:0 6px 0 0}
+label{display:flex;align-items:center;gap:6px;font-size:14px;margin:5px 0;flex-wrap:wrap}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row>label{flex:1 1 140px}
+select,input[type=number],input[type=time],input[type=text],textarea{font:14px var(--body);padding:6px 8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:6px;min-width:0;max-width:100%}
+input[type=number]{width:84px}textarea{width:100%;font:13px var(--mono);min-height:70px}
+.chips{display:flex;flex-wrap:wrap;gap:4px 10px}.chips label{margin:2px 0;font-size:13.5px}
+.hint{color:var(--mute);font-size:12.5px;margin:4px 0}
+button{font:600 14px var(--body);padding:8px 14px;border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:7px;cursor:pointer}
+button.go{background:var(--gold);border-color:var(--gold);color:#111;font-size:16px;padding:10px 18px;width:100%}
+button:disabled{opacity:.5;cursor:wait}
+button:focus-visible,select:focus-visible,input:focus-visible,th:focus-visible,tr:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+.main{min-width:0}
+.status{font:13px var(--mono);color:var(--mute);margin:0 0 10px;min-height:1.4em}
+.status.err{color:var(--neg)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px;margin:0 0 14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+.card h3{font:700 19px var(--display);margin:0 0 6px;letter-spacing:.03em}
+.card.key{border-color:var(--gold)}
+.big{font:700 34px/1 var(--display)}
+.grid{overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel);max-height:70vh}
+table{border-collapse:collapse;width:100%;font:13px/1.35 var(--mono);font-variant-numeric:tabular-nums}
+th{position:sticky;top:0;background:var(--head);font:600 12px var(--body);text-transform:uppercase;letter-spacing:.04em;color:var(--mute);text-align:right;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap;cursor:pointer;z-index:1}
+th.l,td.l{text-align:left}td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+td.g,th.g{border-left:2px solid var(--line)}
+tbody tr{cursor:pointer}tbody tr:hover{background:var(--head)}tr.sel{background:var(--sel)!important}tr.f12 td:first-child{box-shadow:inset 3px 0 var(--gold)}
+.pos{color:var(--pos)}.neg{color:var(--neg)}.mu{color:var(--mute)}
+.pill{display:inline-block;padding:1px 7px;border-radius:999px;font:600 11px var(--body);border:1px solid currentColor}
+.legend{color:var(--mute);font-size:13px;margin:8px 2px 18px;max-width:140ch}
+.tools{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin:0 0 8px}
+.mini{width:100%;border-collapse:collapse;font:13px var(--mono)}.mini td{padding:3px 6px;border:0;text-align:right}.mini td:first-child{text-align:left;color:var(--mute);font-family:var(--body)}
+canvas{width:100%;height:220px;display:block;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+h2{font:700 22px var(--display);letter-spacing:.03em;margin:18px 0 8px}
+.empty{padding:28px;text-align:center;color:var(--mute);background:var(--panel);border:1px dashed var(--line);border-radius:10px}
+details summary{cursor:pointer;color:var(--mute);font-size:13px}
+</style>
+</head>
+<body>
+<div class="top"><h1>MMM Test Lab</h1><p>Pick an idea, press Run. Every entry × stop × target × exit is tested on two periods, with a random twin for every trade. Research only, not advice.</p></div>
+<div class="app">
+<form class="side" id="f" onsubmit="return false">
+  <div class="row"><label>Preset <select id="preset"></select></label></div>
+  <div class="row"><button type="button" id="savePre">Save as preset</button><button type="button" id="share">Copy share link</button></div>
+  <fieldset><legend>Market</legend>
+    <div class="row"><label>Market <select id="m"><option value="NQ">NQ / MNQ</option><option value="ES">ES / MES</option><option value="GC">Gold (MGC)</option><option value="CL">Crude (MCL)</option></select></label>
+    <label>Chart <select id="tf"><option>1</option><option>2</option><option>3</option><option selected>5</option><option>10</option><option>15</option><option>30</option><option value="60">1h</option><option value="240">4h</option></select></label></div>
+    <p class="hint" id="dataHint"></p>
+  </fieldset>
+  <fieldset><legend>Idea</legend>
+    <label>Signal <select id="idea">
+      <option value="flip">Body Flip event (CDS / CDL, lines, PO4)</option><option value="bc">BC candle (BuBC / BeBC)</option>
+      <option value="level">Level touch and reject</option><option value="ib">Initial balance (9:30-10:30)</option>
+      <option value="orb">Opening range</option><option value="time">Candle at a set time</option><option value="custom">Custom formula</option></select></label>
+    <div data-for="flip"><label>Event <select id="event"></select></label>
+      <div class="row"><label>C2 body ≥ % of C1 <input type="number" id="c2pct" value="50" min="1" max="200"></label><label><input type="checkbox" id="openChk" checked> Open check</label></div></div>
+    <div data-for="bc"><div class="row"><label>Min body × ATR <input type="number" id="minBody" value="0" step=".1" min="0"></label><label>NBCs right before ≥ <input type="number" id="prevNbc" value="0" min="0"></label></div>
+      <label>Only the Nth BC in a row (0 = any) <input type="number" id="nth" value="0" min="0"></label></div>
+    <div data-for="level"><div class="chips" id="lvls">
+      <label><input type="checkbox" value="PD" checked> Prev day H / L</label><label><input type="checkbox" value="LON" checked> London H / L</label>
+      <label><input type="checkbox" value="ON"> Overnight H / L</label><label><input type="checkbox" value="ASIA"> Asia range H / L</label>
+      <label><input type="checkbox" value="NYVP" checked> Prev session VP</label><label><input type="checkbox" value="WKVP" checked> Prev week VP</label>
+      <label><input type="checkbox" value="Z30" checked> 30m zones</label><label><input type="checkbox" value="Z60" checked> 60m zones</label></div>
+      <label><input type="checkbox" id="strict"> Strict zones only</label>
+      <div class="row"><label>Reaction <select id="trig"><option value="aggr">aggressive (beyond prior candle)</option><option value="close">close back</option></select></label></div>
+      <div class="row"><label>From <input type="time" id="lvFrom" value="09:30"></label><label>To <input type="time" id="lvTo" value="15:00"></label></div></div>
+    <div data-for="ib"><div class="row"><label>Setup <select id="ibSetup"><option value="both">both</option><option value="FA">failed auction</option><option value="TC">trend continuation</option></select></label>
+      <label>Last entry <input type="time" id="ibCut" value="15:00"></label></div><p class="hint">Adds the "setup target" (IB mid for failed auction, IB high / low for trend continuation).</p></div>
+    <div data-for="orb"><div class="row"><label>Start <input type="time" id="orbStart" value="09:30"></label><label>Minutes <input type="number" id="orbLen" value="15" min="1"></label></div>
+      <div class="row"><label>Trade <select id="orbMode"><option value="break">close beyond the range</option><option value="fail">failed break (fade)</option><option value="retest">break and retest</option></select></label><label>Last entry <input type="time" id="orbCut" value="12:00"></label></div></div>
+    <div data-for="time"><div class="row"><label>Candle starting at <input type="time" id="tAt" value="09:55"></label><label><input type="checkbox" id="tNeedBc" checked> BC only</label></div></div>
+    <div data-for="custom"><label style="display:block">Formula: return 1 = long, -1 = short, 0 = nothing
+      <textarea id="expr">bc[i] === 1 && bc[i-1] === 0 && bc[i-2] === 0 && (c[i]-o[i]) > atr[i] ? 1 : bc[i] === -1 && bc[i-1] === 0 && bc[i-2] === 0 && (o[i]-c[i]) > atr[i] ? -1 : 0</textarea></label>
+      <details><summary>What can I use?</summary><p class="hint">o h l c v = candle arrays, i = this candle, [i-1] = the one before. bc[i] = 1 BuBC, -1 BeBC, 0 NBC. atr[i] = ATR(14). mn = minute of day (570 = 9:30). wd = weekday (1 Mon … 5 Fri). Example: <code>mn === 600 && c[i] > o[i] ? 1 : 0</code></p></details></div>
+    <label><input type="checkbox" id="fade"> Fade it (trade the other way)</label>
+  </fieldset>
+  <fieldset><legend>Filters</legend>
+    <label>Side <select id="side"><option value="both">long and short</option><option value="long">long only</option><option value="short">short only</option></select></label>
+    <label><input type="checkbox" id="useWin"> Only signals between</label>
+    <div class="row"><label>From <input type="time" id="winFrom" value="09:30"></label><label>To <input type="time" id="winTo" value="12:00"></label></div>
+    <div class="chips" id="days"><label><input type="checkbox" value="1" checked> Mon</label><label><input type="checkbox" value="2" checked> Tue</label><label><input type="checkbox" value="3" checked> Wed</label><label><input type="checkbox" value="4" checked> Thu</label><label><input type="checkbox" value="5" checked> Fri</label><label><input type="checkbox" value="0" checked> Sun night</label></div>
+    <div class="row"><label>Higher chart trend <select id="htf"><option value="off">off</option><option value="with">trade with it</option><option value="against">against it</option></select></label>
+      <label>HTF <select id="htfTf"><option value="15">15m</option><option value="60" selected>1h</option><option value="240">4h</option></select></label></div>
+    <label>Body Flip trend <select id="flipF"><option value="off">off</option><option value="with">trade with it</option><option value="against">against it</option></select></label>
+    <label><input type="checkbox" id="onePerDay"> First signal per side per day only</label>
+  </fieldset>
+  <fieldset><legend>Grid</legend>
+    <p class="hint">Every box you tick is paired with every other one.</p>
+    <div class="chips" id="entries"><label><input type="checkbox" value="market" checked> Market (close)</label><label><input type="checkbox" value="limit50"> Limit 50% candle</label><label><input type="checkbox" value="limitOpen"> Limit at candle open</label><label><input type="checkbox" value="limitLevel"> Limit at the level</label></div>
+    <label>Fixed stops (NQ points, scaled for ES / gold) <input type="text" id="fixed" value="20,40,50,60" size="12"></label>
+    <div class="chips" id="stops"><label><input type="checkbox" value="struct" checked> Structure (swing / PO4)</label><label><input type="checkbox" value="atr1"> ATR × 1</label><label><input type="checkbox" value="atr2"> ATR × 2</label></div>
+    <div class="chips" id="targets"><label><input type="checkbox" value="1" checked> 1:1</label><label><input type="checkbox" value="2" checked> 1:2</label><label><input type="checkbox" value="3" checked> 1:3</label><label><input type="checkbox" value="4"> 1:4</label><label><input type="checkbox" value="6"> 1:6</label><label><input type="checkbox" value="none"> No target</label><label><input type="checkbox" value="setup"> Setup target</label></div>
+    <div class="chips" id="exits"><label><input type="checkbox" value="st" checked> Stop / target only</label><label><input type="checkbox" value="flip"> Out at next flip</label><label><input type="checkbox" value="oppbc"> Out at opposite BC</label><label><input type="checkbox" value="sess"> Hold to next session open</label></div>
+    <label>Max hold <select id="cap"><option value="day">to the end of the day (17:00)</option><option value="bars">2000 candles</option></select></label>
+  </fieldset>
+  <fieldset><legend>Account</legend>
+    <div class="row"><label>Risk $ <input type="number" id="riskUsd" value="200" min="1"></label><label>Stop after losses / day <input type="number" id="maxLoss" value="2" min="0"></label></div>
+    <label><input type="checkbox" id="oneAtATime" checked> One trade at a time</label>
+  </fieldset>
+  <fieldset><button type="button" class="go" id="go">Run test</button></fieldset>
+</form>
+<main class="main">
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+  <div id="out"><div class="empty">Choose an idea on the left and press <b>Run test</b>.<br>The 1:2 test with a fixed stop (NQ 50 / ES 20 / gold 12) is always included.</div></div>
+</main>
+</div>
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const KN={1:'FLIP (CDS / CDL)',2:'Trend line touch-hold',3:'Trend line break',4:'ATR line touch-hold',5:'ATR line break',6:'PO4 touch-hold',7:'PO4 break',8:'Old trend line touch-hold',9:'Old ATR line touch-hold'};
+const EN={market:'market (close)',limit50:'limit 50% candle',limitOpen:'limit candle open',limitLevel:'limit at level'};
+const XN={st:'stop / target',oppbc:'opposite BC',sess:'next session open',flip:'next flip'};
+const DATA={NQ:'NQ 1m Dec 2022 – Nov 2025 (P1) vs MNQ 2026 (P2).',ES:'MES 2026, first half (P1) vs second half (P2).',GC:'MGC 2026 (5m from July), halves.',CL:'MCL 2026, halves.'};
+$('#event').innerHTML=Object.entries(KN).map(([k,v])=>`<option value="${k}">${v}</option>`).join('');
+const tm=v=>{const [a,b]=(v||'0:0').split(':');return (+a)*60+(+b)}, tmS=x=>String(Math.floor(x/60)).padStart(2,'0')+':'+String(x%60).padStart(2,'0');
+const chk=id=>$$('#'+id+' input:checked').map(x=>x.value);
+function read(){
+  const P={idea:$('#idea').value,event:+$('#event').value,c2pct:+$('#c2pct').value,openChk:$('#openChk').checked,minBody:+$('#minBody').value,prevNbc:+$('#prevNbc').value,nth:+$('#nth').value,
+    lvls:chk('lvls'),strict:$('#strict').checked,trig:$('#trig').value,lvFrom:tm($('#lvFrom').value),lvTo:tm($('#lvTo').value),ibSetup:$('#ibSetup').value,ibCut:tm($('#ibCut').value),
+    orbStart:tm($('#orbStart').value),orbLen:+$('#orbLen').value,orbMode:$('#orbMode').value,orbCut:tm($('#orbCut').value),tAt:tm($('#tAt').value),tNeedBc:$('#tNeedBc').checked,expr:$('#expr').value,fade:$('#fade').checked,
+    side:$('#side').value,useWin:$('#useWin').checked,winFrom:tm($('#winFrom').value),winTo:tm($('#winTo').value),days:chk('days').map(Number),htf:$('#htf').value,htfTf:+$('#htfTf').value,flipF:$('#flipF').value,onePerDay:$('#onePerDay').checked,
+    entries:chk('entries'),fixed:$('#fixed').value.split(',').map(x=>+x.trim()).filter(x=>x>0),stops:chk('stops'),targets:chk('targets'),exits:chk('exits'),cap:$('#cap').value,
+    riskUsd:+$('#riskUsd').value,maxLoss:+$('#maxLoss').value,oneAtATime:$('#oneAtATime').checked};
+  if(!P.fixed.includes(50))P.fixed.push(50);
+  if(!P.targets.includes('2'))P.targets.push('2');
+  if(!P.entries.includes('market'))P.entries.unshift('market');
+  if(!P.exits.includes('st'))P.exits.unshift('st');
+  return {m:$('#m').value,tf:+$('#tf').value,P};
+}
+function write(S){
+  if(!S)return; const P=S.P||{};
+  $('#m').value=S.m||'NQ'; $('#tf').value=String(S.tf||5);
+  const set=(id,v)=>{const e=$('#'+id); if(!e||v===undefined)return; if(e.type==='checkbox')e.checked=!!v; else if(e.type==='time')e.value=tmS(v); else e.value=v;};
+  for(const k of ['idea','event','c2pct','openChk','minBody','prevNbc','nth','strict','trig','lvFrom','lvTo','ibSetup','ibCut','orbStart','orbLen','orbMode','orbCut','tAt','tNeedBc','expr','fade','side','useWin','winFrom','winTo','htf','htfTf','flipF','onePerDay','cap','riskUsd','maxLoss','oneAtATime'])set(k,P[k]);
+  if(P.fixed)$('#fixed').value=P.fixed.join(',');
+  const boxes=(id,arr)=>{if(!arr)return; $$('#'+id+' input').forEach(x=>x.checked=arr.map(String).includes(x.value));};
+  boxes('lvls',P.lvls);boxes('days',P.days);boxes('entries',P.entries);boxes('stops',P.stops);boxes('targets',P.targets);boxes('exits',P.exits);
+  idea();
+}
+function idea(){const v=$('#idea').value;$$('[data-for]').forEach(d=>d.hidden=d.dataset.for!==v);$('#dataHint').textContent=DATA[$('#m').value];}
+$('#idea').onchange=()=>{idea(); if($('#idea').value==='ib'){$$('#targets input[value=setup]')[0].checked=true;}};
+$('#m').onchange=idea;
+/* presets */
+const BUILT={
+ 'Body Flip: every flip (CDS / CDL)':{m:'NQ',tf:5,P:{idea:'flip',event:1,entries:['market','limitLevel'],stops:['struct','atr1'],fixed:[20,40,50,60],targets:['1','2','3','none'],exits:['st','flip'],cap:'day'}},
+ 'Body Flip: old trend line touch-hold, long':{m:'ES',tf:3,P:{idea:'flip',event:8,side:'long',entries:['market'],stops:['struct'],fixed:[20,40,50,60],targets:['1','2','4'],exits:['st','flip'],cap:'day'}},
+ 'IB: her failed auction + trend continuation':{m:'NQ',tf:5,P:{idea:'ib',ibSetup:'both',ibCut:900,entries:['market'],stops:['struct'],fixed:[50],targets:['setup','1','2','3'],exits:['st','sess'],cap:'day'}},
+ 'Her levels: prev day, London, VP, zones':{m:'NQ',tf:5,P:{idea:'level',lvls:['PD','LON','NYVP','WKVP','Z30','Z60'],trig:'aggr',lvFrom:570,lvTo:900,entries:['market','limitLevel'],stops:['struct'],fixed:[50],targets:['1','2','3'],exits:['st'],cap:'day'}},
+ '9:30 opening range (15 min) break':{m:'NQ',tf:5,P:{idea:'orb',orbStart:570,orbLen:15,orbMode:'break',orbCut:720,entries:['market','limitLevel'],stops:['struct'],fixed:[20,40,50,60],targets:['1','2','3'],exits:['st','sess'],cap:'day'}},
+ '9:55 candle direction (5m, BC only)':{m:'NQ',tf:5,P:{idea:'time',tAt:595,tNeedBc:true,entries:['market','limit50'],stops:['struct'],fixed:[20,40,50,60],targets:['1','2','3'],exits:['st','oppbc'],cap:'day'}},
+ 'Custom: BC after 2 NBCs, body > 1 ATR':{m:'NQ',tf:5,P:{idea:'custom',entries:['market'],stops:['struct','atr1'],fixed:[20,40,50,60],targets:['1','2','3'],exits:['st','oppbc'],cap:'day'}}};
+function userPre(){try{return JSON.parse(localStorage.getItem('mmmlab_presets')||'{}')}catch(e){return {}}}
+function fillPre(){const U=userPre();$('#preset').innerHTML='<option value="">— choose —</option><optgroup label="Built in">'+Object.keys(BUILT).map(k=>`<option>${k}</option>`).join('')+'</optgroup>'+(Object.keys(U).length?'<optgroup label="Saved">'+Object.keys(U).map(k=>`<option>${k}</option>`).join('')+'</optgroup>':'');}
+$('#preset').onchange=()=>{const k=$('#preset').value,U=userPre(); const S=BUILT[k]||U[k]; if(S){const cur=read(); write({m:S.m,tf:S.tf,P:{...cur.P,...S.P}});}};
+$('#savePre').onclick=()=>{const cur=$('#preset').value, def=(cur&&!BUILT[cur])?cur:'My test '+new Date().toISOString().slice(0,16).replace('T',' ');
+  const n2=(window.prompt('Name this test',def)||'').trim(); if(!n2)return;
+  const U=userPre(); U[n2]=read(); try{localStorage.setItem('mmmlab_presets',JSON.stringify(U));}catch(e){} fillPre(); $('#preset').value=n2; status('Saved "'+n2+'" in this browser.');};
+$('#share').onclick=async()=>{const h='#'+btoa(unescape(encodeURIComponent(JSON.stringify(read())))); history.replaceState(null,'',h); try{await navigator.clipboard.writeText(location.href);status('Link copied. It opens this exact test.')}catch(e){status('Link is in the address bar.')}};
+/* worker */
+const W=new Worker('engine.js'); let reqId=0; const waits={};
+W.onmessage=ev=>{const d=ev.data,w=waits[d.id]; if(!w)return; if(d.prog){status(d.prog);return;} delete waits[d.id]; d.err?w.rej(new Error(d.err)):w.res(d.done);};
+const call=msg=>new Promise((res,rej)=>{const id=++reqId;waits[id]={res,rej};W.postMessage({...msg,id});});
+function status(t,err){const s=$('#status');s.textContent=t;s.classList.toggle('err',!!err);}
+/* formatting */
+const f=(v,d=2)=>v==null||!isFinite(v)?'<span class="mu">–</span>':(v>0&&d>=2?'+':'')+(+v).toFixed(d);
+const cr=v=>v==null||!isFinite(v)?'':v>0?'pos':v<0?'neg':'';
+const pc=v=>v==null||!isFinite(v)?'–':(v*100).toFixed(0)+'%';
+const usd=v=>v==null||!isFinite(v)?'–':(v<0?'−$':'$')+Math.round(Math.abs(v)).toLocaleString();
+const tn=t=>t==='setup'?'setup target':(t==null||t!==t)?'none':'1:'+t;
+const dt=t=>new Date(t*6e4).toISOString().slice(0,16).replace('T',' ');
+let RES=null, LAST=null, SORT={k:'mt',d:-1}, ONLYPASS=false;
+$('#go').onclick=async()=>{
+  const S=read(); LAST=S; $('#go').disabled=true; history.replaceState(null,'','#'+btoa(unescape(encodeURIComponent(JSON.stringify(S)))));
+  try{RES=await call({cmd:'run',...S}); status(`Done in ${(RES.ms/1000).toFixed(1)}s · ${RES.combos} combos per signal · ${RES.periods.map(p=>p[0]+' '+p[2]+' → '+p[3]).join(' · ')}`); render();}
+  catch(e){status(e.message,true);} finally{$('#go').disabled=false;}
+};
+function verdict(R){
+  if(!R.tested)return 'Not enough trades: no combo has 30+ trades in both periods.';
+  if(R.passes===0)return 'No edge: nothing passed in both periods.';
+  if(R.passes<=R.rpasses)return `${R.passes} passed, but random entries passed ${R.rpasses} times. That is the luck level.`;
+  return `${R.passes} combos passed and random passed ${R.rpasses}. Check the passes below: same idea on another chart, and the random column next to each.`;
+}
+function render(){
+  const R=RES, F=R.fnd, sp={NQ:'50 pts',ES:'20 pts',GC:'12 pts',CL:'0.50'}[LAST.m];
+  const nf=v=>v==null||!isFinite(v)?'–':(+v).toFixed(2); const fr=(k,lab,d=2,p)=>`<tr><td>${lab}</td><td>${p?pc(F[0][k]):d==='n'?nf(F[0][k]):f(F[0][k],d)}</td><td>${p?pc(F[1][k]):d==='n'?nf(F[1][k]):f(F[1][k],d)}</td></tr>`;
+  let h=`<div class="cards">
+   <div class="card key"><h3>Verdict</h3><div class="big">${R.passes} <span class="mu" style="font-size:20px">pass</span> · ${R.rpasses} <span class="mu" style="font-size:20px">random pass</span></div><p>${verdict(R)}</p><p class="hint">${R.tested} combos had 30+ trades in both periods. PASS = t-score ≥ 2 in both.</p></div>
+   <div class="card"><h3>Signals</h3><table class="mini"><tr><td></td><td>P1</td><td>P2</td></tr><tr><td>Signals</td><td>${R.sigCount[0].toLocaleString()}</td><td>${R.sigCount[1].toLocaleString()}</td></tr>${fr('bcOpp','BCs before the opposite BC','n')}${fr('bcNbc','BCs in a row before the first NBC','n')}${fr('p1','Points after 1 candle')}${fr('p5','Points after 5 candles')}${fr('p10','Points after 10 candles')}${fr('up5','Up after 5 candles',0,1)}</table><p class="hint">Foundation: what price does right after the signal, in the signal's direction.</p></div>
+  </div>
+  <div class="tools"><label><input type="checkbox" id="onlyPass" ${ONLYPASS?'checked':''}> PASS only</label><span class="hint">Gold edge = the fixed ${sp} 1:2 test. Click a row for dollars, prop and every trade.</span></div>
+  <div class="grid"><table><thead><tr>
+   <th class="l" data-k="e">Entry</th><th class="l" data-k="st">Stop</th><th class="l" data-k="t">Target</th><th class="l" data-k="x">Exit</th>
+   <th class="g" data-k="n0">P1 trades</th><th data-k="wr0">WR</th><th data-k="a0">avg RR</th><th data-k="pf0">PF</th><th data-k="t0">t-score</th><th data-k="ra0">Random</th>
+   <th class="g" data-k="n1">P2 trades</th><th data-k="wr1">WR</th><th data-k="a1">avg RR</th><th data-k="pf1">PF</th><th data-k="t1">t-score</th><th data-k="ra1">Random</th><th class="g" data-k="mt">Result</th></tr></thead><tbody id="tb"></tbody></table></div>
+  <p class="legend">WR = win rate. avg RR = average result in R after costs (1 = one full stop won). PF = profit factor (money won ÷ money lost). t-score = how sure we can be it isn't luck (2+ = real). Random = avg RR of the same trades at a random time that day (same side, stop size and target). P1 / P2 = the two test periods.</p>
+  <div id="detail"></div>`;
+  $('#out').innerHTML=h; table();
+  $('#onlyPass').onchange=e=>{ONLYPASS=e.target.checked;table();};
+  $$('#out th[data-k]').forEach(th=>{th.tabIndex=0;th.onclick=()=>{SORT={k:th.dataset.k,d:SORT.k===th.dataset.k?-SORT.d:-1};table();};});
+}
+const key=(r,k)=>({e:r.e,st:r.st,t:r.t==='setup'?99:(r.t!==r.t||r.t==null?100:r.t),x:r.x,n0:r.p0.n,wr0:r.p0.wr,a0:r.p0.avg,pf0:r.p0.pf,t0:r.p0.t,ra0:r.r0.avg,n1:r.p1.n,wr1:r.p1.wr,a1:r.p1.avg,pf1:r.p1.pf,t1:r.p1.t,ra1:r.r1.avg,mt:Math.min(r.p0.t??-99,r.p1.t??-99)})[k];
+function table(){
+  let rows=RES.rows.slice(); if(ONLYPASS)rows=rows.filter(r=>r.pass);
+  rows.sort((a,b)=>{const x=key(a,SORT.k),y=key(b,SORT.k); if(x==null&&y==null)return 0; if(x==null)return 1; if(y==null)return -1; return (x>y?1:x<y?-1:0)*SORT.d;});
+  const f12=RES.rows.filter(r=>r.fixed12); rows=f12.concat(rows.filter(r=>!r.fixed12)).slice(0,400);
+  const sc=(p,r)=>`<td class="g">${p.n||0}</td><td>${pc(p.wr)}</td><td class="${cr(p.avg)}">${f(p.avg)}</td><td>${f(p.pf)}</td><td class="${cr(p.t)}">${f(p.t,1)}</td><td class="mu">${f(r.avg)}</td>`;
+  $('#tb').innerHTML=rows.map((r,i)=>`<tr tabindex="0" data-i="${RES.rows.indexOf(r)}" class="${r.fixed12?'f12':''}"><td class="l">${EN[r.e]}</td><td class="l">${r.st}</td><td class="l">${tn(r.t)}</td><td class="l">${XN[r.x]}</td>${sc(r.p0,r.r0)}${sc(r.p1,r.r1)}<td class="g">${r.pass?'<span class="pill pos">PASS</span>':r.rpass?'<span class="pill mu">random</span>':''}</td></tr>`).join('')||'<tr><td colspan="17" class="l mu">No rows.</td></tr>';
+  $$('#tb tr[data-i]').forEach(tr=>{const go=()=>detail(+tr.dataset.i,tr); tr.onclick=go; tr.onkeydown=e=>{if(e.key==='Enter')go();};});
+}
+async function detail(i,tr){
+  $$('#tb tr').forEach(x=>x.classList.remove('sel')); tr.classList.add('sel');
+  const r=RES.rows[i]; $('#detail').innerHTML='<p class="status">Loading trades…</p>';
+  try{
+    const D=await call({cmd:'trades',...LAST,P:{...LAST.P,riskUsd:+$('#riskUsd').value,maxLoss:+$('#maxLoss').value,oneAtATime:$('#oneAtATime').checked},key:r.key});
+    const T=D.trades, M=D.money.per;
+    let h=`<h2>${EN[r.e]} · stop ${r.st} · ${tn(r.t)} · ${XN[r.x]}</h2>
+    <div class="cards">${[0,1].map(p=>`<div class="card"><h3>P${p+1}: one account, $${(+$('#riskUsd').value).toLocaleString()} risk</h3><table class="mini">
+      <tr><td>Trades taken</td><td>${M[p].trades}</td></tr><tr><td>$ per month</td><td class="${cr(M[p].perMonth)}">${usd(M[p].perMonth)}</td></tr><tr><td>Best month</td><td>${usd(M[p].best)}</td></tr><tr><td>Worst month</td><td>${usd(M[p].worst)}</td></tr><tr><td>Green months</td><td>${pc(M[p].green)}</td></tr><tr><td>50k evals passed</td><td>${M[p].passed} of ${M[p].evals}</td></tr></table></div>`).join('')}</div>
+    <canvas id="eq" width="1600" height="440" aria-label="Equity curve in R"></canvas><p class="legend">Equity in R for every trade of this combo (no daily rules), P1 then P2. The dollar cards use your account rules: one trade at a time and stop after ${$('#maxLoss').value} losses a day (a loss counts once it closes). 50k eval: +$3,000 before a $2,000 trailing drawdown, $1,000 daily loss stop; one try started each month.</p>
+    <div class="tools"><button type="button" id="csv">Download trades (CSV)</button><span class="hint">${T.length.toLocaleString()} trades. Showing the last 300.</span></div>
+    <div class="grid" style="max-height:50vh"><table><thead><tr><th class="l">Entry time</th><th class="l">Exit time</th><th class="l">Data</th><th class="l">Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Risk pts</th><th>avg RR</th><th class="l">Tag</th></tr></thead><tbody>${T.slice(-300).reverse().map(t=>`<tr><td class="l">${dt(t.te)}</td><td class="l">${dt(t.tx)}</td><td class="l">${t.sym}</td><td class="l">${t.s>0?'long':'short'}</td><td>${(+t.ep).toFixed(2)}</td><td>${(+t.sl).toFixed(2)}</td><td>${t.tp==null?'–':(+t.tp).toFixed(2)}</td><td>${(+t.risk).toFixed(2)}</td><td class="${cr(t.r)}">${f(t.r)}</td><td class="l mu">${t.tag||''}</td></tr>`).join('')}</tbody></table></div>`;
+    $('#detail').innerHTML=h; drawEq(T);
+    $('#csv').onclick=()=>{const rows=['entry_time,exit_time,data,period,side,entry,stop,target,risk_pts,R,tag'].concat(T.map(t=>[dt(t.te),dt(t.tx),t.sym,'P'+(t.per+1),t.s>0?'long':'short',t.ep,t.sl,t.tp??'',t.risk,t.r.toFixed(4),'"'+(t.tag||'')+'"'].join(',')));
+      const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));a.download='mmm_test_lab_trades.csv';a.click();};
+    $('#detail').scrollIntoView({behavior:'smooth',block:'start'});
+  }catch(e){$('#detail').innerHTML='<p class="status err">'+e.message+'</p>';}
+}
+function drawEq(T){
+  const cv=$('#eq'),x=cv.getContext('2d'),W=cv.width,H=cv.height,css=getComputedStyle(document.documentElement);
+  const col=n=>css.getPropertyValue(n).trim(); x.clearRect(0,0,W,H);
+  const eq=[0]; let s=0; for(const t of T){s+=t.r;eq.push(s);} const lo=Math.min(...eq),hi=Math.max(...eq),pad=30;
+  const X=i=>pad+(W-2*pad)*i/Math.max(1,eq.length-1),Y=v=>H-pad-(H-2*pad)*(v-lo)/Math.max(1e-9,hi-lo);
+  x.strokeStyle=col('--line');x.lineWidth=1;x.beginPath();x.moveTo(pad,Y(0));x.lineTo(W-pad,Y(0));x.stroke();
+  const cut=T.findIndex(t=>t.per===1); if(cut>0){x.setLineDash([6,6]);x.beginPath();x.moveTo(X(cut),pad);x.lineTo(X(cut),H-pad);x.stroke();x.setLineDash([]);x.fillStyle=col('--mute');x.font='24px Barlow';x.fillText('P1',X(0)+8,pad+20);x.fillText('P2',X(cut)+8,pad+20);}
+  x.strokeStyle=s>=0?col('--pos'):col('--neg');x.lineWidth=3;x.beginPath();eq.forEach((v,i)=>i?x.lineTo(X(i),Y(v)):x.moveTo(X(i),Y(v)));x.stroke();
+  x.fillStyle=col('--fg');x.font='24px JetBrains Mono';x.textAlign='right';x.fillText('Total '+(s>=0?'+':'')+s.toFixed(1)+' R',W-pad,H-8);x.textAlign='left';
+}
+fillPre();
+try{if(location.hash.length>2)write(JSON.parse(decodeURIComponent(escape(atob(location.hash.slice(1))))));}catch(e){}
+idea();
+</script>
+</body>
+</html>

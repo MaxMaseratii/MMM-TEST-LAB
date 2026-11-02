@@ -1,0 +1,12 @@
+// ═══════════════════════════════════════════════════════════════
+// ALERTS (closed candles only — no repaint)
+// ═══════════════════════════════════════════════════════════════
+alertcondition(ev_cdl, "CDLx Flip", "MMM XCS One · CDLx bullish flip on {{ticker}} at {{close}}")
+alertcondition(ev_cds, "CDSx Flip", "MMM XCS One · CDSx bearish flip on {{ticker}} at {{close}}")
+alertcondition(ev_ld, "LDx Continuation", "MMM XCS One · LDx bullish continuation on {{ticker}} at {{close}}")
+alertcondition(ev_sd, "SDx Continuation", "MMM XCS One · SDx bearish continuation on {{ticker}} at {{close}}")
+alertcondition(ev_ctlBuy, "Balance: BUYERS in control", "MMM XCS One · BUYERS control the live box on {{ticker}} (odds ≥ threshold)")
+alertcondition(ev_ctlSell, "Balance: SELLERS in control", "MMM XCS One · SELLERS control the live box on {{ticker}} (odds ≥ threshold)")
+alertcondition(ev_gmGoldL, "Gold GMC Long", "MMM XCS One · tested GMC long (★) on {{ticker}} at {{close}}")
+alertcondition(ev_gmGoldS, "Gold GMC Short", "MMM XCS One · tested GMC short (★) on {{ticker}} at {{close}}")
+alertcondition(newsWarn and barstate.isconfirmed, "News Warning", "MMM XCS One · news coming in 15 / 30 minutes on {{ticker}}")

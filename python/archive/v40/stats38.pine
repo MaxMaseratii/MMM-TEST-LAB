@@ -1,0 +1,104 @@
+// ═══════════════════════════════════════════════════════════════
+// BC FLOW STATS (chart timeframe) + VOLATILITY STOP (S6) IN POINTS
+//  run          = BCs in one direction until the first opposite BC
+//  pure run     = BCs in a row with NO NBC between
+//  flip         = an opposite BC · continuation = a same-side BC after an NBC pause
+// Index 0 = bull runs, 1 = bear runs.
+// ═══════════════════════════════════════════════════════════════
+var int stDir   = 0
+var int stPure  = 0
+var int stRun   = 0
+var int stNbc   = 0
+var int stConts = 0
+var array<float> stPureFlipS = array.from(0.0, 0.0)
+var array<int>   stPureFlipN = array.from(0, 0)
+var array<float> stPureNbcS  = array.from(0.0, 0.0)
+var array<int>   stPureNbcN  = array.from(0, 0)
+var array<float> stRunS      = array.from(0.0, 0.0)
+var array<int>   stRunN      = array.from(0, 0)
+var array<float> stNbcFlipS  = array.from(0.0, 0.0)
+var array<int>   stNbcFlipN  = array.from(0, 0)
+var array<float> stNbcContS  = array.from(0.0, 0.0)
+var array<int>   stNbcContN  = array.from(0, 0)
+var array<float> stContS     = array.from(0.0, 0.0)
+var array<int>   stImmFlip   = array.from(0, 0)
+
+f_stAdd(array<float> s, array<int> n, int k, float v) =>
+    s.set(k, s.get(k) + v)
+    n.set(k, n.get(k) + 1)
+
+if barstate.isconfirmed and bar_index > 0
+    int sd = close > high[1] ? 1 : close < low[1] ? -1 : 0
+    int sk = stDir == 1 ? 0 : 1
+    if sd == 0
+        if stDir != 0
+            if stNbc == 0 and stPure > 0
+                f_stAdd(stPureNbcS, stPureNbcN, sk, stPure)
+            stNbc  += 1
+            stPure := 0
+    else if stDir == 0
+        stDir   := sd
+        stPure  := 1
+        stRun   := 1
+        stNbc   := 0
+        stConts := 0
+    else if sd == stDir
+        if stNbc > 0
+            f_stAdd(stNbcContS, stNbcContN, sk, stNbc)
+            stConts += 1
+            stPure  := 1
+        else
+            stPure += 1
+        stRun += 1
+        stNbc := 0
+    else
+        if stNbc == 0
+            f_stAdd(stPureFlipS, stPureFlipN, sk, stPure)
+            stImmFlip.set(sk, stImmFlip.get(sk) + 1)
+        f_stAdd(stRunS, stRunN, sk, stRun)
+        f_stAdd(stNbcFlipS, stNbcFlipN, sk, stNbc)
+        stContS.set(sk, stContS.get(sk) + stConts)
+        stDir   := sd
+        stPure  := 1
+        stRun   := 1
+        stNbc   := 0
+        stConts := 0
+
+float stAtrV  = ta.atr(st_atr)
+float stFixV  = st_fix > 0 ? st_fix : str.contains(syminfo.root, "NQ") ? 50.0 : str.contains(syminfo.root, "ES") ? 20.0 : na
+
+f_stAvg(array<float> s, array<int> n, int k) =>
+    n.get(k) > 0 ? str.tostring(s.get(k) / n.get(k), "#.##") + "  (" + str.tostring(n.get(k)) + ")" : "—"
+
+var table stHelp = st_on and st_help ? table.new(f_elPos(st_hpos), 1, 1, bgcolor=EL_BG, frame_color=EL_FRM, frame_width=1) : na
+var table stTbl = st_on ? table.new(f_elPos(st_pos), 3, 15, bgcolor=EL_BG, frame_color=EL_FRM, frame_width=1, border_color=EL_BRD, border_width=1) : na
+if barstate.isfirst and st_on
+    table.merge_cells(stTbl, 0, 0, 2, 0)
+    table.merge_cells(stTbl, 0, 9, 2, 9)
+    for rr = 10 to 13
+        table.merge_cells(stTbl, 1, rr, 2, rr)
+if barstate.islast and st_on
+    string sz = f_lsz(str.lower(st_sz))
+    f_elCell(stTbl, 0, 0, "MMM BC FLOW  ·  " + f_tfName(timeframe.period) + "  ·  " + syminfo.ticker, EL_GOLD, EL_BG, text.align_center, sz)
+    f_elCell(stTbl, 0, 1, "RUNS (BODY CLOSES)", EL_LBL, EL_SEC, text.align_left, sz)
+    f_elCell(stTbl, 1, 1, "BULL", EL_POS, EL_SEC, text.align_center, sz)
+    f_elCell(stTbl, 2, 1, "BEAR", EL_NEG, EL_SEC, text.align_center, sz)
+    array<string> nm = array.from("Pure run → opposite BC: avg BCs (n)", "Pure run → first NBC: avg BCs (n)", "Run with NBC pauses → flip: avg BCs (n)", "NBCs before a FLIP: avg (n)", "NBCs before a CONTINUATION: avg (n)", "Continuations per run: avg", "Flip straight after a BC (no NBC): %")
+    for r = 0 to 6
+        color bg = f_elRowBg(r)
+        string v0 = r == 0 ? f_stAvg(stPureFlipS, stPureFlipN, 0) : r == 1 ? f_stAvg(stPureNbcS, stPureNbcN, 0) : r == 2 ? f_stAvg(stRunS, stRunN, 0) : r == 3 ? f_stAvg(stNbcFlipS, stNbcFlipN, 0) : r == 4 ? f_stAvg(stNbcContS, stNbcContN, 0) : r == 5 ? (stRunN.get(0) > 0 ? str.tostring(stContS.get(0) / stRunN.get(0), "#.##") : "—") : (stRunN.get(0) > 0 ? str.tostring(stImmFlip.get(0) * 100.0 / stRunN.get(0), "#.#") + "%" : "—")
+        string v1 = r == 0 ? f_stAvg(stPureFlipS, stPureFlipN, 1) : r == 1 ? f_stAvg(stPureNbcS, stPureNbcN, 1) : r == 2 ? f_stAvg(stRunS, stRunN, 1) : r == 3 ? f_stAvg(stNbcFlipS, stNbcFlipN, 1) : r == 4 ? f_stAvg(stNbcContS, stNbcContN, 1) : r == 5 ? (stRunN.get(1) > 0 ? str.tostring(stContS.get(1) / stRunN.get(1), "#.##") : "—") : (stRunN.get(1) > 0 ? str.tostring(stImmFlip.get(1) * 100.0 / stRunN.get(1), "#.#") + "%" : "—")
+        f_elCell(stTbl, 0, 2 + r, nm.get(r), EL_LBL, bg, text.align_left, sz)
+        f_elCell(stTbl, 1, 2 + r, v0, EL_POS, bg, text.align_right, sz)
+        f_elCell(stTbl, 2, 2 + r, v1, EL_NEG, bg, text.align_right, sz)
+    f_elCell(stTbl, 0, 9, "STOPS IN POINTS  ·  pair every entry with every stop", EL_GOLD, EL_SEC, text.align_left, sz)
+    f_elCell(stTbl, 0, 10, "ATR(" + str.tostring(st_atr) + ") = average candle range", EL_LBL, EL_ROW, text.align_left, sz)
+    f_elCell(stTbl, 1, 10, str.tostring(stAtrV, format.mintick) + " pts", EL_VAL, EL_ROW, text.align_right, sz)
+    f_elCell(stTbl, 0, 11, "S6 volatility stop 1.0 / 1.5 / 2.0 × ATR", EL_LBL, EL_ALT, text.align_left, sz)
+    f_elCell(stTbl, 1, 11, str.tostring(stAtrV, "#.##") + " / " + str.tostring(stAtrV * 1.5, "#.##") + " / " + str.tostring(stAtrV * 2.0, "#.##"), EL_WARN, EL_ALT, text.align_right, sz)
+    f_elCell(stTbl, 0, 12, "S7 yesterday's daily ATR(14) × 0.10 / 0.15 / 0.25", EL_LBL, EL_ROW, text.align_left, sz)
+    f_elCell(stTbl, 1, 12, na(ed_datr) ? "—" : str.tostring(ed_datr * 0.10, "#.#") + " / " + str.tostring(ed_datr * 0.15, "#.#") + " / " + str.tostring(ed_datr * 0.25, "#.#"), EL_WARN, EL_ROW, text.align_right, sz)
+    f_elCell(stTbl, 0, 13, "S0 fixed stop (1:2 target)", EL_LBL, EL_ALT, text.align_left, sz)
+    f_elCell(stTbl, 1, 13, na(stFixV) ? "set it in the inputs" : str.tostring(stFixV, "#.##") + "  →  TP " + str.tostring(stFixV * 2, "#.##"), EL_GOLD, EL_ALT, text.align_right, sz)
+if barstate.islast and st_on and st_help
+    f_elCell(stHelp, 0, 0, "BC FLOW — Run = BCs one way until the first opposite BC · Pure = no NBC between · Flip = opposite BC · Continuation = same-side BC after an NBC pause · (n) = how many counted · S6 = chart ATR stop · S7 = daily ATR stop, set before the session · S0 = fixed stop", EL_MUTE, EL_BG, text.align_left, f_lsz("tiny"))

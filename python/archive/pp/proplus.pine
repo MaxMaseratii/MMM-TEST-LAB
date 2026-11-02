@@ -1,0 +1,1548 @@
+//@version=6
+indicator("MMM PRO PLUS @MaxMaserati", "MMM PRO PLUS", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500, max_bars_back=500)
+
+// ─── 0. On / Off ───
+grp_on       = "0. On / Off"
+show_st      = input.bool(true,  "SuperTrend Line", group=grp_on)
+show_vwap    = input.bool(true,  "VWAP", group=grp_on)
+show_struct  = input.bool(true,  "Structure Lines (T# / P# / R#)", group=grp_on, tooltip="BuPO4 / BePO4 T# = trend origin.\nBuP# / BeP# = pullback level (bull trend pullback = BeP#, bear trend pullback = BuP#).\nBuR# / BeR# = resumption level.\nLevels at the same price merge into one line, labels joined with &.")
+show_boxes   = input.bool(true,  "Best Entry Zones", group=grp_on, tooltip="The zone between the SuperTrend flip line and the wick of each level. A close inside the zone is only a test. A close beyond the wick side is a real break.")
+show_stems   = input.bool(true,  "Connect Levels To Candle Body", group=grp_on, tooltip="A small dotted stem from the candle body to the level, so levels never float when the SuperTrend line is off.")
+show_gate    = input.bool(true,  "Pullback Gate (BuPG# / BePG#) and TRAP", group=grp_on, tooltip="Pullback Gate = the OPEN of the first pullback candle. Bull trend = BePG#, bear trend = BuPG#.\nLive gate: extends while the pullback is on. Deleted when the pullback ends (LD / SD or CDS / CDL).\nClose back across the gate = the pullback push failed: it becomes a RECLAIMED line (TRAP when the pullback flip was STRONG 3/4+). That line stops at the reclaim candle.\nRECLAIMED / TRAP is deleted when price closes back through it (BePG: close below, BuPG: close above).")
+show_gmc_ln  = input.bool(true,  "Bu GMC / Be GMC Lines", group=grp_on, tooltip="The last bull GMC and the last bear GMC, at the open of the GMC candle. Each line is deleted when price closes through it.")
+show_stall   = input.bool(true,  "Stall Zones", group=grp_on, tooltip="EXIT POINT: every candle that makes a new SuperTrend stair moves it. Bear = TOP of the Stair Candle body, bull = BOTTOM of the body.\nClose beyond it against the trend = EXIT: a box is drawn from the body line to the Stair Candle low (bear) / high (bull). The box extends until the flip.\nClose beyond the Stair Candle low (bear) / high (bull), or a new stair = the trend is continuing.\nA broken box followed by a FLIP is kept (one bear, one bull). Its low (bear) / high (bull) line extends to the current candle.\nKept box: replaced by a newer flip box of the same side, deleted on a close below its low (bear) / above its high (bull).\nA broken box with no flip is deleted on a close above its high (bull) / below its low (bear).\nA box and its labels are deleted together.")
+show_ztxt    = input.bool(true,  "Stall Zone Info Text", group=grp_on, tooltip="Gray text: STALL bars | time | REJ.\nBear box (broke UP): text below the box low.\nBull box (broke DOWN): text above the box high.")
+show_rej     = input.bool(true,  "Rejection Marks (REJ#)", group=grp_on, tooltip="A candle touches the EXIT POINT and closes back on the trend side. The defense held. Deleted with its zone.")
+show_exits   = input.bool(true,  "EXIT Labels", group=grp_on, tooltip="EXIT SHORT: close above the bear EXIT POINT.\nEXIT LONG: close below the bull EXIT POINT.\nAfter the result is known the label shows a check mark (reversed, exit was right) or a cross (trend continued).\nDeleted with its box.")
+show_reent   = input.bool(true,  "Re-Entry 50% Line", group=grp_on, tooltip="After an EXIT, a dotted line at 50% between the stall box far edge (bull box high / bear box low) and the SuperTrend line.\nBull box: below the line = discount long zone. Bear box: above the line = premium short zone.\nDeleted when the box breaks or the SuperTrend flips.")
+show_marks   = input.bool(true,  "CDL / CDS / LD / SD Markers", group=grp_on, tooltip="Each marker belongs to the T# it created and is deleted together with that T#.")
+show_hist    = input.bool(false, "History: Broken T# Levels", group=grp_on, tooltip="OFF: a broken T# is deleted together with its marker.\nON: every broken T# stays as a thin faded line (no label) from where it was born to the candle that ended it.")
+show_hist_pr = input.bool(false, "History: Replaced P# / R# Levels", group=grp_on)
+hist_boxes   = input.bool(false, "History Zones", group=grp_on)
+color_bars   = input.bool(true,  "Candle Coloring", group=grp_on, tooltip="Bull trend = bull color. Bear trend = bear color. Pullback = yellow (lighter once price is back across the Pullback Gate). Trend candles lighter on the wrong side of VWAP. Closed candles only.")
+gmc_bars     = input.bool(true,  "Bright GMC Candles", group=grp_on, tooltip="GMC candle 2 and candle 3 turn bright when the GMC made a break (CDL, CDS, LD, SD, SuperTrend flip, gate cross, or an opposite GMC line).")
+show_sigs    = input.bool(false, "BULL / BEAR Arrows", group=grp_on, tooltip="First body close after structure, SuperTrend and VWAP all line up. Never during a Stall.")
+show_panel   = input.bool(false, "Dashboard and Scorecard", group=grp_on, tooltip="STATS PERIOD: all stats run from the first candle loaded on the chart to the last one.\n\nPO4 T1 TOUCH: a candle wick reaches a BuPO4 T1 / BePO4 T1 line (the candle before stayed away).\nBREAK + KEEP GOING: a close through the line, then a close beyond the break candle in the break direction.\nFAKE BREAK: a close through the line, then a close back beyond the other side of the break candle.\nREJECT + BODY CLOSE: no close through the line, and a body close away from it (BuX off BuPO4 T1, BeX off BePO4 T1) within 10 candles.\nNO RESULT: none of these within 10 candles (not in the %).\n\nAFTER EXIT: which comes first after an EXIT: a close beyond the box far edge (bull box high / bear box low) = BOX BREAK, or a SuperTrend flip.\nRE-ENTRY 50%: a wick reached 50% between the box far edge and the SuperTrend line.\nST REJECTION: a wick touched the SuperTrend line and closed back on the trend side.\nBOX BREAK CONTINUATION: after the box break, a close beyond the break candle high (bull) / low (bear) = kept going. Beyond the other side first = failed.")
+
+// ─── 1. Colors ───
+grp_col      = "1. Colors"
+col_bull     = input.color(#00c853, "Bull", inline="c1", group=grp_col)
+col_bear     = input.color(#c2185b, "Bear", inline="c1", group=grp_col)
+col_pb       = input.color(#ffd600, "Pullback", inline="c1", group=grp_col)
+col_gmc_bull = input.color(#00ff55, "Bull GMC", inline="c2", group=grp_col)
+col_gmc_bear = input.color(#ff1744, "Bear GMC", inline="c2", group=grp_col)
+col_stall    = input.color(#9e9e9e, "Stall", inline="c2", group=grp_col)
+vw_color_on  = input.bool(true, "Color VWAP By Urgency", group=grp_col, tooltip="Balance color = price is in balance around VWAP. Green / Red = price left VWAP WITH urgency (volume + delta + CVD all agree).")
+vw_bull_col  = input.color(#00c853, "VWAP Above", inline="c3", group=grp_col)
+vw_bear_col  = input.color(#c2185b, "VWAP Below", inline="c3", group=grp_col)
+vw_neut_col  = input.color(color.black, "VWAP Balance", inline="c3", group=grp_col)
+
+// ─── 2. Display ───
+grp_dsp      = "2. Display"
+lbl_prefix   = input.string("", "Label Prefix", group=grp_dsp, tooltip="Text put in front of every label, to tell this indicator apart from others on the same chart.")
+lbl_size_s   = input.string("Small", "Label Size", options=["Tiny", "Small", "Normal", "Large"], group=grp_dsp)
+stall_txt_s  = input.string("Tiny", "Stall Info Text", options=["Tiny", "Small", "Normal", "Large"], inline="sz", group=grp_dsp)
+exit_lbl_s   = input.string("Tiny", "EXIT / REJ", options=["Tiny", "Small", "Normal", "Large"], inline="sz", group=grp_dsp)
+line_ext     = input.int(10, "Line Extension (Bars)", minval=0, maxval=200, group=grp_dsp)
+box_transp   = input.int(85, "Zone Transparency", minval=0, maxval=100, group=grp_dsp)
+max_hist     = input.int(50, "History Levels Kept", minval=10, maxval=150, group=grp_dsp, tooltip="TradingView allows 500 lines in total.")
+st_width     = input.int(1, "SuperTrend Width", minval=1, maxval=5, inline="w", group=grp_dsp)
+vw_width     = input.int(1, "VWAP Width", minval=1, maxval=5, inline="w", group=grp_dsp)
+panel_pos_s  = input.string("Top Right", "Table 1 Position", options=["Top Right", "Top Center", "Top Left", "Middle Right", "Middle Left", "Bottom Right", "Bottom Center", "Bottom Left"], inline="db", group=grp_dsp)
+panel_size_s = input.string("Small", "Size", options=["Tiny", "Small", "Normal", "Large"], inline="db", group=grp_dsp)
+show_live    = input.bool(false, "Live Status Rows", group=grp_dsp, tooltip="ON: tables also show STRUCTURE, LAST FLIP, VWAP STACK and VWAP FLOW. OFF: statistics only.")
+tbl1_on      = input.bool(true, "Table 1: Stalls, Exits, Re-Entry, PO4 T1", group=grp_dsp, tooltip="Uses the Table 1 position above.")
+tbl2_on      = input.bool(true, "Table 2: Flips, Flip Ladder, PG", group=grp_dsp, tooltip="FLIP LADDER: after each flip, which level does price pull back to, and does the new trend hold?\nBreak candle = the candle that flipped the SuperTrend.\nGO = a close beyond the break candle in the new direction (bull: above its high, bear: below its low).\nFLIP = the SuperTrend flips back. Each flip ends on the first GO or FLIP.\n\nLevels (a wick touch counts):\nPG (OPEN) = break candle open.\nCANDLE EXTREME = break candle low (bull) / high (bear).\n50% = halfway between the break candle high (bull) / low (bear) and the NEW ST line.\nNEW ST LINE = the SuperTrend line created by the flip (ST bottom on a bull flip, ST top on a bear flip).\nPO4 T1 LINE = the flip PO4 line (wick side of the flip zone).\nRow: touch % | then go % | then flip %.\n\nPG rows use only pullback flips (the ones that draw a PG).\nPG LIMIT: filled = a wick reached the PG. Win = filled, no close through the PG, then GO.\nPG BROKEN: after a close through the PG, % that touched the level, then GO vs FLIP.")
+panel2_pos_s = input.string("Top Left", "Table 2 Position", options=["Top Right", "Top Center", "Top Left", "Middle Right", "Middle Left", "Bottom Right", "Bottom Center", "Bottom Left"], group=grp_dsp, tooltip="Pick a different spot than Table 1, or the tables will overlap.")
+
+// ─── 3. SuperTrend Flip ───
+grp_flip     = "3. SuperTrend Flip"
+flip_mode    = input.string("Any Flip", "Flip Mode", options=["Any Flip", "Body Close Only"], group=grp_flip, tooltip="Any Flip: the SuperTrend changes color on any close across the line (normal SuperTrend).\nBody Close Only: it changes color only when the flip candle is a body close. Bull flip needs a BuX (close above the prior candle high, or open above it without closing below the prior low). Bear flip needs a BeX.\nA close across the line without a body close is ignored: the line keeps its color and does not jump.")
+flip_test_n  = input.int(5, "Flip Test Candles", minval=1, maxval=50, group=grp_flip, tooltip="Flip test (dashboard). After each flip, for this many candles:\nHELD = no flip back the other way.\nNEXT BC = the very next candle is a body close in the flip direction.\nRETEST = a wick comes back to the broken SuperTrend line (pullback).\nAFTER RETEST HELD = of the flips that retested, how many still held.\nBC FLIP = the flip candle was a body close. NBC FLIP = it was not.")
+
+// ─── 4. Stall Exit Rule ───
+grp_exit     = "4. Stall Exit Rule"
+exit_rule    = input.string("Any Close", "EXIT Candle Must Be", options=["Any Close", "Body Close Only"], group=grp_exit, tooltip="Any Close: any candle that closes beyond the EXIT POINT prints the EXIT.\nBody Close Only: EXIT SHORT needs a bullish body close (BuX: close above the prior candle high, or open above it without closing below the prior low). EXIT LONG needs a bearish body close (BeX). Any other close beyond the EXIT POINT is ignored and the zone stays live.\n\nEXIT test (dashboard): after an EXIT, the first close outside the EXIT candle decides the result.\nEXIT SHORT: close above its high = REVERSED (exit right), close below its low = CONTINUED (trend came back).\nEXIT LONG: close below its low = REVERSED, close above its high = CONTINUED.")
+
+// ─── 5. Points Test ───
+grp_pts      = "5. Points Test (Tables 3 + 4)"
+pts_on       = input.bool(true, "Table 3: Points Per Setup", group=grp_pts, tooltip="Each setup is a pretend trade measured in POINTS.\nEXIT the trade on the first of: an EXIT label in your direction (EXIT LONG for longs, EXIT SHORT for shorts), the SuperTrend flipping against you, or the stop.\nMFE = the most points price went FOR you. MAE = the most points price went AGAINST you.\nRISK = 1R, the stop distance in points.\n2R / 3R = average points per trade if you take profit at that target (hit % in brackets). A trade that never reaches the target exits at the EXIT / flip / stop.\nAll points are NET of the cost per trade. Limit fills follow the ticks-through setting.\nA stop is hit by a wick. If the candle opens past the stop, the trade exits at the open (gap).\nOn the fill or entry candle only the move AGAINST you is counted (safe side).")
+pts_pos_s    = input.string("Bottom Center", "Table 3 Position", options=["Top Right", "Top Center", "Top Left", "Middle Right", "Middle Center", "Middle Left", "Bottom Right", "Bottom Center", "Bottom Left"], group=grp_pts)
+pts_stop_s   = input.string("SL Manager: Challenge / Funded", "Stop", options=["SL Manager: Challenge / Funded", "SL Manager: Live", "Fixed Points", "Flip ST Line (Top / Bottom)", "Flip PO4 Line", "SuperTrend Flip"], group=grp_pts, tooltip="SL Manager: Challenge / Funded = 10% rule: NQ / MNQ 50 pts, ES / MES 20 pts. Live = 2% rule: NQ 10 pts, ES 4 pts.\nFixed Points: your own stop below.\nFlip ST Line (Top / Bottom): long = the SuperTrend BOTTOM made by the last green flip. Short = the SuperTrend TOP made by the last red flip.\nFlip PO4 Line: long = the PO4 line (wick side) of the last green flip. Short = the PO4 line of the last red flip.\nSuperTrend Flip: no hard stop. 1R = distance from entry to the SuperTrend line. The trade ends on the flip close or the EXIT.")
+pts_fixed    = input.float(20.0, "Fixed Stop (Points)", minval=0.25, step=0.25, group=grp_pts)
+pts_maxstop  = input.float(50.0, "Max Stop For Flip Stops (Points, 0 = No Limit)", minval=0.0, step=1.0, group=grp_pts, tooltip="Used only with Flip ST Line / Flip PO4 Line.\nIf the flip level is farther than this from the entry, the trade is SKIPPED: your rules do not allow that stop.\nTable 3 shows how often this happens as 'skip %'.")
+pts_exit_s   = input.string("EXIT Label Or Flip", "Exit Trades On", options=["EXIT Label Or Flip", "SuperTrend Flip Only"], group=grp_pts, tooltip="EXIT Label Or Flip: a long closes on EXIT LONG or a red flip. A short closes on EXIT SHORT or a green flip.\nSuperTrend Flip Only: EXIT labels are ignored. The trade rides until the flip (or the stop).\nRun both and compare AVG P/L to know which exit makes more money.")
+pts_cost     = input.float(0.75, "Cost Per Trade (Points)", minval=0.0, step=0.25, group=grp_pts, tooltip="Commission + slippage taken off EVERY trade, so the table shows NET points.\nMNQ: about $1.20 round-trip commission + 1 tick exit slippage = about 0.75 pts. NQ: commission is smaller in points (about 0.25 pts) + slippage.\n0 = gross (no costs).")
+pts_ticks    = input.int(1, "Limit Fill Needs Ticks Through", minval=0, maxval=20, group=grp_pts, tooltip="0 = a wick touch fills your limit (too optimistic: the best bounces never fill in real life).\n1 = price must trade 1 tick past your limit. Real fills sit between 0 and 1.")
+pts_side_s   = input.string("Both", "Trade Side", options=["Both", "Long Only", "Short Only"], group=grp_pts)
+pts_htf_on   = input.bool(false, "Bias Filter: Trade Only With Higher TF SuperTrend", inline="htf", group=grp_pts, tooltip="ON: a trade is only taken in the direction of the standard SuperTrend (2 x 14) on the timeframe you pick, using its last CLOSED candle (no repaint).\nPick a timeframe HIGHER than the chart. Example: 2m chart + 15m bias.")
+pts_htf      = input.timeframe("15", "", inline="htf", group=grp_pts)
+pts_sess_on  = input.bool(false, "Session Filter: New Trades Only Inside", inline="ses", group=grp_pts, tooltip="ON: new trades only open inside this New York time window. Intraday charts only.\n0930-1600 = NY cash session (RTH). 0930-1130 = NY open only.")
+pts_sess     = input.session("0930-1600", "", inline="ses", group=grp_pts)
+pts_flat     = input.bool(true, "Close All Trades At Session End", group=grp_pts, tooltip="Used only with the Session Filter. At the first candle after the window, open trades close at its open and unfilled limits are cancelled (counted as missed). Prop firm style: flat every day.")
+pts_win_on   = input.bool(false, "2-Hour Window Test (Your 5 Windows)", group=grp_pts, tooltip="New York time. Intraday charts of 15m or lower.\nA NY Open: trade 09:45-11:00, flat 11:00.\nB London: trade 03:30-05:15, flat 05:30.\nC News: trade 08:35-09:45, flat 10:00 (tested EVERY day, not only news days).\nD Afternoon: trade 14:20-15:45, flat 16:00.\nE Reopen: trade 18:30-19:45, flat 20:00.\nON: new trades only inside a window. Each trade is closed at its window's flat time and unfilled limits are cancelled at the end of the trade time.\nOFF: no forced close. Table 4 still splits every trade by the window it opened in (OUTSIDE = not in any window).")
+pts_day_on   = input.bool(false, "Daily Rules", inline="day", group=grp_pts, tooltip="Per setup, per window, per New York day: stop taking trades after the max trades or after the max losses.\nYour rule: max 3 trades, stop after 2 losses.")
+pts_day_max  = input.int(3, "Max Trades", minval=1, maxval=50, inline="day", group=grp_pts)
+pts_day_loss = input.int(2, "Stop After Losses", minval=1, maxval=50, inline="day", group=grp_pts)
+pts_t4_on    = input.bool(true, "Table 4: Window Grid", inline="t4", group=grp_pts, tooltip="Every setup (rows) in every window (columns): AVG P/L | T-SCORE | trades.\nGreen = avg green and T 2+ (probably real). Yellow = avg green but could be luck. Red = loses money.")
+pts_t4_pos   = input.string("Top Center", "", options=["Top Right", "Top Center", "Top Left", "Middle Right", "Middle Center", "Middle Left", "Bottom Right", "Bottom Center", "Bottom Left"], inline="t4", group=grp_pts)
+
+// ─── Locked Engine ───
+int    ST_LEN     = 14
+float  ST_MULT    = 2.0
+float  DISP_ATR   = 0.5
+int    VOL_LEN    = 20
+float  VOL_MULT   = 1.5
+string DELTA_LTF  = "1"
+float  VW_BAND    = 0.25
+int    CVD_LOOK   = 5
+float  GMC_MIN    = 0.1
+int    MAX_T      = 5
+int    MAX_TRAP   = 10
+int    MAX_TEST   = 50
+int    STALL_BARS = 3
+float  REJ_ATR    = 0.1
+int    EXIT_EXT   = 3
+int    T1_WAIT    = 10
+color  PANEL_BG   = #000000
+color  PANEL_TXT  = color.white
+
+bool exitBcOnly = exit_rule == "Body Close Only"
+bool stBcOnly   = flip_mode == "Body Close Only"
+
+// ─── Types ───
+// All positions are candle TIMES. cTxt / cT / cPrice / cBrkT hold the
+// CDS / CDL / LD# / SD# marker that created a T# level; it is deleted with it.
+type Lvl
+    float  outer
+    float  inner
+    int    t
+    float  anchor
+    int    side
+    int    tier
+    int    score
+    int    endT   = na
+    string kind   = "T"
+    string cTxt   = ""
+    int    cT     = na
+    float  cPrice = na
+    int    cBrkT  = na
+
+// Reclaimed Pullback Gate. side = the trend it belongs to (1 bull, -1 bear).
+type Gate
+    float price
+    int   t
+    int   side
+    int   tier
+    int   score
+    int   hitT
+
+// Stall zone. op = EXIT POINT (Stair Candle body line), ext = its low (bear) / high (bull).
+// state 0 = live, 1 = broke. tFlip = flip time once kept. lbls = its EXIT / REJ labels.
+type Stall
+    int          t1
+    int          t2
+    float        op
+    float        ext
+    int          side
+    int          bars
+    int          rej
+    int          state
+    array<label> lbls
+    int          tFlip
+
+// EXIT test. side -1 = EXIT SHORT (bear stall broke), 1 = EXIT LONG.
+// hi / lo = the EXIT candle range. bc = the EXIT candle was a body close.
+type ExitTest
+    int    side
+    float  hi
+    float  lo
+    bool   bc
+    label  lbl
+    string txt
+
+// PO4 T1 touch test. side 1 = BuPO4 T1 (support), -1 = BePO4 T1 (resistance).
+// state 0 = touched, waiting. state 1 = broke, waiting to see if it keeps going.
+// hi / lo = the break candle range.
+type T1Test
+    int   side
+    float price
+    int   lvlT
+    int   bar0
+    int   state
+    float hi
+    float lo
+
+// After-EXIT test. side 1 = bull stall (EXIT LONG), -1 = bear stall (EXIT SHORT).
+// ext = box far edge (bull high / bear low). mid = 50% between ext and the SuperTrend line.
+// state 0 = waiting for box break or flip. state 1 = box broke, waiting to see if it keeps going.
+type PxTest
+    int   side
+    float ext
+    float mid
+    int   bar0
+    int   t0
+    int   state
+    bool  t50
+    bool  stRej
+    float hi
+    float lo
+    bool  rsm = false
+    bool  gmc = false
+
+// Points-test trade. lvl = limit price (pending until filled). favPre = best move FOR you before the exit candle.
+type PtTrade
+    int   setup
+    int   side
+    float lvl
+    bool  filled
+    float entry
+    float risk
+    float mfe    = 0.0
+    float mae    = 0.0
+    float favPre = 0.0
+    int   bar0
+    int   win    = 0
+    float stopPx = na
+
+// Right-edge group: levels at one price share one line, labels joined with " & ".
+type EdgeLvl
+    float         price
+    array<string> labels
+    color         col
+    int           width
+    string        style
+    int           bT
+    int           eT
+    int           prio
+    string        sz
+
+// ─── Helpers ───
+f_size(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : size.large
+
+f_pos(string p) =>
+    p == "Top Right" ? position.top_right : p == "Top Center" ? position.top_center : p == "Top Left" ? position.top_left : p == "Middle Right" ? position.middle_right : p == "Middle Center" ? position.middle_center : p == "Middle Left" ? position.middle_left : p == "Bottom Right" ? position.bottom_right : p == "Bottom Center" ? position.bottom_center : position.bottom_left
+
+f_eps() => math.max(syminfo.mintick * 0.51, 1e-5)
+
+f_dur(int ms) =>
+    int secs = int(ms / 1000)
+    int mins = int(secs / 60)
+    string out = ""
+    if secs < 60
+        out := str.tostring(secs) + "s"
+    else if mins < 60
+        out := str.tostring(mins) + "m" + (secs % 60 > 0 ? " " + str.tostring(secs % 60) + "s" : "")
+    else if mins < 1440
+        out := str.tostring(int(mins / 60)) + "h " + str.tostring(mins % 60) + "m"
+    else
+        out := str.tostring(int(mins / 1440)) + "d " + str.tostring(int((mins % 1440) / 60)) + "h"
+    out
+
+f_kill(Stall z) =>
+    if not na(z)
+        while z.lbls.size() > 0
+            label.delete(z.lbls.pop())
+
+string lbl_sz   = f_size(lbl_size_s)
+string stall_sz = f_size(stall_txt_s)
+string exit_sz  = f_size(exit_lbl_s)
+string panel_sz = f_size(panel_size_s)
+int    barMs    = timeframe.in_seconds() * 1000
+
+// Stats start = first candle loaded on the chart.
+var int statT0 = time
+
+// ─── Core Series ───
+float atr = ta.atr(ST_LEN)
+
+bool isBuX = close > high[1] or (open > high[1] and not (close < low[1]))
+bool isBeX = close < low[1]  or (open < low[1]  and not (close > high[1]))
+
+// SuperTrend: same math as ta.supertrend. Body Close Only: a flip needs a BuX / BeX.
+// stDir 1 = bear (upper band), -1 = bull (lower band).
+var float stUb  = na
+var float stLb  = na
+var int   stDir = 1
+float pUb   = stUb
+float pLb   = stLb
+int   pDir  = stDir
+float rawUb = hl2 + ST_MULT * atr
+float rawLb = hl2 - ST_MULT * atr
+float nUb   = na(pUb) or rawUb < pUb or (close[1] > pUb and pDir == -1) ? rawUb : pUb
+float nLb   = na(pLb) or rawLb > pLb or (close[1] < pLb and pDir == 1) ? rawLb : pLb
+int   nDir  = pDir
+if na(atr[1])
+    nDir := 1
+else if pDir == 1
+    nDir := close > nUb and (not stBcOnly or isBuX) ? -1 : 1
+else
+    nDir := close < nLb and (not stBcOnly or isBeX) ? 1 : -1
+stUb  := nUb
+stLb  := nLb
+stDir := nDir
+float st_raw  = stDir == -1 ? stLb : stUb
+int   dir_raw = stDir
+float stPrev  = st_raw[1]
+
+bool  stUp     = dir_raw < 0
+float stShow   = barstate.isconfirmed ? st_raw : st_raw[1]
+bool  stUpShow = barstate.isconfirmed ? stUp : stUp[1]
+bool  fUp      = barstate.isconfirmed and dir_raw < 0 and dir_raw[1] > 0
+bool  fDown    = barstate.isconfirmed and dir_raw > 0 and dir_raw[1] < 0
+float prevLow  = low[1]
+float prevHigh = high[1]
+
+float gmcMin    = nz(atr, 0.0) * GMC_MIN
+bool  buGmcConf = barstate.isconfirmed and (low - high[2]) >= gmcMin and low > high[2]
+bool  beGmcConf = barstate.isconfirmed and (low[2] - high) >= gmcMin and high < low[2]
+
+// ─── Volume, Delta, VWAP Urgency ───
+float volAvg = ta.sma(volume, VOL_LEN)
+float relVol = volAvg > 0 ? volume / volAvg : 0.0
+
+string       ltf_use   = timeframe.in_seconds(DELTA_LTF) < timeframe.in_seconds() ? DELTA_LTF : timeframe.period
+array<float> ltfDeltas = request.security_lower_tf(syminfo.tickerid, ltf_use, close > open ? volume : close < open ? -volume : 0.0)
+float barDelta = ltfDeltas.size() > 0 ? ltfDeltas.sum() : 0.0
+
+bool newDay = timeframe.change("D")
+var float cvd = 0.0
+if newDay
+    cvd := barDelta
+else
+    cvd += barDelta
+bool cvdUp = cvd > cvd[CVD_LOOK]
+bool cvdDn = cvd < cvd[CVD_LOOK]
+
+float vwap_val = ta.vwap
+bool  urgBull  = relVol >= VOL_MULT and barDelta > 0 and cvdUp
+bool  urgBear  = relVol >= VOL_MULT and barDelta < 0 and cvdDn
+float vwBand   = nz(atr, 0.0) * VW_BAND
+bool  vwInBand = math.abs(close - vwap_val) <= vwBand
+var int vwState = 0
+if barstate.isconfirmed
+    if vwInBand
+        vwState := 0
+    else if close > vwap_val
+        vwState := urgBull ? 1 : vwState == 1 ? 1 : 0
+    else
+        vwState := urgBear ? -1 : vwState == -1 ? -1 : 0
+color vwCol = not vw_color_on ? color.blue : vwState == 1 ? vw_bull_col : vwState == -1 ? vw_bear_col : vw_neut_col
+
+// ─── Structure Helpers ───
+f_trig(Lvl l) =>
+    float r = na
+    if not na(l)
+        r := l.outer
+    r
+
+// Flip strength 0-4: body close, ATR displacement, relative volume, delta.
+f_score(int dir, float lvl) =>
+    bool bc   = dir == 1 ? isBuX : isBeX
+    bool disp = not na(lvl) and (dir == 1 ? close - lvl : lvl - close) >= DISP_ATR * atr
+    bool vol  = relVol >= VOL_MULT
+    bool dlt  = dir == 1 ? barDelta > 0 : barDelta < 0
+    (bc ? 1 : 0) + (disp ? 1 : 0) + (vol ? 1 : 0) + (dlt ? 1 : 0)
+
+f_tag(int s) =>
+    s >= 3 ? "STRONG" : s == 2 ? "MID" : s >= 0 ? "WEAK" : ""
+
+f_fallback(float p, int t, int side) =>
+    Lvl.new(p, p, t, na, side, 0, -1)
+
+// Bu / Be prefix of a level by its own direction.
+f_bp(int side) =>
+    side == 1 ? "Bu" : "Be"
+
+int flipScoreDn = f_score(-1, st_raw[1])
+int flipScoreUp = f_score(1, st_raw[1])
+
+// ─── Structure State ───
+// Bull trend: T# = bottom origin. Red flip = BeP# (pullback top) and BePG# = its
+// open. Green flip after BeP# = BuR#. A close below T# or R# = CDS: the last top
+// becomes BePO4 T1. A close above BeP# = LD: the last bottom becomes the next T#.
+// Bear trend is the mirror.
+var array<Lvl>    tLvls     = array.new<Lvl>()
+var array<Lvl>    hLvls     = array.new<Lvl>()
+var array<Gate>   trapGates = array.new<Gate>()
+var array<T1Test> t1Tests   = array.new<T1Test>()
+// t1Res: [0] Bu go, [1] Bu reject, [2] Bu fake, [3] Be go, [4] Be reject, [5] Be fake
+var array<int>    t1Res     = array.new<int>(6, 0)
+var int   t1Expired = 0
+var int   fsTrend = 0
+var int   fsTier  = 0
+var Lvl   fsT     = na
+var Lvl   fsP     = na
+var Lvl   fsR     = na
+var float segHi   = na
+var int   segHiT  = na
+var float segHiB  = na
+var float segLo   = na
+var int   segLoT  = na
+var float segLoB  = na
+var float pbExt   = na
+var int   pbExtT  = na
+var float trExt   = na
+var int   trExtT  = na
+var float gatePx    = na
+var int   gateT     = na
+var int   gateScore = -1
+var int   gateTier  = 0
+var bool  gateHit   = false
+var int   lastFlipDir   = 0
+var int   lastFlipScore = -1
+var array<int> scLd  = array.new<int>(5, 0)
+var array<int> scCds = array.new<int>(5, 0)
+
+f_retire(Lvl l, string kind) =>
+    if not na(l) and not na(l.outer)
+        Lvl h = l.copy()
+        h.endT := time
+        h.kind := kind
+        h.cTxt := ""
+        hLvls.push(h)
+        while hLvls.size() > max_hist
+            hLvls.shift()
+
+bool evCdl    = false
+bool evCds    = false
+bool evLd     = false
+bool evSd     = false
+bool evGateUp = false
+bool evGateDn = false
+bool evTrap   = false
+bool evGateNew = false
+float flipOuter = na
+// Last flip levels per side, used as stops: ST line at the flip (top / bottom) and the flip PO4 line.
+var float flipStBu = na
+var float flipStBe = na
+var float flipPoBu = na
+var float flipPoBe = na
+bool evT1Go   = false
+bool evT1Rej  = false
+bool evT1Fake = false
+
+if barstate.isconfirmed
+    float bodyHi = math.max(open, close)
+    float bodyLo = math.min(open, close)
+
+    // ─── PO4 T1 Touch Test ───
+    // Uses T1 lines from earlier candles. New touch = the wick reaches the line after the prior candle stayed away.
+    if tLvls.size() > 0
+        for l in tLvls
+            if l.tier == 1 and not na(l.outer)
+                float p     = f_trig(l)
+                bool  fresh = l.side == 1 ? (low <= p and prevLow > p) : (high >= p and prevHigh < p)
+                bool  busy  = false
+                if t1Tests.size() > 0
+                    for tt in t1Tests
+                        if tt.lvlT == l.t and tt.side == l.side
+                            busy := true
+                if fresh and not busy
+                    t1Tests.push(T1Test.new(l.side, p, l.t, bar_index, 0, na, na))
+
+    // Result: 0 = break + keep going, 1 = reject + body close, 2 = fake break, 3 = no result.
+    if t1Tests.size() > 0
+        for i = t1Tests.size() - 1 to 0
+            T1Test tt = t1Tests.get(i)
+            int    rr = -1
+            if tt.state == 0
+                bool brk = tt.side == 1 ? close < tt.price : close > tt.price
+                bool rjc = tt.side == 1 ? isBuX : isBeX
+                if brk
+                    tt.state := 1
+                    tt.hi    := high
+                    tt.lo    := low
+                else if rjc
+                    rr := 1
+                else if bar_index - tt.bar0 >= T1_WAIT
+                    rr := 3
+            else
+                bool upOut = close > tt.hi
+                bool dnOut = close < tt.lo
+                if upOut or dnOut
+                    rr := (tt.side == 1 ? dnOut : upOut) ? 0 : 2
+            if rr == 3
+                t1Expired += 1
+                t1Tests.remove(i)
+            else if rr >= 0
+                int bb = tt.side == 1 ? 0 : 3
+                t1Res.set(bb + rr, t1Res.get(bb + rr) + 1)
+                evT1Go   := evT1Go or rr == 0
+                evT1Rej  := evT1Rej or rr == 1
+                evT1Fake := evT1Fake or rr == 2
+                t1Tests.remove(i)
+    while t1Tests.size() > MAX_TEST
+        t1Tests.shift()
+
+    float endHi  = na
+    int   endHiT = na
+    float endHiB = na
+    float endLo  = na
+    int   endLoT = na
+    float endLoB = na
+    if fDown
+        bool newHi = na(segHi) or high > segHi
+        endHi  := newHi ? high : segHi
+        endHiT := newHi ? time : segHiT
+        endHiB := newHi ? bodyHi : segHiB
+    if fUp
+        bool newLo = na(segLo) or low < segLo
+        endLo  := newLo ? low : segLo
+        endLoT := newLo ? time : segLoT
+        endLoB := newLo ? bodyLo : segLoB
+    if fDown or fUp or na(segHi)
+        segHi  := high
+        segHiT := time
+        segHiB := bodyHi
+        segLo  := low
+        segLoT := time
+        segLoB := bodyLo
+    else
+        if high > segHi
+            segHi  := high
+            segHiT := time
+            segHiB := bodyHi
+        if low < segLo
+            segLo  := low
+            segLoT := time
+            segLoB := bodyLo
+
+    Lvl flipTopL = na
+    Lvl flipBotL = na
+    if fDown and not na(st_raw) and not na(endHi)
+        flipTopL      := Lvl.new(math.max(st_raw, endHi), math.min(st_raw, endHi), endHiT, endHiB, -1, 0, flipScoreDn)
+        lastFlipDir   := -1
+        lastFlipScore := flipScoreDn
+        flipOuter     := flipTopL.outer
+        flipStBe      := st_raw
+        flipPoBe      := flipTopL.outer
+    if fUp and not na(st_raw) and not na(endLo)
+        flipBotL      := Lvl.new(math.min(st_raw, endLo), math.max(st_raw, endLo), endLoT, endLoB, 1, 0, flipScoreUp)
+        lastFlipDir   := 1
+        lastFlipScore := flipScoreUp
+        flipOuter     := flipBotL.outer
+        flipStBu      := st_raw
+        flipPoBu      := flipBotL.outer
+
+    if fsTrend == 1
+        if na(trExt) or high > trExt
+            trExt  := high
+            trExtT := time
+        if not na(fsP) and (na(pbExt) or low < pbExt)
+            pbExt  := low
+            pbExtT := time
+    else if fsTrend == -1
+        if na(trExt) or low < trExt
+            trExt  := low
+            trExtT := time
+        if not na(fsP) and (na(pbExt) or high > pbExt)
+            pbExt  := high
+            pbExtT := time
+
+    // ─── Pullback Gate ───
+    if not na(gatePx) and not gateHit
+        if fsTrend == 1 and close > gatePx
+            gateHit  := true
+            evGateUp := true
+            evTrap   := gateScore >= 3
+            trapGates.push(Gate.new(gatePx, gateT, 1, gateTier, gateScore, time))
+        else if fsTrend == -1 and close < gatePx
+            gateHit  := true
+            evGateDn := true
+            evTrap   := gateScore >= 3
+            trapGates.push(Gate.new(gatePx, gateT, -1, gateTier, gateScore, time))
+
+    // RECLAIMED / TRAP: deleted on a close back through it.
+    if trapGates.size() > 0
+        for i = trapGates.size() - 1 to 0
+            Gate g = trapGates.get(i)
+            if (g.side == 1 and close < g.price - f_eps()) or (g.side == -1 and close > g.price + f_eps())
+                trapGates.remove(i)
+    while trapGates.size() > MAX_TRAP
+        trapGates.shift()
+
+    // ─── Resolution: Reversal > Continuation ───
+    if fsTrend == 1 and not na(fsT)
+        float trT  = f_trig(fsT)
+        float trR  = f_trig(fsR)
+        bool  rHi  = not na(trR) and trR > trT
+        float flr  = rHi ? trR : trT
+        Lvl   flrL = rHi ? fsR : fsT
+        float trP  = f_trig(fsP)
+        if close < flr
+            Lvl src = not na(flipTopL) ? flipTopL : fsP
+            Lvl nt  = na
+            if not na(src)
+                nt := src.copy()
+                if src.score >= 0
+                    scCds.set(src.score, scCds.get(src.score) + 1)
+            else
+                nt := f_fallback(trExt, trExtT, -1)
+            nt.tier   := 1
+            nt.kind   := "T"
+            nt.cTxt   := "CDS" + (close > vwap_val ? "?" : "")
+            nt.cT     := flrL.t
+            nt.cPrice := flr
+            nt.cBrkT  := time
+            fsTrend  := -1
+            fsTier   := 1
+            fsT      := nt
+            tLvls.push(nt)
+            fsP      := na
+            fsR      := na
+            pbExt    := na
+            pbExtT   := na
+            trExt    := low
+            trExtT   := time
+            gatePx   := na
+            gateHit  := false
+            flipTopL := na
+            evCds    := true
+        else if not na(trP) and close > trP
+            Lvl src = not na(flipBotL) ? flipBotL : fsR
+            Lvl nt  = na
+            if not na(src)
+                nt := src.copy()
+            else
+                nt := f_fallback(pbExt, pbExtT, 1)
+            nt.tier   := fsTier + 1
+            nt.kind   := "T"
+            nt.cTxt   := "LD" + str.tostring(fsTier)
+            nt.cT     := fsP.t
+            nt.cPrice := trP
+            nt.cBrkT  := time
+            if fsP.score >= 0
+                scLd.set(fsP.score, scLd.get(fsP.score) + 1)
+            fsTier   += 1
+            fsT      := nt
+            tLvls.push(nt)
+            fsP      := na
+            fsR      := na
+            pbExt    := na
+            pbExtT   := na
+            trExt    := high
+            trExtT   := time
+            gatePx   := na
+            gateHit  := false
+            flipBotL := na
+            evLd     := true
+    else if fsTrend == -1 and not na(fsT)
+        float trT  = f_trig(fsT)
+        float trR  = f_trig(fsR)
+        bool  rLo  = not na(trR) and trR < trT
+        float clg  = rLo ? trR : trT
+        Lvl   clgL = rLo ? fsR : fsT
+        float trP  = f_trig(fsP)
+        if close > clg
+            Lvl src = not na(flipBotL) ? flipBotL : fsP
+            Lvl nt  = na
+            if not na(src)
+                nt := src.copy()
+                if src.score >= 0
+                    scCds.set(src.score, scCds.get(src.score) + 1)
+            else
+                nt := f_fallback(trExt, trExtT, 1)
+            nt.tier   := 1
+            nt.kind   := "T"
+            nt.cTxt   := "CDL" + (close < vwap_val ? "?" : "")
+            nt.cT     := clgL.t
+            nt.cPrice := clg
+            nt.cBrkT  := time
+            fsTrend  := 1
+            fsTier   := 1
+            fsT      := nt
+            tLvls.push(nt)
+            fsP      := na
+            fsR      := na
+            pbExt    := na
+            pbExtT   := na
+            trExt    := high
+            trExtT   := time
+            gatePx   := na
+            gateHit  := false
+            flipBotL := na
+            evCdl    := true
+        else if not na(trP) and close < trP
+            Lvl src = not na(flipTopL) ? flipTopL : fsR
+            Lvl nt  = na
+            if not na(src)
+                nt := src.copy()
+            else
+                nt := f_fallback(pbExt, pbExtT, -1)
+            nt.tier   := fsTier + 1
+            nt.kind   := "T"
+            nt.cTxt   := "SD" + str.tostring(fsTier)
+            nt.cT     := fsP.t
+            nt.cPrice := trP
+            nt.cBrkT  := time
+            if fsP.score >= 0
+                scLd.set(fsP.score, scLd.get(fsP.score) + 1)
+            fsTier   += 1
+            fsT      := nt
+            tLvls.push(nt)
+            fsP      := na
+            fsR      := na
+            pbExt    := na
+            pbExtT   := na
+            trExt    := low
+            trExtT   := time
+            gatePx   := na
+            gateHit  := false
+            flipTopL := na
+            evSd     := true
+
+    // ─── Flips assign the structure ───
+    if not na(flipTopL)
+        if fsTrend == 0
+            flipTopL.tier := 1
+            fsTrend := -1
+            fsTier  := 1
+            fsT     := flipTopL
+            tLvls.push(flipTopL)
+            trExt   := low
+            trExtT  := time
+        else if fsTrend == 1
+            if na(fsP)
+                pbExt  := low
+                pbExtT := time
+            else
+                f_retire(fsP, "P")
+            flipTopL.tier := fsTier
+            flipTopL.kind := "P"
+            fsP       := flipTopL
+            gatePx    := open
+            gateT     := time
+            gateScore := flipScoreDn
+            gateTier  := fsTier
+            gateHit   := false
+            evGateNew := true
+        else if fsTrend == -1 and not na(fsP)
+            f_retire(fsR, "R")
+            flipTopL.tier := fsTier
+            flipTopL.kind := "R"
+            fsR := flipTopL
+    if not na(flipBotL)
+        if fsTrend == 0
+            flipBotL.tier := 1
+            fsTrend := 1
+            fsTier  := 1
+            fsT     := flipBotL
+            tLvls.push(flipBotL)
+            trExt   := high
+            trExtT  := time
+        else if fsTrend == -1
+            if na(fsP)
+                pbExt  := high
+                pbExtT := time
+            else
+                f_retire(fsP, "P")
+            flipBotL.tier := fsTier
+            flipBotL.kind := "P"
+            fsP       := flipBotL
+            gatePx    := open
+            gateT     := time
+            gateScore := flipScoreUp
+            gateTier  := fsTier
+            gateHit   := false
+            evGateNew := true
+        else if fsTrend == 1 and not na(fsP)
+            f_retire(fsR, "R")
+            flipBotL.tier := fsTier
+            flipBotL.kind := "R"
+            fsR := flipBotL
+
+    // A T# (not the current one) is deleted on a close through it, with its marker.
+    if tLvls.size() > 0
+        for i = tLvls.size() - 1 to 0
+            Lvl l = tLvls.get(i)
+            bool  isCur = not na(fsT) and l.t == fsT.t and l.outer == fsT.outer and l.side == fsT.side
+            float tg    = f_trig(l)
+            if not isCur and ((l.side == 1 and close < tg) or (l.side == -1 and close > tg))
+                f_retire(l, "T")
+                tLvls.remove(i)
+    while tLvls.size() > MAX_T
+        f_retire(tLvls.get(0), "T")
+        tLvls.remove(0)
+
+// ─── Stall Zones ───
+// Returns [status, touch, rejNow]: status 0 = holding, 1 = broke (EXIT), 2 = delete (trend continued).
+// Body Close Only: a close beyond the EXIT POINT counts only if it is a BuX (bear stall) / BeX (bull stall).
+f_zone(Stall z, int bar0, bool prevTouch) =>
+    int  status = 0
+    bool touch  = false
+    bool rejNow = false
+    z.t2   := time
+    z.bars := bar_index - bar0
+    bool isBear = z.side == -1
+    bool beyond = isBear ? close > z.op : close < z.op
+    bool bcOk   = not exitBcOnly or (isBear ? isBuX : isBeX)
+    if isBear ? close < z.ext : close > z.ext
+        status := 2
+    else if beyond and bcOk
+        z.state := 1
+        status  := 1
+    else if not beyond
+        touch := isBear ? (high >= z.op - REJ_ATR * atr and close < z.op) : (low <= z.op + REJ_ATR * atr and close > z.op)
+        if touch and not prevTouch
+            z.rej  += 1
+            rejNow := true
+    [status, touch, rejNow]
+
+f_farBreak(Stall z) =>
+    z.side == -1 ? close < z.ext : close > z.ext
+
+var Stall          liveZ     = na
+var Stall          pendZ     = na
+var Stall          keptBear  = na
+var Stall          keptBull  = na
+var int            liveBar0  = na
+var bool           liveTouch = false
+var array<int>     stRes     = array.new<int>(4, 0)
+var array<ExitTest> exTests  = array.new<ExitTest>()
+// exRes: [0] SHORT reversed, [1] SHORT continued, [2] LONG reversed, [3] LONG continued,
+//        [4] BODY CLOSE reversed, [5] BODY CLOSE continued, [6] NBC reversed, [7] NBC continued
+var array<int>     exRes     = array.new<int>(8, 0)
+// pxRes: [0] long exits decided, [1] long box break, [2] short exits decided, [3] short box break,
+//        [4] 50% reached, [5] 50% then box break, [6] ST rejection, [7] ST rejection then box break,
+//        [8] box break kept going, [9] box break failed,
+//        [10] resumption body close after 50%, [11] resumption then box break,
+//        [12] GMC after 50%, [13] GMC then box break
+// One after-EXIT test per side: once you are out, a later EXIT on the same side is not a new trade.
+var array<PxTest>  pxTests   = array.new<PxTest>()
+var array<int>     pxRes     = array.new<int>(14, 0)
+
+f_pxDecide(PxTest x, bool brk) =>
+    int o = x.side == 1 ? 0 : 2
+    pxRes.set(o, pxRes.get(o) + 1)
+    if brk
+        pxRes.set(o + 1, pxRes.get(o + 1) + 1)
+    if x.t50
+        pxRes.set(4, pxRes.get(4) + 1)
+        if brk
+            pxRes.set(5, pxRes.get(5) + 1)
+    if x.stRej
+        pxRes.set(6, pxRes.get(6) + 1)
+        if brk
+            pxRes.set(7, pxRes.get(7) + 1)
+    if x.rsm
+        pxRes.set(10, pxRes.get(10) + 1)
+        if brk
+            pxRes.set(11, pxRes.get(11) + 1)
+    if x.gmc
+        pxRes.set(12, pxRes.get(12) + 1)
+        if brk
+            pxRes.set(13, pxRes.get(13) + 1)
+
+bool evPxRej     = false
+// Per-bar events used by the points test (0 = none, 1 = long, -1 = short)
+bool  evExitL   = false
+bool  evExitS   = false
+int   evRejSide = 0
+int   pxT50Side = 0
+float pxT50Px   = na
+int   pxRejSide = 0
+int   pxRsmSide = 0
+int   pxGmcSide = 0
+int   pxBrkSide = 0
+float pxBrkPx   = na
+bool evPxBreak   = false
+bool evStallOn   = false
+bool evStallBrk  = false
+bool evStallCont = false
+bool evRej       = false
+bool evExitRev   = false
+bool evExitCont  = false
+
+if barstate.isconfirmed and not na(st_raw) and not na(st_raw[1])
+    bool flipNow = dir_raw != dir_raw[1]
+    bool stepNow = not flipNow and (stUp ? st_raw > st_raw[1] : st_raw < st_raw[1])
+
+    // EXIT test: first close outside the EXIT candle range decides the result.
+    if exTests.size() > 0
+        for i = exTests.size() - 1 to 0
+            ExitTest x = exTests.get(i)
+            bool upOut = close > x.hi
+            bool dnOut = close < x.lo
+            if upOut or dnOut
+                bool rev = x.side == -1 ? upOut : dnOut
+                int  sI  = x.side == -1 ? 0 : 2
+                int  cI  = x.bc ? 4 : 6
+                int  o   = rev ? 0 : 1
+                exRes.set(sI + o, exRes.get(sI + o) + 1)
+                exRes.set(cI + o, exRes.get(cI + o) + 1)
+                if rev
+                    evExitRev := true
+                else
+                    evExitCont := true
+                if not na(x.lbl)
+                    label.set_text(x.lbl, x.txt + (rev ? " ✓" : " ✕"))
+                exTests.remove(i)
+
+    // After-EXIT test: box break vs flip, 50% touch, SuperTrend rejection, box break continuation.
+    if pxTests.size() > 0
+        for i = pxTests.size() - 1 to 0
+            PxTest x = pxTests.get(i)
+            if x.state == 0
+                if flipNow
+                    f_pxDecide(x, false)
+                    pxTests.remove(i)
+                else
+                    bool isBull = x.side == 1
+                    bool brkNow = isBull ? close > x.ext : close < x.ext
+                    bool hit50 = isBull ? low <= x.mid : high >= x.mid
+                    if hit50 and not x.t50
+                        pxT50Side := x.side
+                        pxT50Px   := x.mid
+                    if hit50
+                        x.t50 := true
+                    if isBull ? (low <= st_raw and close > st_raw) : (high >= st_raw and close < st_raw)
+                        if not x.stRej
+                            evPxRej   := true
+                            pxRejSide := x.side
+                        x.stRej := true
+                    // Resumption / GMC entries count only if the signal candle is not itself the box break.
+                    if x.t50 and not brkNow and not x.rsm and (isBull ? isBuX : isBeX)
+                        x.rsm     := true
+                        pxRsmSide := x.side
+                    if x.t50 and not brkNow and not x.gmc and (isBull ? buGmcConf : beGmcConf)
+                        x.gmc     := true
+                        pxGmcSide := x.side
+                    if brkNow
+                        f_pxDecide(x, true)
+                        evPxBreak := true
+                        pxBrkSide := x.side
+                        pxBrkPx   := x.ext
+                        x.state := 1
+                        x.hi    := high
+                        x.lo    := low
+            else
+                bool upOut = close > x.hi
+                bool dnOut = close < x.lo
+                if upOut or dnOut
+                    bool cont = x.side == 1 ? upOut : dnOut
+                    int  ci   = cont ? 8 : 9
+                    pxRes.set(ci, pxRes.get(ci) + 1)
+                    pxTests.remove(i)
+    while pxTests.size() > MAX_TEST
+        pxTests.shift()
+
+    if not na(keptBear) and f_farBreak(keptBear)
+        f_kill(keptBear)
+        keptBear := na
+    if not na(keptBull) and f_farBreak(keptBull)
+        f_kill(keptBull)
+        keptBull := na
+    if not na(pendZ) and f_farBreak(pendZ)
+        f_kill(pendZ)
+        pendZ := na
+
+    if not na(liveZ)
+        [zs, zt, zr] = f_zone(liveZ, liveBar0, liveTouch)
+        liveTouch := zt
+        bool isBear = liveZ.side == -1
+        int  k      = liveZ.rej > 0 ? 2 : 0
+        if zr
+            evRej := true
+            if liveZ.rej == 1
+                evRejSide := liveZ.side
+            if show_rej
+                if isBear
+                    liveZ.lbls.push(label.new(bar_index, high, "REJ" + str.tostring(liveZ.rej), yloc=yloc.abovebar, style=label.style_label_down, color=color.new(col_stall, 20), textcolor=color.white, size=exit_sz))
+                else
+                    liveZ.lbls.push(label.new(bar_index, low, "REJ" + str.tostring(liveZ.rej), yloc=yloc.belowbar, style=label.style_label_up, color=color.new(col_stall, 20), textcolor=color.white, size=exit_sz))
+        if zs == 0 and liveZ.bars == STALL_BARS
+            evStallOn := true
+        if zs == 1
+            stRes.set(k + 1, stRes.get(k + 1) + 1)
+            evStallBrk := true
+            if isBear
+                evExitS := true
+            else
+                evExitL := true
+            string exTxt = isBear ? "EXIT SHORT" : "EXIT LONG"
+            label  exL   = na
+            if show_exits
+                if isBear
+                    exL := label.new(bar_index, low, exTxt, yloc=yloc.belowbar, style=label.style_label_up, color=col_bull, textcolor=color.white, size=exit_sz)
+                else
+                    exL := label.new(bar_index, high, exTxt, yloc=yloc.abovebar, style=label.style_label_down, color=col_bear, textcolor=color.white, size=exit_sz)
+                liveZ.lbls.push(exL)
+            exTests.push(ExitTest.new(liveZ.side, high, low, isBear ? isBuX : isBeX, exL, exTxt))
+            while exTests.size() > MAX_TEST
+                exTests.shift()
+            bool sideBusy = false
+            if pxTests.size() > 0
+                for px in pxTests
+                    if px.side == liveZ.side and px.state == 0
+                        sideBusy := true
+            if not sideBusy
+                PxTest nx = PxTest.new(liveZ.side, liveZ.ext, (liveZ.ext + stPrev) / 2, bar_index, time, 0, false, false, na, na)
+                if flipNow
+                    f_pxDecide(nx, false)
+                else
+                    pxTests.push(nx)
+            f_kill(pendZ)
+            pendZ := liveZ
+            liveZ := na
+        else if zs == 2
+            stRes.set(k, stRes.get(k) + 1)
+            evStallCont := true
+            f_kill(liveZ)
+            liveZ := na
+
+    if flipNow
+        if not na(pendZ)
+            pendZ.tFlip := time
+            if pendZ.side == -1
+                f_kill(keptBear)
+                keptBear := pendZ
+            else
+                f_kill(keptBull)
+                keptBull := pendZ
+            pendZ := na
+        if not na(liveZ)
+            f_kill(liveZ)
+            liveZ := na
+    if stepNow
+        if not na(liveZ)
+            int k = liveZ.rej > 0 ? 2 : 0
+            stRes.set(k, stRes.get(k) + 1)
+            f_kill(liveZ)
+            liveZ := na
+    if flipNow or stepNow
+        int sd = stUp ? 1 : -1
+        liveZ     := Stall.new(time, time, sd == 1 ? math.min(open, close) : math.max(open, close), sd == 1 ? high : low, sd, 0, 0, 0, array.new<label>(), na)
+        liveBar0  := bar_index
+        liveTouch := false
+
+bool stallOn = not na(liveZ) and liveZ.bars >= STALL_BARS
+
+// ─── Flip Test: Body Close Flip vs No Body Close Flip ───
+// fr: [0] BC flips, [1] BC held, [2] BC next BC, [3] BC retest, [4] BC retest + held
+//     [5] NBC flips, [6] NBC held, [7] NBC next BC, [8] NBC retest, [9] NBC retest + held
+var array<int> fr = array.new<int>(10, 0)
+var bool  ftOn   = false
+var int   ftSide = 0
+var bool  ftBc   = false
+var float ftLvl  = na
+var int   ftBar0 = na
+var bool  ftNext = false
+var bool  ftRet  = false
+
+f_ftSave(bool bc, bool held, bool nxt, bool ret) =>
+    int o = bc ? 0 : 5
+    fr.set(o, fr.get(o) + 1)
+    if held
+        fr.set(o + 1, fr.get(o + 1) + 1)
+    if nxt
+        fr.set(o + 2, fr.get(o + 2) + 1)
+    if ret
+        fr.set(o + 3, fr.get(o + 3) + 1)
+        if held
+            fr.set(o + 4, fr.get(o + 4) + 1)
+
+if barstate.isconfirmed
+    bool fNow = fUp or fDown
+    if ftOn
+        int age = bar_index - ftBar0
+        if age == 1
+            ftNext := ftSide == 1 ? isBuX : isBeX
+        if not fNow and (ftSide == 1 ? low <= ftLvl : high >= ftLvl)
+            ftRet := true
+        if fNow
+            f_ftSave(ftBc, false, ftNext, ftRet)
+            ftOn := false
+        else if age >= flip_test_n
+            f_ftSave(ftBc, true, ftNext, ftRet)
+            ftOn := false
+    if fNow
+        ftOn   := true
+        ftSide := fUp ? 1 : -1
+        ftBc   := fUp ? isBuX : isBeX
+        ftLvl  := st_raw[1]
+        ftBar0 := bar_index
+        ftNext := false
+        ftRet  := false
+
+// ─── Flip Ladder: where does price pull back after a flip, and does the new trend hold? ───
+// Break candle = the candle that flipped the SuperTrend. side 1 = bull flip, -1 = bear flip.
+// GO   = a close beyond the break candle in the new direction (bull: above its high, bear: below its low).
+// FLIP = the SuperTrend flips back. Each flip ends on the first GO or FLIP.
+// Ladder levels behind the break (a wick touch counts):
+//   0 PG     = break candle OPEN
+//   1 EXT    = break candle LOW (bull) / HIGH (bear)
+//   2 50%    = halfway between the break candle HIGH (bull) / LOW (bear) and the NEW ST line
+//   3 ST     = the NEW SuperTrend line at the flip (ST bottom on a bull flip, ST top on a bear flip)
+//   4 PO4    = the flip PO4 line (wick side of the flip zone)
+// fl: BC block starts at 0, NBC block at 11. [o] flips, [o+1+2k] level k touched, [o+2+2k] level k touched then GO.
+// pc (pullback flips that drew a PG): [0] flips, [1] PG held, [2] PG touched, [3] PG touched + held + GO,
+//   [4] PG never touched + GO, [5] PG broke, [6] broke + EXT touched, [7] broke + EXT then GO,
+//   [8] broke + ST touched, [9] broke + ST then GO
+var array<int>   fl    = array.new<int>(22, 0)
+var array<int>   pc    = array.new<int>(10, 0)
+var array<float> lzLvl = array.new<float>(5, na)
+var array<bool>  lzTch = array.new<bool>(5, false)
+var bool  lzOn   = false
+var int   lzSide = 0
+var bool  lzBc   = false
+var bool  lzPb   = false
+var float lzHi   = na
+var float lzLo   = na
+var bool  lzPgB  = false
+
+f_inc(array<int> a, int i) =>
+    a.set(i, a.get(i) + 1)
+
+f_lzSave(bool go) =>
+    int o = lzBc ? 0 : 11
+    f_inc(fl, o)
+    for k = 0 to 4
+        if lzTch.get(k)
+            f_inc(fl, o + 1 + 2 * k)
+            if go
+                f_inc(fl, o + 2 + 2 * k)
+    if lzPb
+        f_inc(pc, 0)
+        if not lzPgB
+            f_inc(pc, 1)
+        if lzTch.get(0)
+            f_inc(pc, 2)
+            if not lzPgB and go
+                f_inc(pc, 3)
+        else if go
+            f_inc(pc, 4)
+        if lzPgB
+            f_inc(pc, 5)
+            if lzTch.get(1)
+                f_inc(pc, 6)
+                if go
+                    f_inc(pc, 7)
+            if lzTch.get(3)
+                f_inc(pc, 8)
+                if go
+                    f_inc(pc, 9)
+
+if barstate.isconfirmed
+    bool lzFlip = fUp or fDown
+    if lzOn
+        for k = 0 to 4
+            float lv = lzLvl.get(k)
+            if not na(lv) and (lzSide == 1 ? low <= lv : high >= lv)
+                lzTch.set(k, true)
+        if lzSide == 1 ? close < lzLvl.get(0) : close > lzLvl.get(0)
+            lzPgB := true
+        if lzFlip
+            f_lzSave(false)
+            lzOn := false
+        else if lzSide == 1 ? close > lzHi : close < lzLo
+            f_lzSave(true)
+            lzOn := false
+    if lzFlip
+        int   lzSd  = fUp ? 1 : -1
+        float lzSt  = st_raw
+        float lzFar = lzSd == 1 ? high : low
+        lzOn   := true
+        lzSide := lzSd
+        lzBc   := lzSd == 1 ? isBuX : isBeX
+        lzPb   := evGateNew
+        lzHi   := high
+        lzLo   := low
+        lzPgB  := false
+        lzLvl.set(0, open)
+        lzLvl.set(1, lzSd == 1 ? low : high)
+        lzLvl.set(2, na(lzSt) ? na : (lzFar + lzSt) / 2)
+        lzLvl.set(3, lzSt)
+        lzLvl.set(4, na(flipOuter) ? lzSt : flipOuter)
+        for k = 0 to 4
+            lzTch.set(k, false)
+
+// ─── Points Test: pretend trades measured in points ───
+// Setups:
+//   0 FLIP market at the flip close          1 FLIP limit at the OLD (broken) ST line
+//   2 BC FLIP limit at the PG (open)         3 NBC FLIP limit at the PG (open)
+//   4 STALL REJ1 market at the REJ close     5 AFTER EXIT limit at the 50% line
+//   6 AFTER EXIT market at the ST rejection  7 AFTER EXIT market at 50% + resumption BC
+//   8 AFTER EXIT market at 50% + GMC         9 AFTER EXIT market at the box break close
+//  10 BOX BREAK limit at the box retest (the broken box high / low)
+// A trade ends on the first of: EXIT in its direction, SuperTrend flip against it, or the stop.
+// A limit order is cancelled (MISSED) if the EXIT or flip comes before it fills.
+// ptRes per setup (14 fields): [0] trades, [1] wins, [2] sum P/L, [3] sum MFE, [4] sum MAE, [5] sum risk,
+//   [6] missed, [7..9] hit 1R/2R/3R, [10..12] sum P/L with a 1R/2R/3R target, [13] skipped (stop not allowed)
+int   PT_N     = 11
+int   PT_F     = 14
+int   PT_W     = 7
+int   PT_MAX   = 400
+bool  ptHard     = pts_stop_s != "SuperTrend Flip"
+bool  ptFlipStop = pts_stop_s == "Flip ST Line (Top / Bottom)" or pts_stop_s == "Flip PO4 Line"
+float ptPvFull   = str.contains(syminfo.root, "NQ") ? 20.0 : str.contains(syminfo.root, "ES") ? 50.0 : str.contains(syminfo.root, "YM") ? 5.0 : str.contains(syminfo.root, "RTY") or str.contains(syminfo.root, "2K") ? 50.0 : syminfo.pointvalue
+float ptStop     = pts_stop_s == "SL Manager: Challenge / Funded" ? 10.0 * 100 / ptPvFull : pts_stop_s == "SL Manager: Live" ? 2.0 * 100 / ptPvFull : pts_fixed
+
+bool  ptUseExit = pts_exit_s == "EXIT Label Or Flip"
+float ptThru    = pts_ticks * syminfo.mintick
+
+f_htfDir() =>
+    [hSt, hD] = ta.supertrend(ST_MULT, ST_LEN)
+    hD[1] < 0 ? 1 : -1
+
+int htfDirV = request.security(syminfo.tickerid, pts_htf, f_htfDir(), lookahead=barmerge.lookahead_on)
+
+// Session filter.
+bool ptInSess  = not pts_sess_on or not na(time(timeframe.period, pts_sess, "America/New_York"))
+bool ptSessEnd = pts_sess_on and pts_flat and barstate.isconfirmed and not ptInSess and ptInSess[1]
+
+// Your 5 two-hour windows (New York time). TRADE = new trades allowed. HOLD = trades must be closed after it.
+// A NY Open 09:45-11:00 (flat 11:00) | B London 03:30-05:15 (flat 05:30) | C News 08:35-09:45 (flat 10:00)
+// D Afternoon 14:20-15:45 (flat 16:00) | E Reopen 18:30-19:45 (flat 20:00)
+bool inTA = not na(time(timeframe.period, "0945-1100", "America/New_York"))
+bool inTB = not na(time(timeframe.period, "0330-0515", "America/New_York"))
+bool inTC = not na(time(timeframe.period, "0835-0945", "America/New_York"))
+bool inTD = not na(time(timeframe.period, "1420-1545", "America/New_York"))
+bool inTE = not na(time(timeframe.period, "1830-1945", "America/New_York"))
+bool inHB = not na(time(timeframe.period, "0330-0530", "America/New_York"))
+bool inHC = not na(time(timeframe.period, "0835-1000", "America/New_York"))
+bool inHD = not na(time(timeframe.period, "1420-1600", "America/New_York"))
+bool inHE = not na(time(timeframe.period, "1830-2000", "America/New_York"))
+int  winNow = inTA ? 1 : inTB ? 2 : inTC ? 3 : inTD ? 4 : inTE ? 5 : 0
+
+f_inTrade(int w) =>
+    w == 1 ? inTA : w == 2 ? inTB : w == 3 ? inTC : w == 4 ? inTD : w == 5 ? inTE : true
+
+f_inHold(int w) =>
+    w == 1 ? inTA : w == 2 ? inHB : w == 3 ? inHC : w == 4 ? inHD : w == 5 ? inHE : true
+
+var array<PtTrade> ptTrades = array.new<PtTrade>()
+// Trade log in time order: net P/L, setup and window of every closed trade.
+var array<float>   ptLogPl  = array.new<float>()
+var array<int>     ptLogS   = array.new<int>()
+var array<int>     ptLogW   = array.new<int>()
+var array<float>   ptRes    = array.new<float>(PT_N * PT_F, 0.0)
+// Daily rules: trades and losses today, per setup and window.
+var array<int>     dayT     = array.new<int>(PT_N * PT_W, 0)
+var array<int>     dayL     = array.new<int>(PT_N * PT_W, 0)
+int  nyDom    = dayofmonth(time, "America/New_York")
+bool nyNewDay = nyDom != nyDom[1]
+
+f_ptAdd(int s, int f, float v) =>
+    ptRes.set(s * PT_F + f, ptRes.get(s * PT_F + f) + v)
+
+f_dayOk(int s, int w) =>
+    not pts_day_on or (dayT.get(s * PT_W + w) < pts_day_max and dayL.get(s * PT_W + w) < pts_day_loss)
+
+// Can a NEW trade of setup s open now on this side?
+f_ptOk(int s, int side) =>
+    side != 0 and ptInSess and (not pts_win_on or winNow > 0) and (pts_side_s == "Both" or (pts_side_s == "Long Only" ? side == 1 : side == -1)) and (not pts_htf_on or htfDirV == side) and f_dayOk(s, winNow)
+
+// Stop price for an entry. na = no hard stop (SuperTrend Flip mode).
+f_ptStopPx(float entry, int side) =>
+    float sp = na
+    if pts_stop_s == "Flip ST Line (Top / Bottom)"
+        sp := side == 1 ? flipStBu : flipStBe
+    else if pts_stop_s == "Flip PO4 Line"
+        sp := side == 1 ? flipPoBu : flipPoBe
+    else if ptHard
+        sp := entry - side * ptStop
+    sp
+
+f_ptClose(PtTrade t, float plRaw) =>
+    float pl = plRaw - pts_cost
+    int s = t.setup
+    f_ptAdd(s, 0, 1)
+    if pl > 0
+        f_ptAdd(s, 1, 1)
+    else
+        dayL.set(s * PT_W + t.win, dayL.get(s * PT_W + t.win) + 1)
+    f_ptAdd(s, 2, pl)
+    f_ptAdd(s, 3, t.mfe)
+    f_ptAdd(s, 4, t.mae)
+    f_ptAdd(s, 5, t.risk)
+    ptLogPl.push(pl)
+    ptLogS.push(s)
+    ptLogW.push(t.win)
+    if ptLogPl.size() > 90000
+        ptLogPl.shift()
+        ptLogS.shift()
+        ptLogW.shift()
+    for k = 1 to 3
+        bool hit = t.risk > 0 and t.favPre >= k * t.risk
+        if hit
+            f_ptAdd(s, 6 + k, 1)
+        f_ptAdd(s, 9 + k, hit ? k * t.risk - pts_cost : pl)
+
+// Open a trade at px. Returns false (and counts a SKIP) when the stop is on the wrong side
+// or a flip stop is farther than the max stop.
+f_ptOpen(PtTrade t, float px) =>
+    float sp = f_ptStopPx(px, t.side)
+    float r  = na
+    if na(sp)
+        r := math.max(math.abs(px - st_raw), syminfo.mintick)
+    else
+        float d = (px - sp) * t.side
+        if d > 0 and (not ptFlipStop or pts_maxstop <= 0 or d <= pts_maxstop)
+            r := d
+    bool ok = not na(r)
+    if ok
+        t.filled := true
+        t.entry  := px
+        t.stopPx := sp
+        t.risk   := r
+        t.bar0   := bar_index
+        dayT.set(t.setup * PT_W + t.win, dayT.get(t.setup * PT_W + t.win) + 1)
+    else
+        f_ptAdd(t.setup, 13, 1)
+    ok
+
+// First candle of a limit fill. Only the move AGAINST the trade on this candle is counted.
+// Returns true if the trade is already finished on this candle.
+f_ptFirst(PtTrade t, bool exitSig) =>
+    float adv = math.max(0.0, t.side == 1 ? t.entry - low : high - t.entry)
+    t.mae := adv
+    bool done = false
+    if not na(t.stopPx) and (t.side == 1 ? low <= t.stopPx : high >= t.stopPx)
+        f_ptClose(t, (t.stopPx - t.entry) * t.side)
+        done := true
+    else if exitSig
+        f_ptClose(t, (close - t.entry) * t.side)
+        done := true
+    done
+
+f_ptMarket(int setup, int side, float px) =>
+    if f_ptOk(setup, side) and not na(px)
+        PtTrade t = PtTrade.new(setup, side, na, false, na, na, 0.0, 0.0, 0.0, bar_index, winNow, na)
+        if f_ptOpen(t, px)
+            ptTrades.push(t)
+
+f_ptLimit(int setup, int side, float lvl) =>
+    if f_ptOk(setup, side) and not na(lvl)
+        ptTrades.push(PtTrade.new(setup, side, lvl, false, na, na, 0.0, 0.0, 0.0, bar_index, winNow, na))
+
+if barstate.isconfirmed and not na(st_raw)
+    if nyNewDay
+        dayT.fill(0)
+        dayL.fill(0)
+    // 0. Session end / window end: close open trades at this candle's open, cancel unfilled limits.
+    if ptTrades.size() > 0
+        for i = ptTrades.size() - 1 to 0
+            PtTrade tf = ptTrades.get(i)
+            bool winEnd = pts_win_on and tf.win > 0 and (tf.filled ? not f_inHold(tf.win) : not f_inTrade(tf.win))
+            if ptSessEnd or winEnd
+                if tf.filled
+                    f_ptClose(tf, (open - tf.entry) * tf.side)
+                else
+                    f_ptAdd(tf.setup, 6, 1)
+                ptTrades.remove(i)
+    // 1. Manage open trades and pending limits (only trades from earlier candles)
+    if ptTrades.size() > 0
+        for i = ptTrades.size() - 1 to 0
+            PtTrade t = ptTrades.get(i)
+            if bar_index > t.bar0
+                bool exitSig = t.side == 1 ? ((ptUseExit and evExitL) or fDown) : ((ptUseExit and evExitS) or fUp)
+                if not t.filled
+                    bool touch = t.side == 1 ? low <= t.lvl - ptThru : high >= t.lvl + ptThru
+                    if touch
+                        if not f_dayOk(t.setup, t.win)
+                            f_ptAdd(t.setup, 6, 1)
+                            ptTrades.remove(i)
+                        else if not f_ptOpen(t, t.side == 1 ? math.min(open, t.lvl) : math.max(open, t.lvl))
+                            ptTrades.remove(i)
+                        else if f_ptFirst(t, exitSig)
+                            ptTrades.remove(i)
+                    else if exitSig
+                        f_ptAdd(t.setup, 6, 1)
+                        ptTrades.remove(i)
+                else
+                    float fav = t.side == 1 ? high - t.entry : t.entry - low
+                    float adv = t.side == 1 ? t.entry - low : high - t.entry
+                    t.mae := math.max(t.mae, adv)
+                    t.mfe := math.max(t.mfe, fav)
+                    if not na(t.stopPx) and (t.side == 1 ? low <= t.stopPx : high >= t.stopPx)
+                        float xp = t.side == 1 ? math.min(open, t.stopPx) : math.max(open, t.stopPx)
+                        f_ptClose(t, (xp - t.entry) * t.side)
+                        ptTrades.remove(i)
+                    else if exitSig
+                        f_ptClose(t, (close - t.entry) * t.side)
+                        ptTrades.remove(i)
+                    else
+                        t.favPre := math.max(t.favPre, fav)
+    while ptTrades.size() > PT_MAX
+        ptTrades.shift()
+
+    // 2. New entries from this candle's signals
+    if fUp or fDown
+        int  ptSd = fUp ? 1 : -1
+        bool ptBc = fUp ? isBuX : isBeX
+        f_ptMarket(0, ptSd, close)
+        f_ptLimit(1, ptSd, stPrev)
+        f_ptLimit(ptBc ? 2 : 3, ptSd, open)
+    if evRejSide != 0
+        f_ptMarket(4, evRejSide, close)
+    if f_ptOk(5, pxT50Side) and not na(pxT50Px)
+        PtTrade t50 = PtTrade.new(5, pxT50Side, pxT50Px, false, na, na, 0.0, 0.0, 0.0, bar_index, winNow, na)
+        bool thru50 = pxT50Side == 1 ? low <= pxT50Px - ptThru : high >= pxT50Px + ptThru
+        if thru50
+            if f_ptOpen(t50, pxT50Side == 1 ? math.min(open, pxT50Px) : math.max(open, pxT50Px))
+                if not f_ptFirst(t50, false)
+                    ptTrades.push(t50)
+        else
+            ptTrades.push(t50)
+    if pxRejSide != 0
+        f_ptMarket(6, pxRejSide, close)
+    if pxRsmSide != 0
+        f_ptMarket(7, pxRsmSide, close)
+    if pxGmcSide != 0
+        f_ptMarket(8, pxGmcSide, close)
+    if pxBrkSide != 0
+        f_ptMarket(9, pxBrkSide, close)
+        f_ptLimit(10, pxBrkSide, pxBrkPx)
+        // The RE-ENTRY 50% line is gone once the box breaks: cancel an unfilled 50% limit (counted as MISSED).
+        if ptTrades.size() > 0
+            for i = ptTrades.size() - 1 to 0
+                PtTrade tp = ptTrades.get(i)
+                if tp.setup == 5 and not tp.filled and tp.side == pxBrkSide
+                    f_ptAdd(5, 6, 1)
+                    ptTrades.remove(i)
+
+// ─── Bu GMC / Be GMC Lines ───
+var float buGmcPx = na
+var int   buGmcT  = na
+var float beGmcPx = na
+var int   beGmcT  = na
+bool buGmcBroken = false
+bool beGmcBroken = false
+if barstate.isconfirmed
+    if not na(buGmcPx) and close < buGmcPx
+        buGmcPx     := na
+        buGmcT      := na
+        buGmcBroken := true
+    if not na(beGmcPx) and close > beGmcPx
+        beGmcPx     := na
+        beGmcT      := na
+        beGmcBroken := true
+    if buGmcConf
+        buGmcPx := open[1]
+        buGmcT  := time[1]
+    if beGmcConf
+        beGmcPx := open[1]
+        beGmcT  := time[1]
+
+bool evUpBreak = evCdl or evLd or fUp or evGateUp or beGmcBroken
+bool evDnBreak = evCds or evSd or fDown or evGateDn or buGmcBroken
+
+// ─── Plots ───
+plot(show_vwap ? vwap_val : na, "VWAP", color=vwCol, linewidth=vw_width)
+plot(show_st ? stShow : na, "SuperTrend", color=stUpShow ? col_bull : col_bear, style=plot.style_stepline, linewidth=st_width)
+
+// ─── Candle Coloring ───
+color barCol = na
+if barstate.isconfirmed
+    if fsTrend == 1
+        if stUp
+            barCol := close > vwap_val ? col_bull : color.new(col_bull, 55)
+        else
+            bool pastGate = not na(gatePx) and close > gatePx
+            barCol := pastGate ? color.new(col_pb, 55) : col_pb
+    else if fsTrend == -1
+        if not stUp
+            barCol := close < vwap_val ? col_bear : color.new(col_bear, 55)
+        else
+            bool pastGate = not na(gatePx) and close < gatePx
+            barCol := pastGate ? color.new(col_pb, 55) : col_pb
+
+bool buGmcPaint = gmc_bars and buGmcConf and (evUpBreak or evUpBreak[1] or evUpBreak[2])
+bool beGmcPaint = gmc_bars and beGmcConf and (evDnBreak or evDnBreak[1] or evDnBreak[2])
+
+color prevCol = barCol[1]
+if buGmcPaint[1]
+    prevCol := col_gmc_bull
+else if beGmcPaint[1]
+    prevCol := col_gmc_bear
+if buGmcPaint
+    prevCol := col_gmc_bull
+else if beGmcPaint
+    prevCol := col_gmc_bear
+barcolor(color_bars ? prevCol : na, offset=-1, title="Candles")
+
+// ─── BULL / BEAR Arrows ───
+bool bullAlign = fsTrend == 1 and stUp and close > vwap_val and not stallOn
+bool bearAlign = fsTrend == -1 and not stUp and close < vwap_val and not stallOn
+var bool bullArmed = false
+var bool bearArmed = false
+if barstate.isconfirmed
+    if not bullAlign
+        bullArmed := false
+    if not bearAlign
+        bearArmed := false
+    if bullAlign and not bullAlign[1]
+        bullArmed := true
+    if bearAlign and not bearAlign[1]
+        bearArmed := true
+bool bullArrow = barstate.isconfirmed and bullAlign and bullArmed and close > high[1]
+bool bearArrow = barstate.isconfirmed and bearAlign and bearArmed and close < low[1]
+if bullArrow
+    bullArmed := false
+if bearArrow
+    bearArmed := false
+
+var array<label> arrowLbls = array.new<label>()
+if show_sigs and bullArrow
+    arrowLbls.push(label.new(bar_index, low, "BULL", yloc=yloc.belowbar, style=label.style_triangleup, color=col_bull, textcolor=col_bull, size=size.tiny))
+if show_sigs and bearArrow
+    arrowLbls.push(label.new(bar_index, high, "BEAR", yloc=yloc.abovebar, style=label.style_triangledown, color=col_bear, textcolor=col_bear, size=size.tiny))
+while arrowLbls.size() > 40
+    label.delete(arrowLbls.shift())
+
+// ─── Drawing ───
+var array<line>    drLines  = array.new<line>()
+var array<label>   drLabels = array.new<label>()
+var array<box>     drBoxes  = array.new<box>()
+var array<EdgeLvl> rGroups  = array.new<EdgeLvl>()
+
+f_add_level(float p, string txt, color c, int w, string st, int b, int e, int prio, string sz) =>
+    bool found = false
+    if rGroups.size() > 0
+        for g in rGroups
+            if math.abs(g.price - p) <= f_eps()
+                found := true
+                if str.length(txt) > 0 and g.labels.indexof(txt) == -1
+                    g.labels.push(txt)
+                g.bT := math.min(g.bT, b)
+                g.eT := math.max(g.eT, e)
+                if prio > g.prio
+                    g.col   := c
+                    g.width := w
+                    g.style := st
+                    g.prio  := prio
+                    g.sz    := sz
+                break
+    if not found
+        array<string> lb = array.new<string>()
+        if str.length(txt) > 0
+            lb.push(txt)
+        rGroups.push(EdgeLvl.new(p, lb, c, w, st, b, e, prio, sz))
+
+f_draw_groups() =>
+    if rGroups.size() > 0
+        for g in rGroups
+            drLines.push(line.new(g.bT, g.price, g.eT, g.price, xloc=xloc.bar_time, color=g.col, width=g.width, style=g.style))
+            drLabels.push(label.new(g.eT, g.price, g.labels.join(" & "), xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.white, 100), textcolor=g.col, size=g.sz))
+    rGroups.clear()
+
+f_drawLvl(Lvl l, string txt, color c, string lstyle, int lwidth, int tR, int prio) =>
+    float trig = f_trig(l)
+    float zTop = math.max(l.outer, l.inner)
+    float zBot = math.min(l.outer, l.inner)
+    if show_boxes and zTop > zBot
+        drBoxes.push(box.new(l.t, zTop, tR, zBot, xloc=xloc.bar_time, border_color=na, bgcolor=color.new(c, box_transp)))
+    if show_struct
+        f_add_level(trig, txt, c, lwidth, lstyle, l.t, tR, prio, lbl_sz)
+    if show_stems and not na(l.anchor)
+        float edge = l.side == -1 ? zBot : zTop
+        bool  gap  = l.side == -1 ? l.anchor < edge : l.anchor > edge
+        if gap
+            drLines.push(line.new(l.t, l.anchor, l.t, edge, xloc=xloc.bar_time, color=c, width=1, style=line.style_dotted))
+    if show_marks and str.length(l.cTxt) > 0 and not na(l.cPrice) and not na(l.cT)
+        color mc = l.side == 1 ? col_bull : col_bear
+        drLines.push(line.new(l.cT, l.cPrice, l.cBrkT, l.cPrice, xloc=xloc.bar_time, color=mc, width=1, style=line.style_solid))
+        drLabels.push(label.new(math.round((l.cT + l.cBrkT) / 2), l.cPrice, lbl_prefix + l.cTxt, xloc=xloc.bar_time, style=l.side == 1 ? label.style_label_down : label.style_label_up, color=color.new(color.white, 100), textcolor=mc, size=lbl_sz))
+

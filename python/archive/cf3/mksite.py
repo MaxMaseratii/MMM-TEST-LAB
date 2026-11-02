@@ -57,13 +57,39 @@ tr.grp td{background:var(--soft,rgba(160,120,0,.08));padding-top:10px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}@media(max-width:760px){.grid2{grid-template-columns:1fr}}
 .card ul{margin:6px 0 0 18px;padding:0}.card li{margin:4px 0}
 </style></head><body>
-<nav aria-label="Sections"><b>CLAIMS vs RESULTS</b><a href="#verdict">Verdict</a><a href="#board">Leaderboard</a><a href="#recheck">Transcript re-check</a><a href="#money">The account machine</a><a href="#trader">Each trader</a><a href="#insights">Insights</a><a href="#method">Method</a></nav>
+<nav aria-label="Sections"><b>CLAIMS vs RESULTS</b><a href="#verdict">Verdict</a><a href="#board">Leaderboard</a><a href="#payouts">Their payouts</a><a href="#recheck">Transcript re-check</a><a href="#money">The account machine</a><a href="#trader">Each trader</a><a href="#insights">Insights</a><a href="#method">Method</a></nav>
 <main>
 <section id="verdict"><h1>They claim millions.<br>Their rules don't show an edge.</h1>
 <p class="lede" id="ledeText"></p><div class="kpis" id="kpis"></div><div class="cards" id="topcards"></div></section>
 <section id="board"><h2>Leaderboard: claim vs their own rules</h2>
 <p class="legend">Each row is the trader's own rule, coded from their page / episode, on NQ (2022–25 = P1, 2026 = P2). avg RR = average result in R after costs; WR = win rate; t-score 2+ in both periods = PASS. "Random" = the same trades at a random time that day. Click a row for everything about that trader.</p>
 <div class="grid"><table><thead><tr><th class="l">Trader</th><th class="l">Their claim</th><th class="l">Their rule (headline)</th><th class="g">P1 trades</th><th>WR</th><th>avg RR</th><th>t</th><th class="g">P2 trades</th><th>WR</th><th>avg RR</th><th>t</th><th class="g">Combos tested</th><th>PASS</th><th>Random PASS</th><th class="g l">Verdict</th></tr></thead><tbody id="boardBody"></tbody></table></div></section>
+<section id="payouts"><h2>How to understand their payouts</h2>
+<p class="lede">Their payouts are probably real. But a real payout does not prove the setup they teach makes money. Here is how both can be true, using their own words from the episodes and two simulations.</p>
+<div class="cards">
+<div class="card key"><h3>What "verified" checks</h3><p>Chart Fanatics says it features "traders with verified results" but does not say how it checks them. A payout is real money, but it is the total from <b>many accounts</b>. It does not subtract the evaluations they bought, and it does not test the setup on the video. The same homepage carries an Apex "90% off, code CF" affiliate link.</p><p class="small"><a href="https://www.chartfanatics.com/" target="_blank" rel="noopener">source</a></p></div>
+<div class="card key"><h3>What they do differently (their own words)</h3><ul>
+<li><b>Many accounts.</b> Apex allows 20, all copied with one click. Kane says he bought about 500 accounts; JJ Simon about 2,200 evaluations.</li>
+<li><b>Tiny, strict losses.</b> Okala always uses a 10 pt stop. Kane moves to break-even fast. Fabio has a daily max loss.</li>
+<li><b>Bigger size when it works.</b> Okala: "if you're hot, step on the gas." Kane rides news days (an $8k day on a 25k account). Fabio adds 3–4 positions on trend days.</li>
+<li><b>Things the video does not show.</b> Kane: "the discretion is my edge." Fabio reads order-book (MBO) data and says his model is not a standalone strategy. Candle data cannot test either.</li></ul></div>
+<div class="card key"><h3>The surprise: the prop deal itself pays</h3><p>1,000 make-believe traders with <b>no edge</b>: 1 coin-flip trade a day (1:2, avg RR −0.05 after costs), copied onto 20 Apex-like accounts for 2 years ($25 eval + $79 activation, $2,000 payout cap, 6 payouts per account, rebuy when blown).</p><ul>
+<li>Median payouts: <b>$96,000</b>. Luckiest 1%: <b>$392,000</b>.</li>
+<li>80% ended up ahead after paying for evaluations.</li>
+<li>Why: a blown account costs about $104, but a funded one can pay up to $12,000. Like a lottery ticket priced too low. The edge is in the account rules, not the chart.</li></ul></div>
+</div>
+<h3 style="margin-top:18px">Discipline is the real line</h3>
+<p class="small mu">Same simulation, 20 accounts, 1 trade a day, sloppier trading.</p>
+<div class="grid" style="max-width:640px"><table><thead><tr><th class="l">avg RR per trade</th><th>Median net (20 accounts)</th><th>Traders ahead</th></tr></thead><tbody>
+<tr><td class="l">−0.05 (strict losses)</td><td class="pos">+$65,000</td><td>80%</td></tr>
+<tr><td class="l">−0.15</td><td class="neg">−$2,310</td><td>48%</td></tr>
+<tr><td class="l">−0.30 (typical losing trader)</td><td class="neg">−$29,200</td><td>10%</td></tr></tbody></table></div>
+<p>That fits the industry numbers: only 4–7% of prop buyers ever get paid. The guests are the ones who keep every loss small and run many accounts.</p>
+<div class="cards">
+<div class="card"><h3>A 10x month can be luck</h3><p>The host says Kane took $130k to $1.4M in about a month. With no edge, risking 15% of the balance per trade at 1:2, about <b>1 trader in 200</b> does that in a month — and 62% lose half. When thousands try, a few always make it, and those are the ones invited on the show.</p></div>
+<div class="card"><h3>What you can copy</h3><p>Their <b>risk control</b> and the <b>many-accounts</b> approach. Their entries showed no edge when tested on their own. Adding size into winners (Fabio and Okala both do it) is not tested yet.</p></div>
+<div class="card"><h3>Limits of this model</h3><p>The prop model is simpler than the real rules. Real firms add consistency rules and payout reviews, so real numbers would be lower — and firms like Apex keep tightening caps for this reason.</p></div>
+</div></section>
 <section id="recheck"><h2>Re-checked from the full transcripts: Kane, Okala, Fabio</h2>
 <p class="lede">Max supplied the full episode transcripts. Each model was re-coded from the trader's own words (quotes and timestamps below), then re-tested with every entry × stop × target × exit, a random twin for every trade, and Max's fixed 50 pt 1:2 stop. P1 = NQ 2022–25, P2 = MNQ 2026 (Kane with ES: the two halves of 2026). PASS = t-score 2+ in both periods with 30+ trades each.</p>
 <div id="rcBody"></div></section>

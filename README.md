@@ -2,7 +2,7 @@
 
 Test any simple trading idea in your browser, with Max's testing rules built in.
 
-**Open it:** https://maxmaseratii.github.io/mmm-test-lab/
+**Open it:** https://maxmaseratii.github.io/MMM-TEST-LAB/
 
 ## How to use it
 1. **Pick a market and chart:** NQ / MNQ, ES / MES, gold or crude, on 1m to 4h.

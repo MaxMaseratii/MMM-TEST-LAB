@@ -76,3 +76,7 @@ Commit and push. The page updates by itself.
 ```bash
 python -m http.server 8000      # in this folder, then open http://localhost:8000
 ```
+
+## Claims vs results
+
+`claims/index.html` — 21 Chart Fanatics futures strategies coded and tested against their claims, plus the multi-account prop simulator. Live at https://maxmaseratii.github.io/MMM-TEST-LAB/claims/ once Pages is on. Scripts: `python/archive/cf` and `python/archive/cf2`.

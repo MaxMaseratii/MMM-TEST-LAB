@@ -438,3 +438,13 @@ Xpander Block (XB) and GMU ladder tests: zones, range trades, box direction, CDL
 |---|---|
 | MMM_Order_Flow_Suite_3.4.pine | Pine file |
 | build_sheet.py | script |
+
+## cf/
+Chart Fanatics strategies (Fabio Valentini, JJ Simon, Candace Lau, Dhesi, Okala, Marci Silfrain) coded and tested against their claims (Nov 2 2026).
+
+| File | What it does |
+|---|---|
+| cf/cfstrat.py | Signal rules for all six strategies |
+| cf/cfrun.py | Runs every entry x stop x target x exit with random twins |
+| cf/cfagg.py | Claims-vs-test summaries |
+| cf/Chart_Fanatics_Strategy_Check.md | Doc: results and verdict |

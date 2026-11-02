@@ -6,7 +6,9 @@ trades(d, sig, market, entries, stops, targets, exits, end=...)  pairs EVERY ent
    entries : 'market' (signal close) or ('limit', col) = limit at sig[col], must fill within `fill` bars.
    stops   : 'fixed' (SPEC stop: NQ 50 / ES 20 / GC 12) | ('col', name) price column in sig | ('atr', k) k x ATR | ('pts', x)
    targets : R multiples (1, 2, 3 ...), None = no target, or ('col', name) a price column.
-   exits   : 'stop/target' | ('flip', arr) exit at the close of bar where arr is True (e.g. next flip) | ('time', minutes_of_day).
+   exits   : 'stop/target' | ('flip', arr) exit at the close of bar where arr is True (e.g. next flip) | ('time', minutes_of_day)
+             | ('half', r1) half off at r1 x risk, stop to break-even on the rest, runner to the target (None = to the end)
+             | ('half_time', r1, minute) the same, everything out at minute of day.
    Every trade gets a RANDOM twin: same side, same stop size, same target in R, random bar in the same window (r_rand).
    Same-candle stop and target = stop wins. Cost per trade from SPEC.
 table(T, by)   stats per group and period: n, WR (win rate), avg RR, PF (profit factor), t-score, random avg RR.
@@ -29,6 +31,33 @@ def sim(o, h, l, c, i, s, ep, stop, tgt, jEnd, cost, flip):
             return (s * (px - ep) - cost) / risk, j
         if tgt == tgt and ((s == 1 and h[j] >= tgt) or (s == -1 and l[j] <= tgt)):
             return (s * (tgt - ep) - cost) / risk, j
+        if flip[j]:
+            return (s * (c[j] - ep) - cost) / risk, j
+    return (s * (c[jEnd] - ep) - cost) / risk, jEnd
+
+
+@njit(cache=True)
+def sim_half(o, h, l, c, i, s, ep, stop, r1, tgt, jEnd, cost, flip):
+    """half off at r1 x risk, stop to break-even on the other half, runner to tgt (nan = none) / flip / jEnd. returns (R, exit bar)."""
+    risk = s * (ep - stop)
+    if risk <= 0: return np.nan, i
+    t1 = ep + s * r1 * risk
+    for j in range(i + 1, jEnd + 1):
+        if (s == 1 and l[j] <= stop) or (s == -1 and h[j] >= stop):
+            px = min(o[j], stop) if s == 1 else max(o[j], stop)
+            return (s * (px - ep) - cost) / risk, j
+        if (s == 1 and h[j] >= t1) or (s == -1 and l[j] <= t1):
+            if tgt == tgt and ((s == 1 and h[j] >= tgt) or (s == -1 and l[j] <= tgt)):
+                return (0.5 * r1 * risk + 0.5 * s * (tgt - ep) - cost) / risk, j
+            for k in range(j + 1, jEnd + 1):
+                if (s == 1 and l[k] <= ep) or (s == -1 and h[k] >= ep):
+                    px = min(o[k], ep) if s == 1 else max(o[k], ep)
+                    return (0.5 * r1 * risk + 0.5 * s * (px - ep) - cost) / risk, k
+                if tgt == tgt and ((s == 1 and h[k] >= tgt) or (s == -1 and l[k] <= tgt)):
+                    return (0.5 * r1 * risk + 0.5 * s * (tgt - ep) - cost) / risk, k
+                if flip[k]:
+                    return (0.5 * r1 * risk + 0.5 * s * (c[k] - ep) - cost) / risk, k
+            return (0.5 * r1 * risk + 0.5 * s * (c[jEnd] - ep) - cost) / risk, jEnd
         if flip[j]:
             return (s * (c[j] - ep) - cost) / risk, j
     return (s * (c[jEnd] - ep) - cost) / risk, jEnd
@@ -59,6 +88,7 @@ def trades(d, sig, market, entries=('market',), stops=('fixed',), targets=(2,), 
     W1 = E if window is None else np.asarray(window[1], np.int64)
     rng = np.random.default_rng(seed)
     nofl = np.zeros(n, np.bool_)
+    mn = d.index.hour.values * 60 + d.index.minute.values
     rows = []
     tags = [k for k in sig.columns if k not in ('i', 's')]
     for k in range(len(I)):
@@ -86,14 +116,20 @@ def trades(d, sig, market, entries=('market',), stops=('fixed',), targets=(2,), 
                     else: tp = ep + s * tg * risk
                     if np.isfinite(tp) and s * (tp - ep) <= 0: continue
                     for ex in exits:
-                        fl = nofl if ex == 'stop/target' else (ex[1] if ex[0] == 'flip' else nofl)
-                        jEnd = jE
-                        if isinstance(ex, tuple) and ex[0] == 'time':
-                            mn = d.index.hour.values * 60 + d.index.minute.values
-                            later = np.where(mn[fi + 1:jE + 1] >= ex[1])[0]
-                            jEnd = fi + 1 + later[0] if len(later) else jE
-                        r, jx = sim(o, h, l, c, fi, s, ep, sl, tp, jEnd, sp['cost'], fl)
-                        rr, _ = sim(o, h, l, c, rj, s, c[rj], c[rj] - s * risk, np.nan if not np.isfinite(tp) else c[rj] + (tp - ep), max(rj + 1, jEnd), sp['cost'], fl)
+                        fl = ex[1] if isinstance(ex, tuple) and ex[0] == 'flip' else nofl
+                        tmin = ex[1] if isinstance(ex, tuple) and ex[0] == 'time' else ex[2] if isinstance(ex, tuple) and ex[0] == 'half_time' else None
+                        def _end(a):
+                            if tmin is None: return jE
+                            later = np.where(mn[a + 1:jE + 1] >= tmin)[0] if mn[a] < tmin else np.where((mn[a + 1:jE + 1] >= tmin) & (mn[a + 1:jE + 1] < mn[a]))[0]
+                            return a + 1 + later[0] if len(later) else jE
+                        jEnd = _end(fi); rEnd = max(rj + 1, _end(rj))
+                        rtp = np.nan if not np.isfinite(tp) else c[rj] + (tp - ep)
+                        if isinstance(ex, tuple) and ex[0] in ('half', 'half_time'):
+                            r, jx = sim_half(o, h, l, c, fi, s, ep, sl, float(ex[1]), tp, jEnd, sp['cost'], fl)
+                            rr, _ = sim_half(o, h, l, c, rj, s, c[rj], c[rj] - s * risk, float(ex[1]), rtp, rEnd, sp['cost'], fl)
+                        else:
+                            r, jx = sim(o, h, l, c, fi, s, ep, sl, tp, jEnd, sp['cost'], fl)
+                            rr, _ = sim(o, h, l, c, rj, s, c[rj], c[rj] - s * risk, rtp, rEnd, sp['cost'], fl)
                         row = dict(te=d.index[fi], tx=d.index[jx], s=s, entry=_name(en), stop=_name(st), target=_name(tg) if tg is not None else 'none',
                                    exit=_name(ex), r=r, r_rand=rr, risk=risk)
                         for t in tags: row[t] = sig[t].values[k]
